@@ -1,38 +1,214 @@
+use clap::{Parser, Subcommand};
 use lictor::{config, content, engine, hook::HookInput, minify, rules};
+use serde_json::Value;
 use std::io::{IsTerminal, Read};
 
+#[derive(Parser)]
+#[command(
+    name = "lictor",
+    version,
+    about = "policy gate + output minifier for coding-agent tool calls",
+    after_help = "Run `lictor init` to wire it into Claude Code. \
+                  Bare `lictor` with piped stdin acts as `hook`."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Read a hook JSON event on stdin and emit the decision (how Claude Code calls it)
+    Hook,
+    /// Validate every config file lictor can find; `check -- <cmd...>` runs a command
+    /// through the full hook pipeline: prints the decision, asks y/N where the hook
+    /// would prompt, executes, and shows the output the model would see (minify/spill
+    /// applied). Quote to keep $vars/pipes: `lictor check -- 'cargo test | tail'`
+    Check {
+        /// Command to gate + run + minify (everything after --)
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Print the settings.json hooks snippet
+    Init {
+        /// Also write a starter lictor.toml
+        #[arg(long)]
+        write: bool,
+    },
+    /// Summarize the audit log (decisions + minify/spill bytes saved)
+    Gain,
+}
+
 fn main() {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
+    let cli = Cli::parse();
+    match cli.command {
         // bare `lictor` in a terminal has no hook JSON to read — show usage instead
         // of silently blocking on stdin. When Claude Code invokes it, stdin is a pipe.
-        None if std::io::stdin().is_terminal() => usage(),
-        None | Some("hook") => run_hook(),
-        Some("check") => check(),
-        Some("init") => init(),
-        Some("gain") => gain(),
-        Some("-V" | "--version" | "version") => println!("lictor {}", env!("CARGO_PKG_VERSION")),
-        Some("-h" | "--help" | "help") => usage(),
-        Some(other) => {
-            eprintln!("lictor: unknown command `{other}` (expected: hook, check, init, gain)");
-            std::process::exit(1);
+        None if std::io::stdin().is_terminal() => {
+            use clap::CommandFactory;
+            let _ = Cli::command().print_help();
         }
+        None | Some(Cmd::Hook) => run_hook(),
+        Some(Cmd::Check { command }) if !command.is_empty() => check_command(command),
+        Some(Cmd::Check { .. }) => check(),
+        Some(Cmd::Init { write }) => init(write),
+        Some(Cmd::Gain) => gain(),
     }
 }
 
-fn usage() {
-    println!(
-        "lictor — policy gate + output minifier for coding-agent tool calls
+// the y/N permission prompt, mimicking what the agent harness would show.
+// No tty means nobody can approve — refuse, so `lictor check -- X` inside a hook
+// (where the gate allows it for debugging) can't become an execution bypass.
+fn prompt_approval() -> bool {
+    use std::io::Write;
+    if !std::io::stdin().is_terminal() {
+        eprintln!("lictor: stdin is not a tty — nobody to approve; run it from a terminal");
+        return false;
+    }
+    eprint!("lictor: run it? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes")
+}
 
-Usage: lictor <command>
+// re-quote an argv word so the reconstructed command round-trips through sh -c
+fn quote(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_alphanumeric() || "-_./=:@%+,".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
 
-  hook    read a hook JSON event on stdin and emit the decision (how Claude Code calls it)
-  check   validate every config file lictor can find
-  init    print the settings.json hooks snippet (--write to also scaffold lictor.toml)
-  gain    summarize the audit log (decisions + minify/spill bytes saved)
+// `check -- <cmd...>`: run one command through the same PreToolUse -> exec ->
+// PostToolUse pipeline the hooks use, narrating decisions on stderr. The
+// model-visible output (post minify/spill) lands on stdout; exit code propagates.
+fn check_command(args: Vec<String>) {
+    if args.is_empty() {
+        eprintln!("lictor: check -- needs a command, e.g. `lictor check -- git commit -m x`");
+        std::process::exit(1);
+    }
+    let command = if args.len() == 1 {
+        args[0].clone()
+    } else {
+        args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+    };
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
+    let mut config = match config::load(cwd.as_deref()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("lictor: config error: {error}");
+            std::process::exit(1);
+        }
+    };
+    // debug runs don't pollute the audit log (and session_id=None skips strikes)
+    config.settings.log_file = None;
 
-Run `lictor init` to wire it into Claude Code. Bare `lictor` with piped stdin acts as `hook`."
-    );
+    let input = HookInput {
+        hook_event_name: "PreToolUse".to_string(),
+        tool_name: "Bash".to_string(),
+        tool_input: serde_json::json!({ "command": command }),
+        tool_response: None,
+        error: None,
+        cwd: cwd.clone(),
+        session_id: None,
+        duration_ms: None,
+    };
+    let mut final_command = command.clone();
+    let mut decision = None;
+    match engine::evaluate(&input, &config) {
+        Some(output) => {
+            let out = &output.hook_specific_output;
+            decision = out.permission_decision.clone();
+            if let Some(d) = &out.permission_decision {
+                match &out.permission_decision_reason {
+                    Some(reason) => eprintln!("lictor: {d} — {reason}"),
+                    None => eprintln!("lictor: {d}"),
+                }
+            }
+            if let Some(updated) = &out.updated_input
+                && let Some(rewritten) = updated.get("command").and_then(Value::as_str)
+            {
+                eprintln!("lictor: rewrite → {rewritten}");
+                final_command = rewritten.to_string();
+            }
+            if let Some(hint) = &out.additional_context {
+                eprintln!("lictor: hint — {hint}");
+            }
+        }
+        None => eprintln!("lictor: no opinion — the normal permission flow would decide"),
+    }
+    match decision.as_deref() {
+        Some("deny") => std::process::exit(1),
+        Some("allow") => {}
+        // ask, or no opinion: mimic the permission prompt
+        _ => {
+            if !prompt_approval() {
+                eprintln!("lictor: not approved — command not run");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    eprintln!("lictor: exec: {final_command}");
+    let started = std::time::Instant::now();
+    let result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&final_command)
+        .output();
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("lictor: exec failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+
+    let post = HookInput {
+        hook_event_name: "PostToolUse".to_string(),
+        tool_name: "Bash".to_string(),
+        tool_input: serde_json::json!({ "command": final_command }),
+        tool_response: Some(serde_json::json!({ "stdout": stdout, "stderr": stderr })),
+        error: None,
+        cwd,
+        session_id: None,
+        duration_ms: Some(duration_ms),
+    };
+    let mut shown = stdout;
+    if let Some(output) = engine::evaluate(&post, &config) {
+        let out = &output.hook_specific_output;
+        if let Some(updated) = &out.updated_tool_output
+            && let Some(minified) = updated.get("stdout").and_then(Value::as_str)
+        {
+            eprintln!(
+                "lictor: output shrunk {} → {} bytes",
+                shown.len(),
+                minified.len()
+            );
+            shown = minified.to_string();
+        }
+        if let Some(hint) = &out.additional_context {
+            eprintln!("lictor: hint — {hint}");
+        }
+    }
+    print!("{shown}");
+    if !shown.is_empty() && !shown.ends_with('\n') {
+        println!();
+    }
+    eprint!("{stderr}");
+    std::process::exit(result.status.code().unwrap_or(1));
 }
 
 fn gain() {
@@ -78,11 +254,12 @@ fn run_hook() {
 fn check() {
     let cwd = std::env::current_dir().ok();
     let cwd = cwd.as_ref().and_then(|p| p.to_str());
+    let mut found = false;
     for path in config::config_paths(cwd) {
         if !path.exists() {
-            println!("absent   {}", path.display());
             continue;
         }
+        found = true;
         let loaded = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
             .and_then(|raw| toml::from_str::<config::Config>(&raw).map_err(|e| e.to_string()))
@@ -106,6 +283,9 @@ fn check() {
             }
         }
     }
+    if !found {
+        println!("no config files found (user config + ancestor lictor.toml chain)");
+    }
     match config::load(cwd) {
         Ok(config) => {
             if !config.activated_catalogs.is_empty() {
@@ -125,8 +305,8 @@ fn check() {
     }
 }
 
-fn init() {
-    if std::env::args().nth(2).as_deref() == Some("--write") {
+fn init(write: bool) {
+    if write {
         let target = std::path::Path::new("lictor.toml");
         if target.exists() {
             println!("lictor.toml already exists — not overwriting\n");

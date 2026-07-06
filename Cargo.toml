@@ -1,6 +1,6 @@
 [package]
 name = "lictor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Policy gate for coding-agent tool calls — one binary in Claude Code's PreToolUse/PostToolUse hooks, configured in TOML. Walks in front of every tool call and stops the ones that shouldn't pass."
 license = "MIT"
@@ -13,6 +13,7 @@ regex = "1"
 globset = "0.4"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
+clap = { version = "4.6.1", features = ["derive"] }
 
 # Strict lints. `cargo clippy --all-targets` fails on any clippy::all finding
 # (correctness + suspicious + style + complexity + perf). No pedantic/idiom groups:

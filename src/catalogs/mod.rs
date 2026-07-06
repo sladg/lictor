@@ -20,6 +20,8 @@ const READ_CATALOGS: &[(&str, Option<Action>)] = &[
     ("tf-read", None),
     ("svc-read", None),
     ("pkg-query", None),
+    ("kv-cache", None),
+    ("search-nudge", None),
 ];
 
 const RECOMMENDED_EXTRA: &[(&str, Option<Action>)] = &[

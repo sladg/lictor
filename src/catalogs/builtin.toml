@@ -14,7 +14,23 @@ match = ["ls", "tree", "eza", "stat", "file", "du", "df", "realpath", "readlink"
 
 [catalog.text-read]
 action = "allow"
-match = ["cat", "head", "tail", "nl", "less", "more", "strings", "od", "xxd", "grep", "rg", "sort", "uniq", "cut", "tr", "diff", "cmp", "wc", "jq", "yq"]
+match = ["cat", "head", "tail", "nl", "less", "more", "strings", "od", "xxd", "grep", "rg", "sort", "uniq", "cut", "tr", "diff", "cmp", "wc", "jq", "yq", "sed"]
+
+# all kv-cache operations; pairs with settings.spill_command — lictor itself tells
+# the agent to retrieve spilled output via `kv get <key>` (and CLAUDE.md-style
+# workflows pipe straight into `kv set`), so gating any of get/set/list/delete
+# just trades one prompt for another on lictor's own recommended workflow. It's
+# a disposable local cache, not a source of truth — low blast radius either way.
+[catalog.kv-cache]
+action = "allow"
+match = ["kv"]
+
+# nudge toward `rg` for content search / file discovery; warn-only, grants no permission —
+# grep and sed(non -i) stay allowed via text-read, find stays ask (no catalog covers it)
+[catalog.search-nudge]
+action = "warn"
+hint = "lictor: prefer `rg` (content search) / `rg --files` (file discovery) over grep/find/sed — respects .gitignore, faster, one tool for both jobs"
+match = ["grep", "find", "sed"]
 
 [catalog.sysinfo]
 action = "allow"
@@ -92,6 +108,11 @@ match = ["curl", "wget", "http", "https", "nc", "ncat", "telnet"]
 action = "ask"
 reason = "Filesystem mutation."
 match = ["rm", "mv", "cp", "ln", "mkdir", "rmdir", "touch", "chmod", "chown", "tee", "truncate"]
+# sed is a text-read reader by default; -i turns it into an in-place edit, which
+# should ask like any other mutation (and not silently ride text-read's allow)
+[[catalog.mutating.rules]]
+match = ["sed"]
+contains = ["-i*"]
 
 [catalog.pkg-install]
 action = "ask"
@@ -109,7 +130,7 @@ match = [
 action = "deny"
 reason = "Reading secret material is banned."
 [[catalog.secrets-read.rules]]
-match = ["cat", "less", "more", "head", "tail", "bat", "strings", "od", "xxd", "grep", "rg"]
+match = ["cat", "less", "more", "head", "tail", "bat", "strings", "od", "xxd", "grep", "rg", "sed"]
 contains = ["*.env*", "*.pem", "*.key", "*id_rsa*", "*id_ed25519*", "*id_ecdsa*", "*.aws/credentials*", "*.ssh/*", "*.npmrc", "*.netrc", "*.kube/config*"]
 
 [catalog.destructive]

@@ -10,12 +10,13 @@ modules → `src/modules/`, settings → `src/config.rs`.
 
 ## How config loads
 
-Files are read and merged **user → project** (later wins per key; a project can override your
-global defaults):
+Files are read and merged **user → ancestors → cwd** (later wins per key; a project can
+override your global defaults). Every directory from the filesystem root down to cwd is
+checked, so a monorepo root config applies in every package dir:
 
 1. `~/.config/lictor/config.toml` (or `$XDG_CONFIG_HOME/lictor/config.toml`)
-2. `<cwd>/.claude/lictor.toml`
-3. `<cwd>/lictor.toml`
+2. `<dir>/.claude/lictor.toml` then `<dir>/lictor.toml`, for each ancestor dir, root-most first
+3. the same pair in `<cwd>` itself, last (deepest wins per key)
 
 `lictor init` writes a starter `lictor.toml` (the shipped [`src/default.toml`](../src/default.toml)).
 
@@ -74,7 +75,7 @@ reason = "production surface — confirm"
 |---|---|---|
 | `shell-core` | allow | `echo printf read cd true false test [ : seq sleep` |
 | `fs-read` | allow | `ls tree eza stat file du df realpath readlink basename dirname pwd which type` |
-| `text-read` | allow | `cat head tail nl less strings od xxd grep rg sort uniq cut tr diff wc jq yq` |
+| `text-read` | allow | `cat head tail nl less strings od xxd grep rg sort uniq cut tr diff wc jq yq sed` (plain `sed`; `-i` routes to `mutating`) |
 | `sysinfo` | allow | `uname nproc uptime free lscpu printenv date whoami id groups hostname sw_vers` |
 | `proc-read` | allow | `ps pgrep pstree pmap lsof` |
 | `net-query` | allow | `dig host nslookup ss ping traceroute mtr whois getent` |
@@ -86,21 +87,23 @@ reason = "production surface — confirm"
 | `tf-read` | allow | `terraform validate/fmt -check/show/output/state list/providers/graph` |
 | `svc-read` | allow | `systemctl status/list-*/is-*/show/cat`, `journalctl`, `launchctl list` |
 | `pkg-query` | allow | `npm/pnpm/pip/uv/cargo/brew/apt/gem … list/show/outdated/search` |
+| `kv-cache` | allow | `kv` (all subcommands) — the cache behind `settings.spill_command`; disposable local store, not a source of truth |
 | `net-egress` | ask | `curl wget http https nc ncat telnet` |
 | `mutating` | ask | `rm mv cp ln mkdir rmdir touch chmod chown tee truncate` |
 | `pkg-install` | ask | `npm/pnpm/yarn/bun/pip/uv/cargo/brew/apt/gem … install/add/remove/upgrade` |
-| `secrets-read` | deny | readers (`cat less head tail bat grep …`) hitting `*.env* *.pem *.key *id_rsa* .aws/credentials .ssh/* .npmrc .netrc .kube/config` |
+| `secrets-read` | deny | readers (`cat less head tail bat grep rg sed …`) hitting `*.env* *.pem *.key *id_rsa* .aws/credentials .ssh/* .npmrc .netrc .kube/config` |
 | `destructive` | deny | `shred mkfs* fdisk parted wipefs`, `dd of=/dev/*`, `rm` on `/ ~ --no-preserve-root`, `git push --force`, `DROP DATABASE/TABLE` |
 | `gtfobins` | deny | shell-escape flag vectors: `tar --checkpoint-action`, `awk 'BEGIN{system()}'`, `git -c core.pager=`, `ssh -o ProxyCommand`, `sqlite3 .shell`, `vim -c`, … |
 | `obfuscation` | deny | **structural** detector (invisible chars, undecodable escapes, fork bomb) — routes to `on_obfuscation`, not a pattern list |
 | `interactive` | ask | binaries that can spawn a shell via a typed escape: `less more man vi vim nano gdb ftp ed …` |
 | `noisy-build` | minify | `cargo build/test/clippy`, `npm/pnpm run build`, `go build/test`, `vitest tsc make` → output truncation (no gate action) |
+| `search-nudge` | warn | `grep find sed` → hint to prefer `rg`/`rg --files`; grants no permission, doesn't change any decision |
 
 ### Bundles (`settings.catalogs`)
 
 | Bundle | Contents |
 |---|---|
-| `read-only` | the 14 `*-read`/query catalogs → **allow**, nothing else |
+| `read-only` | the 16 `*-read`/query/nudge catalogs → **allow** (`search-nudge` is warn-only), nothing else |
 | `recommended` | `read-only` **+** `net-egress`/`mutating`/`pkg-install` → ask, `secrets-read`/`destructive`/`obfuscation`/`gtfobins` → deny |
 | `paranoid` | `recommended` but `net-egress` and `mutating` → **deny**, plus `interactive` → ask |
 
@@ -126,6 +129,7 @@ These run **before** gating, so a rewrite is judged in its final form.
 | `delete-recreate` | off·warn·ask·deny | a `Write` resembling a just-`rm`'d file → "restore + `git mv`" instead of delete+recreate |
 | `pm-cwd` | off·warn·rewrite·ask·deny | `cd pkg && bun run x` → `bun --cwd pkg run x` (also `pnpm -C`, `npm --prefix`, `yarn --cwd`) |
 | `abs-paths` | off·warn·ask·deny | absolute paths the agent needlessly builds → nudge to relative / ban temp scratch (see below) |
+| `path-check` | off·warn·ask·deny | guaranteed *command not found* flagged upfront: program word not on PATH, or an unquoted zsh `=cmd` word that can't resolve (see below) |
 
 ```toml
 [modules]
@@ -134,6 +138,7 @@ git-rm = "rewrite"
 delete-recreate = "ask"
 pm-cwd = "rewrite"
 abs-paths = "deny"        # opt-in; NOT in the shipped default
+path-check = "warn"
 ```
 
 **Examples**
@@ -158,17 +163,32 @@ grep -c "" /Users/me/proj/apps/courier/src/x.ts
 # abs-paths (deny): system-temp scratch (also catches D=/tmp/... prefixes)
 D=/private/tmp/scratch/exploit cargo build
 #   → deny: put scratch under .claude/scratch/ or cache with `kv set`, never /tmp
+
+# path-check (warn): program that can't resolve — command runs, agent is told why it failed
+tokf run -- cargo check                  → hint: `tokf` is not on PATH
+bun run check     # .prototools in cwd   → hint: … run `proto use` first, then retry
+
+# path-check (warn): zsh =cmd expansion — `echo ===` makes zsh look up a
+# command named `==` and abort the whole line with "(eval):1: == not found"
+git status && echo === && cargo check    → hint: quote it as '===' or drop it
 ```
 
 `abs-paths` reads **literal** paths only (command args + `NAME=val` prefix values); dynamic
 `$HOME/…` / `$TMPDIR/…` are left alone. Paths *outside* the project are the jail's job, not
 this module's.
 
+`path-check` resolves against the hook process's own `PATH` and skips builtins, functions
+defined in the command, and program words containing `/` (a `./tool` may be built by an
+earlier chain link). Aliases and functions from your rc files are invisible to it — the
+`warn` default tolerates that; escalate to `ask`/`deny` to stop the command instead. When a
+missing tool matches an `[[activate]]` rule whose marker file is present, the message
+includes the activation command.
+
 ### B. Modules configured via `[settings]` / their own tables
 
 | Module | Config | What it does |
 |---|---|---|
-| jail | `settings.jail` = warn·ask·deny + `settings.jail_allow` | literal paths outside the project (and allowed roots) → gate. Lexical (`~` expanded, `..` collapsed; no symlink/`$VAR` resolution). |
+| jail | `settings.jail` = warn·ask·deny + `settings.jail_allow` | literal paths outside the project (and allowed roots) → gate. The project root is the git repo containing cwd (`git rev-parse --show-toplevel`), not cwd itself — free movement anywhere inside the repo, even after `cd ..` out of a subdirectory; falls back to plain cwd outside a repo. A `cd` earlier in the same chain shifts the base every later relative path resolves against (`cd .. && cat ../secret` is checked against the post-`cd` directory, not the original cwd); a subshell's `cd` (`bash -c`/`eval`/`find -exec`) never leaks out. `cd -` or a dynamic target freezes tracking at the last known cwd rather than guessing. Lexical (`~` expanded, `..` collapsed; no symlink/`$VAR` resolution). |
 | strikes | `settings.strikes` = N | N consecutive Lictor denies with no command executed in between → every Bash call `ask`s until one runs (rogue-actor brake). |
 | activate | `[[activate]]` blocks | on a *command-not-found* failure with a toolchain marker in cwd → hint "run `<activate>`, retry". |
 
@@ -243,6 +263,7 @@ git-rm = "rewrite"
 delete-recreate = "ask"
 pm-cwd = "rewrite"
 abs-paths = "deny"                # nudge absolute paths → relative; ban /tmp scratch
+path-check = "warn"               # tell the agent when a program can't resolve on PATH
 
 # --- project overrides ---
 [catalog.git-read]

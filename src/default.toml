@@ -35,6 +35,16 @@ strikes = 5
 # alternatives: ["read-only"] (allows only), ["paranoid"] (net/mutations denied)
 catalogs = ["recommended"]
 
+# lictor's own debug CLI (`lictor check -- <cmd>`) gates + prompts internally and
+# refuses asks without a tty, so the hook lets it through
+[[bash]]
+match = "lictor check*"
+action = "allow"
+
+[[bash]]
+match = "lictor gain"
+action = "allow"
+
 # --- override examples ---
 
 # [catalog.net-egress]
@@ -58,6 +68,10 @@ git-mv = "rewrite"        # mv of git-tracked paths -> git mv (keeps history)
 git-rm = "rewrite"        # rm of git-tracked paths -> git rm (records the deletion)
 delete-recreate = "ask"   # a Write resembling a just-deleted file -> rename it properly
 pm-cwd = "rewrite"        # cd pkg && bun run x -> bun --cwd pkg run x (pnpm -C, npm --prefix)
+# flag guaranteed "command not found" upfront: program not on PATH, or an
+# unquoted `=x` word zsh would equals-expand and abort on (`echo ===`).
+# warn lets the command run and tells the agent why it failed; "deny" hard-stops.
+path-check = "warn"
 
 # toolchain activation: on a "command not found" failure with this marker file
 # in cwd, lictor tells the agent to activate the toolchain and retry.

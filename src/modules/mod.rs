@@ -1,12 +1,14 @@
 // dynamic modules: context-aware checks backed by read-only probes.
 // git_wrap and pm_cwd plan command rewrites before gating; jail and strikes
 // hook into the gate and the engine; activate hints after a not-found failure;
+// path_check stops guaranteed not-found commands before they run;
 // recreate flags delete+rewrite done instead of a rename.
 // One module per file, tests included.
 pub mod abspath;
 pub mod activate;
 pub mod git_wrap;
 pub mod jail;
+pub mod path_check;
 pub mod pm_cwd;
 pub mod recreate;
 pub mod strikes;
@@ -37,6 +39,7 @@ pub fn plan(
     let mut plan = git_wrap::plan(extraction, config, tracked);
     pm_cwd::plan(extraction, config, &mut plan);
     abspath::plan(extraction, config, cwd, &mut plan);
+    path_check::plan(extraction, config, cwd, &mut plan);
     plan
 }
 
@@ -79,6 +82,15 @@ const ALLOWED: &[(&str, &[ModuleSetting])] = &[
     ),
     (
         "abs-paths",
+        &[
+            ModuleSetting::Off,
+            ModuleSetting::Warn,
+            ModuleSetting::Ask,
+            ModuleSetting::Deny,
+        ],
+    ),
+    (
+        "path-check",
         &[
             ModuleSetting::Off,
             ModuleSetting::Warn,

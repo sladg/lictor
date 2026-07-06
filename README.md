@@ -94,9 +94,10 @@ or `cargo install --path .` in a clone.
 Then wire it into Claude Code:
 
 ```sh
-lictor init --write  # starter lictor.toml + the hooks snippet for settings.json
-lictor check         # validates every config file it can find
-lictor gain          # audit-log summary: decisions + minify/spill bytes saved
+lictor init --write            # starter lictor.toml + the hooks snippet for settings.json
+lictor check                   # validates every config file it can find
+lictor check -- <command...>   # gate + run + minify one command — see what the model would see
+lictor gain                    # audit-log summary: decisions + minify/spill bytes saved
 ```
 
 `kv` and `rtk` are optional companions for spill/wrap.
@@ -105,14 +106,44 @@ lictor gain          # audit-log summary: decisions + minify/spill bytes saved
 `~/.claude/settings.json`): `PreToolUse` for Bash and the file-edit tools, `PostToolUse`
 for output minify.
 
+### Try your policy
+
+`lictor check -- <command>` runs one command through the exact hook pipeline: it prints
+the gate decision, asks `y/N` where the agent harness would prompt, executes, and prints
+the output the model would see — minify, wrap, and spill applied. Narration goes to
+stderr, output to stdout, deny exits 1. Quote to keep `$vars` and pipes intact:
+`lictor check -- 'cargo test | tail'`. Without a tty there is nobody to approve, so
+`ask` refuses instead of running.
+
+```
+$ lictor check -- git stash list
+lictor: deny — Never stash — ask the user how to handle dirty state.
+
+$ lictor check -- 'curl --version'
+lictor: ask — Outbound network access.
+lictor: run it? [y/N] y
+lictor: exec: curl --version
+curl 8.7.1 (x86_64-apple-darwin25.0) …
+
+$ lictor check -- 'seq 1 900'
+lictor: allow
+lictor: exec: seq 1 900
+lictor: output shrunk 3492 → 267 bytes
+[lictor] output too large: 900 lines / 3492 bytes. Full output stored: retrieve with
+`kv get lictor-seq-1-900-1783373321` and pipe through rg/tail — do not dump it whole. Last 20 lines:
+…
+```
+
 ## Configuration
 
-**Everything lives in `lictor.toml`.** Files are merged user → project — rule lists
-concatenate, deny beats allow, so a project file can't unban a user-level ban:
+**Everything lives in `lictor.toml`.** Configs chain: the user file first, then every
+`lictor.toml` (or `.claude/lictor.toml`) from the filesystem root down to cwd — so a
+monorepo root config applies in every package dir. Rule lists concatenate, deeper files
+win per key, and deny beats allow, so a project file can't unban a user-level ban:
 
 1. `~/.config/lictor/config.toml` (user)
-2. `<cwd>/.claude/lictor.toml` (project)
-3. `<cwd>/lictor.toml` (project)
+2. `<ancestor dirs>/lictor.toml`, top → bottom (e.g. the monorepo root)
+3. `<cwd>/.claude/lictor.toml`, `<cwd>/lictor.toml` (project)
 
 A working policy covering the common cases:
 
@@ -206,9 +237,7 @@ The fully annotated example (every rule type, every option) is in
 [`examples/lictor.toml`](examples/lictor.toml). [`docs/reference.md`](docs/reference.md)
 lists every built-in catalog, bundle, module, and structural detector with a copy-paste
 example each; the catalog definitions themselves — every command each one covers — live
-in [`src/catalogs/builtin.toml`](src/catalogs/builtin.toml). Design rationale in
-[`docs/catalogs.md`](docs/catalogs.md), the command-landscape survey in
-[`docs/landscape.md`](docs/landscape.md).
+in [`src/catalogs/builtin.toml`](src/catalogs/builtin.toml).
 
 Behavior worth knowing before first run:
 
@@ -218,7 +247,7 @@ Behavior worth knowing before first run:
 
 ## Fail closed
 
-Anything that defeats static analysis escalates to the permission prompt: parse errors, `eval "$X"`, `bash -c "$PAYLOAD"`, dynamic program names (`$CMD commit`), and deny rules that can't be verified because an argument is dynamic (`git push $FLAGS` against a `--force` ban). Structural obfuscation — invisible/zero-width/bidi characters, undecodable escapes — is denied outright; decodable ones are resolved first, so `$'\x67'it commit` hits the normal `git commit` ban.
+Anything that defeats static analysis escalates to the permission prompt: parse errors, `eval "$X"`, `bash -c "$PAYLOAD"`, dynamic program names (`$CMD commit`), and deny rules that can't be verified because an argument is dynamic (`git push $FLAGS` against a `--force` ban). A banned token appearing *literally* inside a dynamic word is still a definite deny — `echo "EXIT: $?"` against `contains = ['*$\?*']` matches the raw source (`\?`/`\*` escape the glob metacharacters). Structural obfuscation — invisible/zero-width/bidi characters, undecodable escapes — is denied outright; decodable ones are resolved first, so `$'\x67'it commit` hits the normal `git commit` ban.
 
 Loops and conditionals are decomposed, not trusted: every command inside `for`/`while`/`if`/`case` bodies and function definitions is gated individually. Opaque interpreter payloads (`python -c`, `node -e`, `curl x | sh`, heredocs) ask by default. Auto-approval is conservative: **every** command in a chain must be vetted, and wrapper variants count separately — `sudo git status` is not covered by an allow rule for `git status`.
 

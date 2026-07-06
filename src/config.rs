@@ -455,9 +455,15 @@ pub fn config_paths(cwd: Option<&str>) -> Vec<PathBuf> {
         let base = std::env::var("XDG_CONFIG_HOME").unwrap_or(format!("{home}/.config"));
         paths.push(Path::new(&base).join("lictor/config.toml"));
     }
+    // ancestor chain, root-most first: a monorepo root config applies in every
+    // package dir, and deeper files win per key (rule lists concatenate)
     if let Some(cwd) = cwd {
-        paths.push(Path::new(cwd).join(".claude/lictor.toml"));
-        paths.push(Path::new(cwd).join("lictor.toml"));
+        let mut dirs: Vec<&Path> = Path::new(cwd).ancestors().collect();
+        dirs.reverse();
+        for dir in dirs {
+            paths.push(dir.join(".claude/lictor.toml"));
+            paths.push(dir.join("lictor.toml"));
+        }
     }
     paths
 }

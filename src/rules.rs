@@ -61,10 +61,16 @@ pub fn compile_bash_rules(config: &Config) -> Result<Vec<CompiledBashRule<'_>>, 
 
 pub fn glob_to_regex(glob: &str) -> Result<Regex, String> {
     let mut pattern = String::from("^");
-    for c in glob.chars() {
+    let mut chars = glob.chars();
+    while let Some(c) = chars.next() {
         match c {
             '*' => pattern.push_str(".*"),
             '?' => pattern.push('.'),
+            // `\*` / `\?` / `\\` match the literal character (`*$\?` = ends in "$?")
+            '\\' => {
+                let next = chars.next().unwrap_or('\\');
+                pattern.push_str(&regex::escape(&next.to_string()));
+            }
             c => pattern.push_str(&regex::escape(&c.to_string())),
         }
     }
@@ -108,7 +114,7 @@ fn match_prefix(pattern: &Pattern, command: &Command) -> Match {
 
 // any of the contains globs matching any argument after the program (flag bans,
 // order-independent); dynamic arguments make the result Unknown, not No
-fn match_contains(contains: &[Regex], command: &Command) -> Match {
+fn match_contains(contains: &[Regex], command: &Command, match_raw: bool) -> Match {
     if contains.is_empty() {
         return Match::Yes;
     }
@@ -120,7 +126,20 @@ fn match_contains(contains: &[Regex], command: &Command) -> Match {
                     return Match::Yes;
                 }
             }
-            None => has_dynamic = true,
+            None => {
+                // a dynamic value is unknowable, but a glob hit on the raw source
+                // (`echo "EXIT: $?"` vs `*$\?*`) means the banned token is literally
+                // present — a definite hit. Deny rules only: syntax can't vet an allow.
+                if match_raw
+                    && word
+                        .raw
+                        .as_deref()
+                        .is_some_and(|raw| contains.iter().any(|re| re.is_match(raw)))
+                {
+                    return Match::Yes;
+                }
+                has_dynamic = true;
+            }
         }
     }
     if has_dynamic {
@@ -151,13 +170,14 @@ fn match_only(only: &[Regex], args: &[Word]) -> Match {
 }
 
 pub fn match_command(rule: &CompiledBashRule, command: &Command) -> Match {
+    let match_raw = matches!(rule.rule.action, Action::Deny);
     let mut best = Match::No;
     for pattern in &rule.patterns {
         let prefix = match_prefix(pattern, command);
         if prefix == Match::No {
             continue;
         }
-        let contains = match_contains(&rule.contains, command);
+        let contains = match_contains(&rule.contains, command, match_raw);
         let only = match_only(&rule.only, &command.words[pattern.words.len()..]);
         best = best.max(prefix.min(contains).min(only));
     }

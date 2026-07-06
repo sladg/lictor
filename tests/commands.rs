@@ -54,6 +54,14 @@ contains = ["--force", "-f"]
 action = "deny"
 reason = "Force pushes are banned."
 
+# escaped glob: \? matches a literal `?`; deny rules also match the raw source
+# of dynamic words, so `echo $?` is a definite hit, not an unverifiable ask
+[[bash]]
+match = "echo"
+contains = ['*$\?*']
+action = "deny"
+reason = "Don't echo exit codes."
+
 [[bash]]
 match = "bunx tsc*"
 action = "deny"
@@ -256,6 +264,30 @@ fn bash_no_decision_cases() {
             "expected no decision for: {case}\ngot: {output:?}"
         );
     }
+}
+
+#[test]
+fn exit_echo_cases() {
+    // literal `$?` in a dynamic word is matched on raw source -> definite deny
+    let deny = [
+        "cargo build; echo $?",
+        "cargo test 2>&1 | tail -5 ; echo \"EXIT: $?\"",
+        "echo exit=$?",
+    ];
+    for case in deny {
+        let output = bash(case);
+        assert_eq!(
+            decision(&output),
+            Some("deny".into()),
+            "expected deny for: {case}\ngot: {output:?}"
+        );
+    }
+    // other dynamic args stay unverifiable -> fail-closed ask
+    let output = bash("echo $HOME");
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+    // literal echoes don't trip the rule ($50 is not $?)
+    let output = bash("echo 'price: $50'");
+    assert_eq!(decision(&output), None, "got: {output:?}");
 }
 
 #[test]
@@ -952,6 +984,9 @@ fn bundle_recommended_allows_reads() {
         "git status && git log --oneline -5",
         "docker ps -a",
         "rg TODO src",
+        "sed -n '1,5p' README.md",
+        "kv get lictor-bash-corpus",
+        "kv list",
     ];
     for case in cases {
         let output = bundle_bash(case);
@@ -1003,6 +1038,58 @@ fn bundle_severity_secrets_beat_text_read_allow() {
     // `cat` is allowed by text-read, but secrets-read (deny) wins on .env
     let output = bundle_bash("cat src/config.rs && cat .env.local");
     assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+}
+
+#[test]
+fn bundle_sed_inplace_asks_not_allow() {
+    // plain `sed` is a text-read allow, but `-i` is an in-place edit — must not
+    // silently ride that allow, so it stays gated like any other mutation
+    let output = bundle_bash("sed -i 's/a/b/' src/main.rs");
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn bundle_sed_still_denied_on_secrets() {
+    // sed joined text-read as a reader; it must also inherit secrets-read's deny
+    let output = bundle_bash("sed -n '1p' .env");
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+}
+
+#[test]
+fn bundle_kv_allows_all_subcommands() {
+    // the whole store is disposable/local — get/set/list/delete all allow
+    for command in [
+        "kv set some-key",
+        "kv delete some-key",
+        "kv delete some-key --prune",
+    ] {
+        let output = bundle_bash(command);
+        assert_eq!(
+            decision(&output),
+            Some("allow".into()),
+            "{command}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn bundle_search_nudge_hints_without_gating() {
+    for command in [
+        "find . -name '*.rs'",
+        "grep -rn foo src",
+        "sed -n '1p' README.md",
+    ] {
+        let output = bundle_bash(command);
+        let context = output
+            .as_ref()
+            .and_then(|o| o.get("additionalContext"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(context.contains("prefer `rg`"), "{command}: {output:?}");
+    }
+    // the nudge is a hint only — it must not turn a still-ungated `find` into an allow
+    let output = bundle_bash("find . -name '*.rs'");
+    assert_ne!(decision(&output), Some("allow".into()), "got: {output:?}");
 }
 
 #[test]
@@ -1908,6 +1995,59 @@ fn pm_cwd_ignores_root_level_use() {
         "pnpm -C pkg test",
         "cd pkg && cargo build",
     ] {
+        let output = run_with(
+            policy,
+            "PreToolUse",
+            "Bash",
+            json!({"command": command}),
+            None,
+        );
+        assert_eq!(
+            decision(&output),
+            None,
+            "expected no decision for: {command}\ngot: {output:?}"
+        );
+    }
+}
+
+// --- path-check: guaranteed command-not-found flagged upfront ---
+
+#[test]
+fn path_check_warn_hints_without_stopping() {
+    let policy = "[modules]\npath-check = \"warn\"";
+    let output = run_with(
+        policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "lictor-test-definitely-not-a-real-cmd run"}),
+        None,
+    );
+    assert_eq!(decision(&output), None, "got: {output:?}");
+    let ctx = output
+        .as_ref()
+        .and_then(|o| o.get("additionalContext"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(ctx.contains("not on PATH"), "got: {output:?}");
+}
+
+#[test]
+fn path_check_deny_blocks() {
+    let policy = "[modules]\npath-check = \"deny\"";
+    let output = run_with(
+        policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "lictor-test-definitely-not-a-real-cmd run"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+}
+
+#[test]
+fn path_check_ignores_resolved_programs() {
+    let policy = "[modules]\npath-check = \"deny\"";
+    for command in ["ls -la", "cd /x && export A=1", "f() { ls; }; f"] {
         let output = run_with(
             policy,
             "PreToolUse",

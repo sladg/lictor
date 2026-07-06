@@ -5,6 +5,8 @@ const MAX_DEPTH: usize = 5;
 #[derive(Debug, Clone)]
 pub struct Word {
     pub text: Option<String>,
+    // raw source of a dynamic word (`"EXIT: $?"`), so deny globs can match syntax
+    pub raw: Option<String>,
     pub start: usize,
     pub end: usize,
 }
@@ -49,6 +51,8 @@ pub struct Extraction {
     // literal values of `NAME=val` command prefixes (D=/tmp/x cmd) — dropped from
     // `words`, kept here so path-hygiene modules can see the scratch/abs path
     pub assignments: Vec<String>,
+    // names of functions defined in the source; path_check must not flag their calls
+    pub functions: Vec<String>,
 }
 
 fn is_device_write_target(dest: &str) -> bool {
@@ -57,19 +61,15 @@ fn is_device_write_target(dest: &str) -> bool {
         .any(|d| dest.starts_with(d))
 }
 
-// classic fork bomb `:(){ :|:& };:` and variants: a function whose body pipes
-// its own name into itself. Requires the self-pipe, so legit funcs don't trip it.
-fn is_fork_bomb(node: Node, source: &str) -> bool {
-    let name = (0..node.named_child_count())
+fn function_name<'a>(node: Node, source: &'a str) -> Option<&'a str> {
+    (0..node.named_child_count())
         .filter_map(|i| node.named_child(i))
         .find(|c| c.kind() == "word")
-        .and_then(|c| c.utf8_text(source.as_bytes()).ok());
-    let Some(name) = name else {
-        return false;
-    };
-    fork_self_pipe(node, source, name)
+        .and_then(|c| c.utf8_text(source.as_bytes()).ok())
 }
 
+// classic fork bomb `:(){ :|:& };:` and variants: a function whose body pipes
+// its own name into itself. Requires the self-pipe, so legit funcs don't trip it.
 fn fork_self_pipe(node: Node, source: &str, name: &str) -> bool {
     if node.kind() == "pipeline" {
         let self_calls = (0..node.named_child_count())
@@ -140,10 +140,12 @@ fn walk(node: Node, source: &str, synthetic: bool, depth: usize, out: &mut Extra
         collect_command(node, source, synthetic, depth, out);
     }
     if node.kind() == "function_definition"
-        && is_fork_bomb(node, source)
-        && out.obfuscation.is_none()
+        && let Some(name) = function_name(node, source)
     {
-        out.obfuscation = Some("fork bomb: function recursively pipes into itself".to_string());
+        if fork_self_pipe(node, source, name) && out.obfuscation.is_none() {
+            out.obfuscation = Some("fork bomb: function recursively pipes into itself".to_string());
+        }
+        out.functions.push(name.to_string());
     }
     // catch bare redirects too (`> /dev/sda` has no command node)
     if node.kind() == "file_redirect" && out.device_write.is_none() {
@@ -814,8 +816,15 @@ fn block(out: &mut Extraction, reason: &str) {
 
 fn resolve_word(node: Node, source: &str) -> Word {
     let range = node.byte_range();
+    let text = resolve_text(node, source);
+    let raw = if text.is_none() {
+        node.utf8_text(source.as_bytes()).ok().map(str::to_string)
+    } else {
+        None
+    };
     Word {
-        text: resolve_text(node, source),
+        text,
+        raw,
         start: range.start,
         end: range.end,
     }
