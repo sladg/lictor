@@ -11,6 +11,7 @@ fn main() {
         Some("check") => check(),
         Some("init") => init(),
         Some("gain") => gain(),
+        Some("-V" | "--version" | "version") => println!("lictor {}", env!("CARGO_PKG_VERSION")),
         Some("-h" | "--help" | "help") => usage(),
         Some(other) => {
             eprintln!("lictor: unknown command `{other}` (expected: hook, check, init, gain)");

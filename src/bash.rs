@@ -36,6 +36,9 @@ impl Command {
 #[derive(Debug, Default)]
 pub struct Extraction {
     pub commands: Vec<Command>,
+    // the original top-level command text; word start/end index into it (non-synthetic
+    // commands only). Lets the jail recover $HOME/... paths that resolve to dynamic words.
+    pub source: String,
     pub blocked_reason: Option<String>,
     // structural obfuscation signal (invisible chars, fork bomb); settings.on_obfuscation
     pub obfuscation: Option<String>,
@@ -109,6 +112,7 @@ fn flag_dangerous_env(text: &str, out: &mut Extraction) {
 pub fn extract(source: &str) -> Extraction {
     let mut out = Extraction::default();
     extract_into(source, false, 0, &mut out);
+    out.source = source.to_string();
     out
 }
 

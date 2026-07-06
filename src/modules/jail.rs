@@ -11,15 +11,25 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     roots.extend(config.jail_allow().iter().map(|p| normalize(p, cwd, &home)));
     let mut out = Vec::new();
     for command in &extraction.commands {
-        if command.synthetic {
-            continue;
-        }
         for word in command.words.iter().skip(1) {
-            let Some(text) = word.text.as_deref() else {
-                continue;
+            let expanded;
+            let text = match word.text.as_deref() {
+                Some(text) => text,
+                // dynamic word: recover $HOME/${HOME} paths from the raw source.
+                // synthetic spans index the inner re-parsed string, not `source`, so skip.
+                None if !command.synthetic => {
+                    let raw = extraction.source.get(word.start..word.end).unwrap_or("");
+                    match expand_home(raw, &home) {
+                        Some(path) => {
+                            expanded = path;
+                            expanded.as_str()
+                        }
+                        None => continue,
+                    }
+                }
+                None => continue,
             };
-            // also catch --flag=/path values
-            let candidate = text.split_once('=').map_or(text, |(_, v)| v);
+            let candidate = path_candidate(text);
             if !looks_like_path(candidate) {
                 continue;
             }
@@ -33,6 +43,33 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
         }
     }
     out
+}
+
+// value after `flag=`, plus the path glued onto a short flag (-o/etc/x -> /etc/x);
+// the glued case requires an alphabetic flag letter so `-1/2`-style args don't false-trip
+fn path_candidate(text: &str) -> &str {
+    let value = text.split_once('=').map_or(text, |(_, v)| v);
+    if value.starts_with('-')
+        && !value.starts_with("--")
+        && value
+            .chars()
+            .nth(1)
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        && let Some(idx) = value.find('/')
+    {
+        return &value[idx..];
+    }
+    value
+}
+
+// $HOME/... and ${HOME}/... parse as dynamic words (text = None) but their target
+// is known; recover the same absolute path `~/...` would yield. ponytail: only HOME —
+// add other well-known vars if an escape via $XDG_*/etc. shows up.
+fn expand_home(raw: &str, home: &str) -> Option<String> {
+    let rest = raw
+        .strip_prefix("$HOME")
+        .or_else(|| raw.strip_prefix("${HOME}"))?;
+    (rest.is_empty() || rest.starts_with('/')).then(|| format!("{home}{rest}"))
 }
 
 pub(crate) fn looks_like_path(text: &str) -> bool {
@@ -135,8 +172,29 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_nested_shell_skipped() {
-        assert!(check("bash -c 'cat /etc/hosts'", &[]).is_empty());
+    fn synthetic_nested_shell_flagged() {
+        // paths inside `bash -c '...'` are re-parsed and jailed like any other
+        assert_eq!(check("bash -c 'cat /etc/hosts'", &[]), vec!["/etc/hosts"]);
+    }
+
+    #[test]
+    fn home_env_var_paths_flagged() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            check("cat $HOME/.ssh/id_rsa", &[]),
+            vec![format!("{home}/.ssh/id_rsa")]
+        );
+        assert_eq!(
+            check("cat ${HOME}/.aws/creds", &[]),
+            vec![format!("{home}/.aws/creds")]
+        );
+    }
+
+    #[test]
+    fn glued_flag_path_flagged() {
+        assert_eq!(check("tail -o/etc/shadow", &[]), vec!["/etc/shadow"]);
+        // alphabetic flag letter required — `-1/2`-style args stay untouched
+        assert!(check("bc -1/2", &[]).is_empty());
     }
 
     #[test]

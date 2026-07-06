@@ -10,6 +10,10 @@ pub const DANGEROUS_ENV: &[&str] = &[
     "LD_AUDIT",
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
+    // PATH=/evil:$PATH cmd resolves `cmd` to an attacker binary. Denies the legit
+    // PATH-prepend idiom too, but an auto-approved chain otherwise bypasses the
+    // permission layer's own PATH= guard.
+    "PATH",
     "BASH_ENV",
     "ENV",
     "SHELLOPTS",
