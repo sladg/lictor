@@ -509,7 +509,7 @@ fn finish(mut outcome: GateOutcome, decision: &'static str, reason: String) -> G
 
 pub fn apply_edits(source: &str, edits: &[SpanEdit]) -> String {
     let mut sorted = edits.to_vec();
-    sorted.sort_by(|a, b| (b.start, b.end).cmp(&(a.start, a.end)));
+    sorted.sort_by_key(|e| std::cmp::Reverse((e.start, e.end)));
     sorted.dedup_by(|a, b| a.start == b.start && a.end == b.end && a.text == b.text);
     let mut result = source.to_string();
     for edit in sorted {

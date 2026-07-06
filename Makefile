@@ -2,6 +2,7 @@
 
 # single source of truth: the [package] version line in Cargo.toml
 VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+TAP_REPO := git@github.com:sladg/homebrew-tap.git
 
 # one-shot gate: format check + strict clippy + build + tests (what CI would run)
 ci: fmt lint build test
@@ -37,18 +38,26 @@ version:
 release: ci
 	@git diff-index --quiet HEAD -- || { echo "working tree dirty — commit before releasing"; exit 1; }
 	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then echo "tag v$(VERSION) already exists — bump version in Cargo.toml first"; exit 1; fi
+	@printf "release lictor \033[1mv$(VERSION)\033[0m? (bump Cargo.toml first if wrong) [y/N] "; \
+	read a; [ "$$a" = y ] || { echo "aborted"; exit 1; }
 	git tag "v$(VERSION)"
 	git push origin "v$(VERSION)"
 	$(MAKE) formula
 
-# rewrite the vendored formula's url + sha256 for the current tag. The tarball only
-# exists once the tag is pushed, so this runs after `release` (or standalone to refresh).
+# clone the tap, pin url + sha256 to the current tag, commit + push. The tarball only
+# exists once the tag is pushed, so this runs after `release`. Needs push access to $(TAP_REPO).
 # ponytail: pins GitHub's auto-generated archive sha — stable in practice, but if GitHub
 # ever changes archive compression, switch to an uploaded release-asset tarball.
 formula:
 	@url="https://github.com/sladg/lictor/archive/refs/tags/v$(VERSION).tar.gz"; \
 	sha=$$(curl -fsSL "$$url" | shasum -a 256 | cut -d' ' -f1); \
 	[ -n "$$sha" ] || { echo "could not fetch tarball — is v$(VERSION) pushed?"; exit 1; }; \
-	sed -i.bak -e "s|url \".*\"|url \"$$url\"|" -e "s|sha256 \".*\"|sha256 \"$$sha\"|" dist/homebrew/lictor.rb; \
-	rm -f dist/homebrew/lictor.rb.bak; \
-	echo "formula pinned to v$(VERSION) ($$sha)"
+	tmp=$$(mktemp -d); \
+	git clone -q "$(TAP_REPO)" "$$tmp"; \
+	( cd "$$tmp" && \
+	  sed -i.bak -e "s|url \".*\"|url \"$$url\"|" -e "s|sha256 \".*\"|sha256 \"$$sha\"|" Formula/lictor.rb && \
+	  rm -f Formula/lictor.rb.bak && \
+	  git commit -aqm "lictor v$(VERSION)" && git push -q ) \
+	  || { rm -rf "$$tmp"; echo "tap update failed"; exit 1; }; \
+	rm -rf "$$tmp"; \
+	echo "tap updated to v$(VERSION) ($$sha)"

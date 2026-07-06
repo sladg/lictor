@@ -437,10 +437,7 @@ const WRAPPERS: &[Wrapper] = &[
 fn strip_wrappers(words: &[Word]) -> Option<Vec<Word>> {
     let mut current = words.to_vec();
     let mut stripped_any = false;
-    loop {
-        let Some(program) = current.first().and_then(|w| w.text.clone()) else {
-            break;
-        };
+    while let Some(program) = current.first().and_then(|w| w.text.clone()) {
         let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(&program)) else {
             break;
         };
