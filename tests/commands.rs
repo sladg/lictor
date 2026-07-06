@@ -1803,6 +1803,100 @@ fn jail_warn_mode_hints() {
     assert!(ctx.contains("jail"), "got: {output:?}");
 }
 
+// --- jail must also cover Write/Edit/MultiEdit/NotebookEdit paths, not just Bash ---
+// regression: a Write straight to a path outside the repo (e.g. a system-temp
+// scratchpad) sailed through unflagged because jail was only wired into the
+// Bash pre-hook (PreToolUse+Bash); every other tool went through pre_content,
+// which never consulted jail at all.
+
+fn jail_write(policy: &str, file_path: &str, content: &str) -> Option<Value> {
+    run_in(
+        policy,
+        std::path::Path::new(JAIL_DIR),
+        "jail-content",
+        "Write",
+        json!({"file_path": file_path, "content": content}),
+    )
+}
+
+#[test]
+fn jail_flags_write_outside_project() {
+    let policy = jail_policy("ask", "");
+    for path in [
+        "/etc/passwd",
+        "/private/tmp/claude-501/some-session/scratchpad/exploit.sh",
+    ] {
+        let output = jail_write(&policy, path, "hi");
+        assert_eq!(
+            decision(&output),
+            Some("ask".into()),
+            "expected ask for: {path}\ngot: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn jail_leaves_project_write_alone() {
+    let policy = jail_policy("ask", "");
+    let output = jail_write(&policy, &format!("{JAIL_DIR}/src/main.rs"), "fn main() {}");
+    assert_eq!(decision(&output), None, "got: {output:?}");
+}
+
+#[test]
+fn jail_allow_grants_extra_roots_for_write() {
+    let policy = jail_policy("ask", "\"/tmp\"");
+    assert_eq!(decision(&jail_write(&policy, "/tmp/a.txt", "hi")), None);
+    assert_eq!(
+        decision(&jail_write(&policy, "/etc/passwd", "hi")),
+        Some("ask".into())
+    );
+}
+
+#[test]
+fn jail_deny_mode_for_write() {
+    let output = jail_write(&jail_policy("deny", ""), "/etc/passwd", "hi");
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+}
+
+#[test]
+fn jail_applies_to_edit_tool() {
+    let policy = jail_policy("ask", "");
+    let output = run_in(
+        &policy,
+        std::path::Path::new(JAIL_DIR),
+        "jail-content",
+        "Edit",
+        json!({"file_path": "/etc/passwd", "old_string": "a", "new_string": "b"}),
+    );
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn jail_applies_to_multiedit_tool() {
+    let policy = jail_policy("ask", "");
+    let output = run_in(
+        &policy,
+        std::path::Path::new(JAIL_DIR),
+        "jail-content",
+        "MultiEdit",
+        json!({"file_path": "/etc/passwd", "edits": [{"old_string": "a", "new_string": "b"}]}),
+    );
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn jail_applies_to_notebookedit_tool() {
+    let policy = jail_policy("ask", "");
+    let output = run_in(
+        &policy,
+        std::path::Path::new(JAIL_DIR),
+        "jail-content",
+        "NotebookEdit",
+        json!({"notebook_path": "/etc/passwd.ipynb", "new_source": "print(1)"}),
+    );
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
 // --- delete-recreate: rm + similar Write = rename done wrong ---
 
 fn recreate_setup(name: &str, setting: &str) -> (std::path::PathBuf, String, String) {

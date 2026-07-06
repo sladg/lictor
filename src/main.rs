@@ -322,6 +322,8 @@ fn init(write: bool) {
     }
     println!(
         r#"Add to .claude/settings.json (or ~/.claude/settings.json):
+(PreToolUse must list Write/Edit/MultiEdit/NotebookEdit alongside Bash — jail
+and edit-rule checks key off each tool's own file_path, not just Bash commands.)
 
 {{
   "hooks": {{

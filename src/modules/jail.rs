@@ -9,11 +9,32 @@ use crate::config::Config;
 // invoked from a subdirectory can still `cd ..`/reference sibling paths
 // anywhere in the repo. cwd is the fallback when it isn't inside a repo.
 
+fn roots(config: &Config, cwd: &str, home: &str) -> Vec<String> {
+    let primary = git_root(cwd).unwrap_or_else(|| cwd.to_string());
+    let mut roots = vec![normalize(&primary, cwd, home)];
+    roots.extend(config.jail_allow().iter().map(|p| normalize(p, cwd, home)));
+    roots
+}
+
+fn is_inside(roots: &[String], resolved: &str) -> bool {
+    roots
+        .iter()
+        .any(|r| resolved == r || resolved.starts_with(&format!("{r}/")))
+}
+
+// a single already-known literal path (Write/Edit/MultiEdit/NotebookEdit's
+// file_path) rather than a shell command to scan — no word-extraction or `cd`
+// tracking needed, just resolve-and-check-roots.
+pub fn violation_for_path(path: &str, config: &Config, cwd: &str) -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let roots = roots(config, cwd, &home);
+    let resolved = normalize(path, cwd, &home);
+    (!is_inside(&roots, &resolved)).then_some(resolved)
+}
+
 pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let primary = git_root(cwd).unwrap_or_else(|| cwd.to_string());
-    let mut roots = vec![normalize(&primary, cwd, &home)];
-    roots.extend(config.jail_allow().iter().map(|p| normalize(p, cwd, &home)));
+    let roots = roots(config, cwd, &home);
     let mut out = Vec::new();
     // `cd` earlier in the same chain changes the base every later relative path
     // resolves against (`cd .. && cat ../secret` escapes further than `cat`'s
@@ -45,10 +66,7 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
                 continue;
             }
             let resolved = normalize(candidate, &effective_cwd, &home);
-            let inside = roots
-                .iter()
-                .any(|r| resolved == *r || resolved.starts_with(&format!("{r}/")));
-            if !inside && !out.contains(&resolved) {
+            if !is_inside(&roots, &resolved) && !out.contains(&resolved) {
                 out.push(resolved);
             }
         }

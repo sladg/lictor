@@ -1,5 +1,5 @@
 use crate::audit;
-use crate::config::{Config, ModuleSetting};
+use crate::config::{Action, Config, ModuleSetting};
 use crate::hook::{HookInput, HookOutput};
 use crate::modules::{activate, strikes};
 use crate::{bash, content, minify, modules, rules};
@@ -205,6 +205,37 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
     };
     let edit_rules = content::compile_edit_rules(config)?;
     let mut outcome = content::gate_content(&path, &contents, &edit_rules);
+
+    // jail: Write/Edit/MultiEdit/NotebookEdit's file_path is a literal, already-
+    // resolved path — same containment check as Bash's jail module, just without
+    // the shell-word scanning (see modules::jail::violation_for_path)
+    if let (Some(action), Some(cwd)) = (config.jail(), input.cwd.as_deref())
+        && outcome.decision != Some("deny")
+        && let Some(resolved) = modules::jail::violation_for_path(&path, config, cwd)
+    {
+        let message = format!(
+            "lictor: `{resolved}` is outside the project jail — stay in the repo or have the user extend settings.jail_allow"
+        );
+        match action {
+            Action::Allow | Action::Log => {}
+            Action::Warn => {
+                if !outcome.hints.contains(&message) {
+                    outcome.hints.push(message);
+                }
+            }
+            Action::Ask => {
+                if outcome.decision.is_none() || outcome.decision == Some("allow") {
+                    outcome.decision = Some("ask");
+                    outcome.reason = Some(message);
+                }
+            }
+            // rewrite has no meaning for a jail violation; treat as deny
+            Action::Deny | Action::Rewrite => {
+                outcome.decision = Some("deny");
+                outcome.reason = Some(message);
+            }
+        }
+    }
 
     // delete/recreate: a Write that resurrects a just-deleted file is a rename
     // done the history-destroying way
