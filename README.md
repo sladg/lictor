@@ -84,15 +84,22 @@ propose a commit message and wait for the user." reaches the agent instead of a 
 
 ## Quick start
 
-Requires Rust 1.85+. `kv` and `rtk` are optional companions for spill/wrap.
+```sh
+brew install sladg/tap/lictor
+```
+
+Or build from source (needs Rust 1.85+): `cargo install --git https://github.com/sladg/lictor`,
+or `cargo install --path .` in a clone.
+
+Then wire it into Claude Code:
 
 ```sh
-cargo install --path .
-
 lictor init --write  # starter lictor.toml + the hooks snippet for settings.json
 lictor check         # validates every config file it can find
 lictor gain          # audit-log summary: decisions + minify/spill bytes saved
 ```
+
+`kv` and `rtk` are optional companions for spill/wrap.
 
 `lictor init` prints the hooks block to paste into `.claude/settings.json` (or
 `~/.claude/settings.json`): `PreToolUse` for Bash and the file-edit tools, `PostToolUse`
