@@ -1,0 +1,77 @@
+# lictor starter policy — `lictor check` validates, `lictor gain` shows savings
+[settings]
+on_unparseable = "ask"
+on_inline_script = "ask"
+on_obfuscation = "deny"
+# author files with the Write/Edit tool, not `cat`/`echo`/`printf > file` shell
+# redirection. off | warn | ask | deny (default off).
+on_shell_write = "deny"
+# trim absolute/bin executable paths to basenames (/usr/local/bin/rg -> rg,
+# ./node_modules/.bin/tsc -> tsc); saves tokens. "deny" to forbid them instead.
+strip_program_paths = "rewrite"
+log_file = "~/.local/state/lictor/audit.jsonl"
+# context guard: outputs over spill_lines go to the kv store (brew install AmrSaber/tap/kv);
+# the model sees the tail plus a `kv get <key>` retrieval note.
+spill_lines = 800
+spill_keep = 40
+spill_expires = "24h"
+# expensive commands (test suites, builds) spill too: the model queries the
+# cache instead of re-running them while debugging
+spill_seconds = 30
+
+# rogue-actor guard: this many consecutive denies -> every Bash call asks
+# until a command actually executes (user back in the loop)
+strikes = 5
+
+# project jail: literal paths outside the project -> warn|ask|deny.
+# Grant extra roots explicitly (downloads, the Claude scratchpad, ...).
+# jail = "ask"
+# jail_allow = ["~/Downloads", "/private/tmp/claude-501"]
+
+# safe defaults for ~150 commands in one line:
+#   shell-core/fs-read/text-read/sysinfo/*-read -> allow
+#   net-egress/mutating/pkg-install -> ask
+#   secrets-read/destructive/obfuscation -> deny
+# alternatives: ["read-only"] (allows only), ["paranoid"] (net/mutations denied)
+catalogs = ["recommended"]
+
+# --- override examples ---
+
+# [catalog.net-egress]
+# action = "deny"                 # never let the agent hit the network
+
+# [catalog.git-read]
+# add = ["git submodule status"]  # extend a built-in
+
+# [catalog.noisy-build]           # minify-only catalog: activate by mention
+# max_lines = 120
+
+# [[bash]]                        # one-off rules still work
+# match = "git commit*"
+# action = "deny"
+# reason = "Commits are manual."
+
+# dynamic modules: context-aware rewrites backed by read-only probes.
+# off | warn (hint only) | rewrite
+[modules]
+git-mv = "rewrite"        # mv of git-tracked paths -> git mv (keeps history)
+git-rm = "rewrite"        # rm of git-tracked paths -> git rm (records the deletion)
+delete-recreate = "ask"   # a Write resembling a just-deleted file -> rename it properly
+pm-cwd = "rewrite"        # cd pkg && bun run x -> bun --cwd pkg run x (pnpm -C, npm --prefix)
+
+# toolchain activation: on a "command not found" failure with this marker file
+# in cwd, lictor tells the agent to activate the toolchain and retry.
+[[activate]]
+file = ".prototools"
+run = "proto use"
+tools = ["node", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "deno", "tsc", "uv", "go", "python"]
+
+[[activate]]
+file = ".nvmrc"
+run = "nvm use"
+tools = ["node", "npm", "npx", "yarn"]
+
+[[activate]]
+file = ".tool-versions"
+run = "mise install"
+tools = ["node", "npm", "python", "ruby", "go", "terraform"]

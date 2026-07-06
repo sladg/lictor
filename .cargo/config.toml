@@ -1,0 +1,12 @@
+# `cargo custos <sub>` runs the binary without building/installing it:
+#   cargo custos check     validate every config file
+#   cargo custos gain      audit-log summary
+#   cargo custos init      print the hooks snippet
+#   echo '<json>' | cargo custos hook   drive a hook locally
+# (`cargo run check` can't work — `check` is a built-in cargo subcommand and args
+#  need `--`; the alias supplies both.)
+[alias]
+custos = "run --quiet --"
+lint = "clippy --all-targets"
+# for the all-in-one fmt + clippy + build + test gate, use `make ci` (cargo
+# aliases can only map to a single cargo subcommand, so they can't chain).

@@ -1,0 +1,163 @@
+# lictor policy — project file: ./lictor.toml or ./.claude/lictor.toml
+# user file: ~/.config/lictor/config.toml (lists concatenate, deny beats allow)
+
+[settings]
+# action when bash can't be statically analyzed (parse error, eval "$X", $CMD ...)
+# allow | ask | deny  (default: ask — fail closed)
+on_unparseable = "ask"
+# structural obfuscation (invisible/zero-width chars, undecodable $'\x..' escapes,
+# fork bombs). writes to raw devices (> /dev/sda) are always denied.
+on_obfuscation = "deny"
+# a command prefixed by a code-injecting env var (LD_PRELOAD, LESSOPEN, PERL5OPT,
+# GIT_SSH_COMMAND, ...) — GTFOBins "E" vectors. default deny.
+on_dangerous_env = "deny"
+# trim absolute/bin executable paths to basenames to save tokens:
+#   /usr/local/bin/rg -> rg,  ./node_modules/.bin/tsc -> tsc
+# rewrite | warn | ask | deny. Local scripts (./deploy.sh) are left alone.
+strip_program_paths = "rewrite"
+# action for opaque interpreter payloads: python -c, node -e, perl -e, deno eval,
+# and interpreters/shells reading stdin or heredocs (curl x | sh, python <<EOF)
+on_inline_script = "ask"
+
+# audit JSONL: every decision, action="log" match, and minify byte delta.
+# `lictor gain` summarizes it. Omit to disable logging.
+log_file = "~/.local/state/lictor/audit.jsonl"
+
+# context guard: when Bash output exceeds spill_lines, the full output is stored
+# via `kv set lictor-<slug>-<ts>` and the model sees only the last spill_keep lines
+# plus a `kv get` retrieval note. Runs after minify rules, applies to ALL commands.
+spill_lines = 800
+spill_keep = 40
+spill_expires = "24h"   # forwarded to `kv set --expires-after`
+# spill_command = "kv"  # override the storage CLI
+
+# ---- bash rules: matched against EVERY command in a chain, after unwrapping
+# sudo/env/xargs/nohup/timeout/..., bash -c "...", eval '...', $(...), subshells,
+# git global flags (git -C x commit == git commit), /usr/bin/git == git
+
+[[bash]]
+match = "git commit*"
+action = "deny"
+reason = "Commits are manual — propose a commit message and wait for the user."
+
+[[bash]]
+match = "git stash*"
+action = "deny"
+reason = "Never stash — ask the user how to handle dirty state."
+
+[[bash]]
+match = "git push*"
+action = "ask"
+
+[[bash]]
+match = "grep*"
+action = "rewrite"
+rewrite = "rg"
+hint = "grep is banned here; the command was rewritten to ripgrep."
+
+[[bash]]
+match = "git status*"
+action = "allow"    # auto-approve, skips the permission prompt
+
+# catalogs: named command groups configured as one block. Built-ins ship in the
+# binary (shell-core, fs-read, text-read, git-read, kubectl-read, net-egress,
+# mutating, pkg-install, secrets-read, destructive, obfuscation, noisy-build, ...)
+# and bundles activate curated sets: recommended | read-only | paranoid.
+# Add `catalogs = ["recommended"]` under [settings] for safe defaults in one line.
+
+# mention-to-activate a built-in, optionally overriding its action:
+[catalog.kubectl-read]
+action = "allow"
+
+# tweak a built-in's membership:
+[catalog.git-read]
+action = "allow"
+add = ["git submodule status"]
+remove = ["git grep"]
+
+# custom group; one block gates AND minifies (unified):
+[catalog.prod-surface]
+match = ["terraform apply", "flyctl deploy", "kubectl * -n prod*"]
+action = "ask"
+reason = "Production surface — confirm."
+
+# `contains` globs match any argument AFTER the program, order-independent —
+# for banning specific flags while a broader allow/ask rule covers the base command
+[[bash]]
+match = "git push"
+contains = ["--force", "-f"]
+action = "deny"
+reason = "Force pushes are banned."
+
+# projects define their own scripts; never run tsc via package runners
+[[bash]]
+match = "bunx tsc*"
+action = "deny"
+reason = "Use the project script: bun run typecheck."
+
+[[bash]]
+match = "npx tsc*"
+action = "deny"
+reason = "Use the project script instead of npx tsc."
+
+[[bash]]
+match = "curl*"
+action = "warn"
+hint = "Prefer PullMD for web pages: curl -s \"https://pullmd.example/api?url=<URL>\""
+
+# strict host allowlist: `contains` requires the PullMD URL to be present,
+# `only` forbids any other argument (extra URLs, -o file, ...). Flags pass via "-*".
+[[bash]]
+match = "curl"
+contains = ["https://pullmd.example/*"]
+only = ["-*", "https://pullmd.example/*"]
+action = "allow"
+
+# audit without deciding: rule-log entries land in settings.log_file
+[[bash]]
+match = "gh *"
+action = "log"
+
+# toolchain activation guidance: on a "command not found" failure with the
+# marker file in cwd, lictor tells the agent to activate and retry.
+# (Hooks can't silently re-run a failed command, so this is guidance, not magic.)
+[[activate]]
+file = ".prototools"
+run = "proto use"
+tools = ["node", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "tsc", "uv"]
+
+[[activate]]
+file = ".nvmrc"
+run = "nvm use"
+tools = ["node", "npm", "npx", "yarn"]
+
+# ---- edit rules: path globs + regex over written content (Edit/Write/MultiEdit/NotebookEdit)
+
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+pattern = "as (any|never|unknown)"
+action = "deny"
+hint = "No type assertions — fix the type design instead."
+
+[[edit]]
+paths = ["**/.env*"]
+action = "ask"
+hint = "Touching environment files."
+
+# ---- minify rules
+# wrap: rtk-style — rewrite the command to run under a token-efficient proxy
+# pipe: squeez-style — filter captured stdout through any stdin->stdout program
+# max_lines: built-in head/tail truncation, no external tool needed
+
+[[minify]]
+match = "git log*"
+wrap = "rtk"
+allow = true        # wrapped command is also auto-approved
+
+[[minify]]
+match = "npm install*"
+pipe = "tail -20"
+
+[[minify]]
+match = "vitest*"
+max_lines = 80

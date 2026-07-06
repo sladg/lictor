@@ -1,0 +1,26 @@
+[package]
+name = "lictor"
+version = "0.1.0"
+edition = "2024"
+description = "Policy gate for coding-agent tool calls — one binary in Claude Code's PreToolUse/PostToolUse hooks, configured in TOML. Walks in front of every tool call and stops the ones that shouldn't pass."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+regex = "1"
+globset = "0.4"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+
+# Strict lints. `cargo clippy --all-targets` fails on any clippy::all finding
+# (correctness + suspicious + style + complexity + perf). No pedantic/idiom groups:
+# they'd need dozens of lifetime/doc annotations that don't catch real bugs here.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+# the parser walks tree-sitter nodes by index; range loops read clearer than iterators
+needless_range_loop = "allow"
