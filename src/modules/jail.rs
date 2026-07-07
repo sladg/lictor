@@ -1,5 +1,6 @@
+use super::Plan;
 use crate::bash::{Command, Extraction};
-use crate::config::Config;
+use crate::config::{Config, ModuleSetting};
 
 // literal argument words that look like filesystem paths and resolve outside
 // the project and every allowed root. Lexical only: `~` expanded, `.`/`..`
@@ -9,17 +10,63 @@ use crate::config::Config;
 // invoked from a subdirectory can still `cd ..`/reference sibling paths
 // anywhere in the repo. cwd is the fallback when it isn't inside a repo.
 
-fn roots(config: &Config, cwd: &str, home: &str) -> Vec<String> {
+// project root (git repo containing cwd) + jail_allow — the one "trusted roots"
+// list the outside-project check reasons about
+pub(crate) fn roots(config: &Config, cwd: &str, home: &str) -> Vec<String> {
     let primary = git_root(cwd).unwrap_or_else(|| cwd.to_string());
     let mut roots = vec![normalize(&primary, cwd, home)];
     roots.extend(config.jail_allow().iter().map(|p| normalize(p, cwd, home)));
     roots
 }
 
-fn is_inside(roots: &[String], resolved: &str) -> bool {
+pub(crate) fn is_inside(roots: &[String], resolved: &str) -> bool {
     roots
         .iter()
         .any(|r| resolved == r || resolved.starts_with(&format!("{r}/")))
+}
+
+// containment as the filesystem sees it, not just the string: the lexical
+// `is_inside` first (fast, no syscalls, the common case), then a symlink-aware
+// fallback so a root and a candidate that spell differently but resolve to the
+// same place (macOS `/tmp` vs `/private/tmp`, any symlinked jail_allow root)
+// still match. The one trust predicate the jail check and path_rules share, so
+// neither can flag a path the other trusts.
+pub(crate) fn is_trusted(roots: &[String], resolved: &str) -> bool {
+    if is_inside(roots, resolved) {
+        return true;
+    }
+    let candidate_real = real_path(resolved);
+    roots.iter().any(|root| {
+        let root_real = real_path(root);
+        candidate_real == root_real || candidate_real.starts_with(&format!("{root_real}/"))
+    })
+}
+
+// resolves through real filesystem symlinks by canonicalizing the longest
+// existing ancestor and reattaching whatever doesn't exist yet unresolved — a
+// Write target's own file often doesn't exist. No hardcoded alias table:
+// whatever the OS actually symlinks, this follows. Falls back to the path
+// as-is when nothing on it resolves (also the common case: no syscalls needed).
+pub(crate) fn real_path(path: &str) -> String {
+    let mut current = std::path::PathBuf::from(path);
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = current.canonicalize() {
+            let mut result = real;
+            for part in suffix.iter().rev() {
+                result.push(part);
+            }
+            return result.to_string_lossy().into_owned();
+        }
+        let (Some(name), Some(parent)) = (
+            current.file_name().map(|n| n.to_os_string()),
+            current.parent(),
+        ) else {
+            return path.to_string();
+        };
+        suffix.push(name);
+        current = parent.to_path_buf();
+    }
 }
 
 // a single already-known literal path (Write/Edit/MultiEdit/NotebookEdit's
@@ -29,20 +76,144 @@ pub fn violation_for_path(path: &str, config: &Config, cwd: &str) -> Option<Stri
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = roots(config, cwd, &home);
     let resolved = normalize(path, cwd, &home);
-    (!is_inside(&roots, &resolved)).then_some(resolved)
+    (!is_trusted(&roots, &resolved)).then_some(resolved)
 }
 
 pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = roots(config, cwd, &home);
     let mut out = Vec::new();
-    // `cd` earlier in the same chain changes the base every later relative path
-    // resolves against (`cd .. && cat ../secret` escapes further than `cat`'s
-    // own literal ".." suggests). Track it sequentially. A subshell's `cd`
-    // (synthetic: bash -c/eval/find -exec) never leaks back to the parent
-    // shell, so only a non-synthetic `cd` updates the tracked cwd.
+    let candidate_of = |text: &str| {
+        let candidate = path_candidate(text);
+        looks_like_path(candidate).then(|| candidate.to_string())
+    };
+    for (_, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
+        if !is_trusted(&roots, &resolved) && !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    out
+}
+
+// the inside-the-project mirror of `violations`: an absolute path pointing at a
+// file INSIDE the project is pure token waste vs a relative path (and a
+// cwd-drift footgun). Literal paths only (args + `NAME=val` prefixes); dynamic
+// values are left alone. Gated by the `abs-paths` module setting. Boundary is
+// cwd, not the git root — the nudge suggests a path you can type from where you
+// are, a different question than jail's "did you escape the repo".
+pub fn relative_hints(extraction: &Extraction, config: &Config, cwd: Option<&str>, out: &mut Plan) {
+    let setting = match config.modules.get("abs-paths") {
+        Some(s) if *s != ModuleSetting::Off => *s,
+        _ => return,
+    };
+    let Some(cwd) = cwd else {
+        return;
+    };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cwd = normalize(cwd, cwd, &home);
+
+    // never the program word — bin paths are strip_program_paths' job. Split
+    // only genuine flag-style values (--path=/abs); a bare `msg=/tmp/x` word
+    // (commit message, echo payload) must not be mistaken for a path.
+    let candidate_of = |text: &str| {
+        let candidate = if text.starts_with('-') {
+            text.split_once('=').map_or(text, |(_, v)| v)
+        } else {
+            text
+        };
+        is_absolute(candidate).then(|| candidate.to_string())
+    };
+    let mut candidates: Vec<String> = walk_words(extraction, &cwd, &home, false, candidate_of)
+        .into_iter()
+        .map(|(_, resolved)| resolved)
+        .collect();
+    for raw in extraction.assignments.iter().map(String::as_str) {
+        if is_absolute(raw) {
+            candidates.push(normalize(raw, &cwd, &home));
+        }
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    for resolved in candidates {
+        if seen.contains(&resolved) {
+            continue;
+        }
+        let Some(message) = classify_in_project(&resolved, &cwd) else {
+            continue;
+        };
+        seen.push(resolved);
+        match setting {
+            ModuleSetting::Deny => out.denies.push(message),
+            ModuleSetting::Ask => out.asks.push(message),
+            ModuleSetting::Warn => out.hints.push(message),
+            ModuleSetting::Rewrite | ModuleSetting::Off | ModuleSetting::Allow => {}
+        }
+    }
+}
+
+fn is_absolute(text: &str) -> bool {
+    text.starts_with('/') || text == "~" || text.starts_with("~/")
+}
+
+fn is_under(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn classify_in_project(resolved: &str, cwd: &str) -> Option<String> {
+    if resolved == cwd {
+        return Some(format!(
+            "lictor: `{resolved}` is the project root itself — you're already there, so omit the argument entirely; only fall back to `.` if the flag requires a value"
+        ));
+    }
+    if is_under(resolved, cwd) {
+        let rel = resolved
+            .strip_prefix(&format!("{cwd}/"))
+            .unwrap_or(resolved);
+        return Some(format!(
+            "lictor: `{resolved}` is inside the project — reference it relative to the repo root as `{rel}`, not by absolute path (saves tokens, avoids cwd-drift path bugs)"
+        ));
+    }
+    None
+}
+
+// cd-aware walk over every literal argument word whose raw text passes
+// `interesting`, yielding (raw, resolved) pairs; shared by the outside-project
+// check, relative_hints, and path_rules so all agree on what a chain's `cd`
+// sequence resolves relative paths against.
+//
+// `cd` earlier in the same chain changes the base every later relative path
+// resolves against (`cd .. && cat ../secret` escapes further than `cat`'s
+// own literal ".." suggests). Track it sequentially. A subshell's `cd`
+// (synthetic: bash -c/eval/find -exec) never leaks back to the parent
+// shell, so only a non-synthetic `cd` updates the tracked cwd.
+//
+// `include_synthetic` controls whether words *inside* a nested shell
+// (`bash -c '...'`, `eval`, `find -exec`) are walked at all: the security
+// checks (jail, path_rules) want them (an escape hiding in a nested shell is
+// still an escape), relative_hints doesn't (a style nudge about the outer
+// command's own literal arguments has no opinion on what a sub-shell string
+// happens to contain).
+//
+// `candidate_of` turns a word's raw text into a path candidate, or None to
+// skip it — deliberately a caller-supplied strategy, not a shared one: the
+// security checks' `path_candidate` splits any `X=Y` word on its first `=` (a
+// security check would rather over-catch), which would misread an unrelated
+// word like a `bash -c 'D=/tmp/x cmd'` string as a flag=value pair.
+// relative_hints wants a much more conservative split (only genuine
+// `--flag=value` words).
+pub(crate) fn walk_words(
+    extraction: &Extraction,
+    cwd: &str,
+    home: &str,
+    include_synthetic: bool,
+    candidate_of: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     let mut effective_cwd = cwd.to_string();
     for command in &extraction.commands {
+        if command.synthetic && !include_synthetic {
+            continue;
+        }
         for word in command.words.iter().skip(1) {
             let expanded;
             let text = match word.text.as_deref() {
@@ -51,7 +222,7 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
                 // synthetic spans index the inner re-parsed string, not `source`, so skip.
                 None if !command.synthetic => {
                     let raw = extraction.source.get(word.start..word.end).unwrap_or("");
-                    match expand_home(raw, &home) {
+                    match expand_home(raw, home) {
                         Some(path) => {
                             expanded = path;
                             expanded.as_str()
@@ -61,22 +232,19 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
                 }
                 None => continue,
             };
-            let candidate = path_candidate(text);
-            if !looks_like_path(candidate) {
+            let Some(candidate) = candidate_of(text) else {
                 continue;
-            }
-            let resolved = normalize(candidate, &effective_cwd, &home);
-            if !is_inside(&roots, &resolved) && !out.contains(&resolved) {
-                out.push(resolved);
-            }
+            };
+            let resolved = normalize(&candidate, &effective_cwd, home);
+            out.push((candidate, resolved));
         }
         // `cd -` or a dynamic target: no way to know the result, so freeze
         // rather than guess — never worse than the old always-the-original-cwd
         // behavior, and correct everywhere else.
         if !command.synthetic
-            && let Some(Some(target)) = cd_target(command, &home)
+            && let Some(Some(target)) = cd_target(command, home)
         {
-            effective_cwd = normalize(&target, &effective_cwd, &home);
+            effective_cwd = normalize(&target, &effective_cwd, home);
         }
     }
     out
@@ -120,7 +288,7 @@ fn git_root(cwd: &str) -> Option<String> {
 
 // value after `flag=`, plus the path glued onto a short flag (-o/etc/x -> /etc/x);
 // the glued case requires an alphabetic flag letter so `-1/2`-style args don't false-trip
-fn path_candidate(text: &str) -> &str {
+pub(crate) fn path_candidate(text: &str) -> &str {
     let value = text.split_once('=').map_or(text, |(_, v)| v);
     if value.starts_with('-')
         && !value.starts_with("--")
@@ -201,6 +369,114 @@ mod tests {
         violations(&bash::extract(command), &config(allow), CWD)
     }
 
+    // ── relative_hints: the in-project absolute-path nudge (abs-paths module) ──
+
+    fn hints_for(command: &str, setting: &str) -> Plan {
+        let config: Config = toml::from_str(&format!("[modules]\nabs-paths = \"{setting}\""))
+            .expect("test config parses");
+        let mut plan = Plan::default();
+        relative_hints(&bash::extract(command), &config, Some(CWD), &mut plan);
+        plan
+    }
+
+    #[test]
+    fn in_project_absolute_arg_denied_with_relative_hint() {
+        // the motivating case: agent builds a full path for a repo file
+        let plan = hints_for(
+            "grep -c \"\" /Users/nobody/project/apps/courier/src/register/onboarding-flow.ts",
+            "deny",
+        );
+        assert_eq!(plan.denies.len(), 1);
+        assert!(
+            plan.denies[0].contains("apps/courier/src/register/onboarding-flow.ts")
+                && plan.denies[0].contains("relative"),
+            "{:?}",
+            plan.denies
+        );
+    }
+
+    #[test]
+    fn temp_arg_left_to_path_rules_only_in_project_flagged() {
+        // the in-project source is relative_hints' (omit-arg); /tmp/checkout is a
+        // [[path]]-rule concern now, so relative_hints flags exactly one
+        let plan = hints_for("git clone /Users/nobody/project /tmp/checkout", "deny");
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+    }
+
+    #[test]
+    fn flag_attached_in_project_path_denied() {
+        let plan = hints_for("rg foo --path=/Users/nobody/project/src", "deny");
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+    }
+
+    #[test]
+    fn project_root_itself_gets_omit_hint_not_a_self_referential_one() {
+        // the bug: resolved == cwd made strip_prefix miss, echoing the same
+        // absolute path back as the "relative" fix
+        let plan = hints_for(&format!("rg --files --cwd {CWD}"), "deny");
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+        assert!(
+            plan.denies[0].contains("project root itself") && plan.denies[0].contains("omit"),
+            "{:?}",
+            plan.denies
+        );
+        assert!(
+            !plan.denies[0].contains("reference it relative"),
+            "{:?}",
+            plan.denies
+        );
+    }
+
+    #[test]
+    fn relative_paths_untouched() {
+        // already relative — nothing to nag about
+        for cmd in [
+            "grep -c \"\" apps/courier/src/register/onboarding-flow.ts",
+            "cat src/main.rs",
+            "cargo build",
+            "ls ./scripts",
+        ] {
+            assert!(hints_for(cmd, "deny").denies.is_empty(), "flagged: {cmd}");
+        }
+    }
+
+    #[test]
+    fn outside_project_left_to_jail_and_path_rules() {
+        // /etc/passwd is outside — relative_hints ignores it (jail's job)
+        assert!(hints_for("cat /etc/passwd", "deny").denies.is_empty());
+    }
+
+    #[test]
+    fn dynamic_value_ignored() {
+        // $HOME/... resolves at runtime; relative_hints only reasons about literals
+        assert!(hints_for("cat $HOME/.ssh/config", "deny").denies.is_empty());
+        assert!(
+            hints_for("D=$TMPDIR/x cargo build", "deny")
+                .denies
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn setting_channels() {
+        // an in-project absolute arg exercises the abs-paths deny/ask/warn/off channels
+        let arg = "cat /Users/nobody/project/src/main.rs";
+        assert_eq!(hints_for(arg, "ask").asks.len(), 1);
+        assert_eq!(hints_for(arg, "warn").hints.len(), 1);
+        assert!(hints_for(arg, "off").denies.is_empty());
+    }
+
+    #[test]
+    fn nested_shell_arg_skipped() {
+        // relative_hints only nags the outer command's own literal args, never a
+        // sub-shell string's contents (include_synthetic = false)
+        assert!(
+            hints_for("bash -c 'cat /Users/nobody/project/src/main.rs'", "deny")
+                .denies
+                .is_empty()
+        );
+    }
+
     #[test]
     fn outside_paths_flagged() {
         assert_eq!(check("cat /etc/hosts", &[]), vec!["/etc/hosts"]);
@@ -242,6 +518,29 @@ mod tests {
         assert!(check("cat /tmp/x", &[]).len() == 1);
         // sibling dir with the allowed root as prefix is NOT covered
         assert_eq!(check("cat /tmpfoo/x", &["/tmp"]), vec!["/tmpfoo/x"]);
+    }
+
+    // a jail_allow root reached by its symlinked spelling must still be trusted:
+    // lexical containment misses it, the real_path fallback in is_trusted catches
+    // it — so path_rules (which shares is_trusted) can't disagree on aliased roots.
+    #[test]
+    fn symlinked_allow_root_recognized() {
+        let base = std::env::temp_dir().join(format!("lictor-jail-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real_dir = base.join("real-root");
+        let alias_dir = base.join("alias-root");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &alias_dir).unwrap();
+
+        // jail_allow lists the real dir; a path arriving via the alias spelling
+        // must still be inside the jail (previously flagged as an escape)
+        let command = format!("cat {}/notes.txt", alias_dir.to_str().unwrap());
+        assert!(
+            check(&command, &[real_dir.to_str().unwrap()]).is_empty(),
+            "symlinked allow-root should be trusted by jail"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

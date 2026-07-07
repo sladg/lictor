@@ -144,6 +144,28 @@ paths = ["**/.env*"]
 action = "ask"
 hint = "Touching environment files."
 
+# ---- path rules: dir globs -> action + your own hint, matched against every
+# filesystem path a command touches — Bash args (cd-aware), NAME=val / export
+# assignment values, write-redirect targets (echo x > /tmp/y), and Write/Edit
+# file paths. First matching rule wins, so a specific `allow` can carve an
+# exception out of a broad `deny`. Each glob is tested against both the lexical
+# and the symlink-resolved path (one /tmp/** covers macOS's /private/tmp too).
+# This is where temp/scratch/secrets policy lives — no default ships.
+
+[[path]]
+match = ["/private/tmp/claude-501/**"]   # this session's scratchpad is fine
+action = "allow"
+
+[[path]]
+match = ["/tmp/**", "/private/tmp/**"]    # everything else in temp is not
+action = "deny"
+hint = "scratch goes in .claude/scratch/ or `kv set`, never /tmp"
+
+[[path]]
+match = ["~/.ssh/**", "~/.aws/**"]
+action = "ask"
+hint = "touching credentials — confirm intent"
+
 # ---- minify rules
 # wrap: rtk-style — rewrite the command to run under a token-efficient proxy
 # pipe: squeez-style — filter captured stdout through any stdin->stdout program

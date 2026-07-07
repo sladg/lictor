@@ -51,6 +51,9 @@ pub struct Extraction {
     // literal values of `NAME=val` command prefixes (D=/tmp/x cmd) — dropped from
     // `words`, kept here so path-hygiene modules can see the scratch/abs path
     pub assignments: Vec<String>,
+    // write-redirect target paths (echo x > /tmp/y, cmd >> log) — neither words
+    // nor assignments, kept so path rules can flag where output is spilled
+    pub redirect_targets: Vec<String>,
     // names of functions defined in the source; path_check must not flag their calls
     pub functions: Vec<String>,
 }
@@ -139,6 +142,26 @@ fn walk(node: Node, source: &str, synthetic: bool, depth: usize, out: &mut Extra
     if node.kind() == "command" {
         collect_command(node, source, synthetic, depth, out);
     }
+    // `export/declare/local/readonly VAR=/path` parses as a declaration_command,
+    // not a plain command, so collect_command never sees it — capture the
+    // assigned path the same way a `NAME=val cmd` prefix is captured
+    if !synthetic && node.kind() == "declaration_command" {
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i)
+                && child.kind() == "variable_assignment"
+            {
+                if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                    flag_dangerous_env(text, out);
+                }
+                if let Some(value) = child
+                    .child_by_field_name("value")
+                    .and_then(|v| resolve_text(v, source))
+                {
+                    out.assignments.push(value);
+                }
+            }
+        }
+    }
     if node.kind() == "function_definition"
         && let Some(name) = function_name(node, source)
     {
@@ -155,6 +178,11 @@ fn walk(node: Node, source: &str, synthetic: bool, depth: usize, out: &mut Extra
         if let Some(dest) = dest.filter(|d| is_device_write_target(d)) {
             out.device_write = Some(format!("write to raw device `{dest}`"));
         }
+    }
+    if node.kind() == "file_redirect"
+        && let Some(target) = redirect_write_target(node, source)
+    {
+        out.redirect_targets.push(target);
     }
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
@@ -277,6 +305,23 @@ fn writes_via_redirect(node: Node, source: &str) -> bool {
         return true;
     }
     false
+}
+
+// destination path of a *write* redirect (>, >>, &>, N>), skipping fd dups
+// (2>&1), numeric fds, and /dev/null; None for read redirects (< file). Text is
+// raw — dynamic `$VAR/x` targets are left for the path module to filter out.
+fn redirect_write_target(node: Node, source: &str) -> Option<String> {
+    let text = node.utf8_text(source.as_bytes()).ok()?;
+    let operator = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    if !operator.starts_with('>') && !operator.starts_with("&>") {
+        return None;
+    }
+    let dest = node.named_child(node.named_child_count().saturating_sub(1))?;
+    if dest.kind() == "number" {
+        return None;
+    }
+    let path = dest.utf8_text(source.as_bytes()).ok()?;
+    (path != "/dev/null" && !path.starts_with('&')).then(|| path.to_string())
 }
 
 fn redirect_writes_file(stmt: Node, source: &str) -> bool {

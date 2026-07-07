@@ -138,6 +138,8 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     let mut plan = modules::plan(&extraction, config, input.cwd.as_deref(), &|paths| {
         modules::git_tracked(input.cwd.as_deref(), paths)
     });
+    let path_rules = modules::path_rules::compile(config)?;
+    modules::path_rules::plan(&path_rules, &extraction, input.cwd.as_deref(), &mut plan);
     let command = if plan.edits.is_empty() {
         original.to_string()
     } else {
@@ -304,6 +306,34 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
             Action::Deny | Action::Rewrite => {
                 outcome.decision = Some("deny");
                 outcome.reason = Some(message);
+            }
+        }
+    }
+
+    // [[path]] rules: file_path matched against the user's dir globs — same
+    // check Bash path args get, with the user's own action + hint
+    if outcome.decision != Some("deny")
+        && let Some(cwd) = input.cwd.as_deref()
+    {
+        let path_rules = modules::path_rules::compile(config)?;
+        if let Some((action, message)) = modules::path_rules::check(&path_rules, &path, cwd) {
+            match action {
+                Action::Deny => {
+                    outcome.decision = Some("deny");
+                    outcome.reason = Some(message);
+                }
+                Action::Ask => {
+                    if outcome.decision.is_none() || outcome.decision == Some("allow") {
+                        outcome.decision = Some("ask");
+                        outcome.reason = Some(message);
+                    }
+                }
+                Action::Warn => {
+                    if !outcome.hints.contains(&message) {
+                        outcome.hints.push(message);
+                    }
+                }
+                Action::Allow | Action::Log | Action::Rewrite | Action::Skip => {}
             }
         }
     }

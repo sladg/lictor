@@ -143,7 +143,11 @@ match = ["dd"]
 contains = ["of=/dev/*"]
 [[catalog.destructive.rules]]
 match = ["rm"]
-contains = ["/", "/*", "~", "~/*", "--no-preserve-root"]
+# literal root-level targets only — an escaped \* so it matches the exact
+# argument "/*"/"~/*" (shell's own unexpanded root-glob), not "*" as lictor's
+# own wildcard, which would otherwise catch every absolute/home path (e.g. a
+# jail_allow'd scratch dir) as "destructive"
+contains = ["/", "/\\*", "~", "~/\\*", "--no-preserve-root"]
 [[catalog.destructive.rules]]
 match = ["git push"]
 contains = ["--force", "-f"]

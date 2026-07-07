@@ -63,6 +63,7 @@ propose a commit message and wait for the user." reaches the agent instead of a 
 - **Argument-level rules** — `contains` (must include) and `only` (nothing else may appear) globs, so "allow `curl` but only against this one host" is three lines of TOML.
 - **GTFOBins detectors** — shell escapes in flag values (`tar --checkpoint-action=exec=sh`), program mini-languages (`awk 'BEGIN{system(...)}'`, `sqlite3 '.shell'`), git config injection (`git -c core.pager=…`), env-var prefixes (`LD_PRELOAD=…`), fork bombs, raw-device writes.
 - **Project jail** — literal paths outside the project and its allowed roots warn/ask/deny; catches `cat ~/.zshrc`, `cp x /tmp/y`, `../` escapes, `--flag=/abs/path`.
+- **Path rules** — your own dir globs (`/tmp/**`, `~/.ssh/**`) warn/ask/deny with your own hint, matched against every path a command touches: args, `NAME=val`/`export` values, redirect targets (`> /tmp/x`), and Write/Edit file paths. First match wins, so a specific `allow` can carve an exception out of a broad deny. This is where temp-scratch / secrets policy lives — ships no default, you bring the dirs and the message.
 - **Rogue-actor guard** — N consecutive denies pause shell autonomy: every Bash call asks until a command actually executes, which puts the user back in the loop.
 - **File-edit gates** — `Edit`/`Write`/`MultiEdit`/`NotebookEdit` matched by path glob + content regex.
 - **Per-mode overrides** — `[modes.auto]` / `[modes.bypassPermissions]` blocks layer on top of the base policy only when the session's `permission_mode` matches; settings override, rule lists append. Built in, no config needed: in `auto` mode any `ask` lictor would emit is downgraded to `deny` — nobody's there to answer a permission dialog, so an unanswerable `ask` would just stall the turn.
@@ -211,6 +212,11 @@ hint    = "No type assertions — fix the type design instead."
 paths  = ["**/.env*"]
 action = "ask"
 hint   = "Touching environment files."
+
+[[path]]
+match  = ["/tmp/**", "/private/tmp/**"]   # dir globs, matched against every path a command touches
+action = "deny"                           # first match wins; a specific `allow` can precede a broad deny
+hint   = "scratch goes in .claude/scratch/ or `kv set`, never /tmp"
 
 [[minify]]
 match = "git log*"

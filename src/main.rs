@@ -272,14 +272,16 @@ fn check(mode: Option<String>) {
                 rules::compile_bash_rules(&config)?;
                 content::compile_edit_rules(&config)?;
                 minify::compile_minify_rules(&config)?;
+                modules::path_rules::compile(&config)?;
                 Ok(config)
             });
         match loaded {
             Ok(config) => println!(
-                "ok       {} ({} bash, {} edit, {} minify rules)",
+                "ok       {} ({} bash, {} edit, {} path, {} minify rules)",
                 path.display(),
                 config.bash.len(),
                 config.edit.len(),
+                config.path.len(),
                 config.minify.len()
             ),
             Err(error) => {
@@ -300,9 +302,10 @@ fn check(mode: Option<String>) {
                 println!("mode     {mode}");
             }
             println!(
-                "expanded {} bash, {} edit, {} minify rules total",
+                "expanded {} bash, {} edit, {} path, {} minify rules total",
                 config.bash.len(),
                 config.edit.len(),
+                config.path.len(),
                 config.minify.len()
             );
             check_minify_tools(&config);

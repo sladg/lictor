@@ -2029,6 +2029,37 @@ fn jail_deny_mode_for_write() {
     assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
 }
 
+// a user [[path]] rule covers Write's file_path too, not just Bash args — the
+// scratch nudge is now the user's own configured message
+#[test]
+fn path_rule_denies_write_to_temp_with_custom_hint() {
+    let policy = "[[path]]\nmatch = [\"/tmp/**\"]\naction = \"deny\"\nhint = \"put scratch under .claude/scratch/ or kv set\"";
+    let output = jail_write(policy, "/tmp/scratch-notes.txt", "hi");
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+    let reason = output
+        .as_ref()
+        .and_then(|o| o.get("permissionDecisionReason"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        reason.contains(".claude/scratch/") && reason.contains("kv set"),
+        "got: {reason}"
+    );
+}
+
+// a first-match `allow` rule carves an exception out of a broad deny — the
+// explicit replacement for the old jail_allow'd-temp-root exemption
+#[test]
+fn path_rule_allow_exception_precedes_deny_for_write() {
+    let policy = "[[path]]\nmatch = [\"/private/tmp/claude-501/**\"]\naction = \"allow\"\n\n[[path]]\nmatch = [\"/private/tmp/**\"]\naction = \"deny\"";
+    let output = jail_write(
+        policy,
+        "/private/tmp/claude-501/some-session/scratchpad/notes.txt",
+        "hi",
+    );
+    assert_eq!(decision(&output), None, "got: {output:?}");
+}
+
 #[test]
 fn jail_applies_to_edit_tool() {
     let policy = jail_policy("ask", "");

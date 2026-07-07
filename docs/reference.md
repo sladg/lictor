@@ -45,8 +45,8 @@ jail = "deny"   # a plain `warn` elsewhere becomes a hard deny when nothing else
 ```
 
 **Built in, no config needed:** in `auto` mode, any `ask` lictor would otherwise emit — from a
-`[[bash]]`/`[[edit]] action = "ask"` rule, a catalog, `jail`, `on_dangerous_env`, a module, a
-config error, anything — is downgraded to `deny`. Nobody's there to answer the permission dialog
+`[[bash]]`/`[[edit]]`/`[[path]] action = "ask"` rule, a catalog, `jail`, `on_dangerous_env`, a
+module, a config error, anything — is downgraded to `deny`. Nobody's there to answer the permission dialog
 auto mode's own classifier doesn't cover, so an unanswerable `ask` would just stall the turn; a
 `deny` hands the agent a reason it can act on instead.
 
@@ -195,7 +195,7 @@ subset). These run **before** gating, so a rewrite is judged in its final form.
 | `delete-recreate` | off·warn·ask·deny | a `Write` resembling a just-`rm`'d file → "restore + `git mv`" instead of delete+recreate |
 | `self-rm` | off·warn·allow | `rm`/`git rm` targeting only paths created earlier this session (via `Write`, `mkdir`, or `touch`) → skip the mutating-catalog ask |
 | `pm-cwd` | off·warn·rewrite·ask·deny | `cd pkg && bun run x` → `bun --cwd pkg run x` (also `pnpm -C`, `npm --prefix`, `yarn --cwd`) |
-| `abs-paths` | off·warn·ask·deny | absolute paths the agent needlessly builds → nudge to relative / ban temp scratch (see below) |
+| `abs-paths` | off·warn·ask·deny | absolute paths the agent needlessly builds for **in-project** files → nudge to relative (see below). Specific dirs (temp/scratch/secrets) are `[[path]]` rules' job. |
 | `path-check` | off·warn·ask·deny | guaranteed *command not found* flagged upfront: program word not on PATH, or an unquoted zsh `=cmd` word that can't resolve (see below) |
 
 ```toml
@@ -232,10 +232,7 @@ rm scratch.rs other-preexisting-file.rs  → ask
 # abs-paths (deny): absolute path INSIDE the project
 grep -c "" /Users/me/proj/apps/courier/src/x.ts
 #   → deny: reference it relative to the repo root as `apps/courier/src/x.ts`
-
-# abs-paths (deny): system-temp scratch (also catches D=/tmp/... prefixes)
-D=/private/tmp/scratch/exploit cargo build
-#   → deny: put scratch under .claude/scratch/ or cache with `kv set`, never /tmp
+# (system-temp scratch, D=/tmp/... prefixes, secrets → see [[path]] rules below)
 
 # path-check (warn): program that can't resolve — command runs, agent is told why it failed
 tokf run -- cargo check                  → hint: `tokf` is not on PATH
@@ -262,6 +259,7 @@ includes the activation command.
 | Module | Config | What it does |
 |---|---|---|
 | jail | `settings.jail` = warn·ask·deny + `settings.jail_allow` | literal paths outside the project (and allowed roots) → gate. The project root is the git repo containing cwd (`git rev-parse --show-toplevel`), not cwd itself — free movement anywhere inside the repo, even after `cd ..` out of a subdirectory; falls back to plain cwd outside a repo. A `cd` earlier in the same chain shifts the base every later relative path resolves against (`cd .. && cat ../secret` is checked against the post-`cd` directory, not the original cwd); a subshell's `cd` (`bash -c`/`eval`/`find -exec`) never leaks out. `cd -` or a dynamic target freezes tracking at the last known cwd rather than guessing. Lexical (`~` expanded, `..` collapsed; no symlink/`$VAR` resolution). |
+| path | `[[path]]` blocks | user-listed dir globs → `deny`/`ask`/`warn`/`allow` + a custom `hint`, matched against every filesystem path a command touches: Bash args (cd-aware), `NAME=val` / `export VAR=…` assignment values, write-redirect targets (`echo x > /tmp/y`, `>> log`), and Write/Edit `file_path`. This is where the temp/scratch opinion lives — the tool ships no default, you bring the dirs and the message. First matching rule wins, so a specific `allow` precedes a broad `deny`. Each glob is tested against both the lexical and canonicalized (symlink-resolved) path, so one `/tmp/**` catches `/tmp/x`, macOS's `/private/tmp/x`, and relative spellings. |
 | strikes | `settings.strikes` = N | N consecutive Lictor denies with no command executed in between → every Bash call `ask`s until one runs (rogue-actor brake). |
 | activate | `[[activate]]` blocks | on a *command-not-found* failure with a toolchain marker in cwd → hint "run `<activate>`, retry". |
 
@@ -275,11 +273,35 @@ strikes = 5
 file = ".prototools"
 run  = "proto use"
 tools = ["node", "npm", "bun", "tsc", "uv", "go"]
+
+# [[path]] — your own dir policy. Order matters (first match wins).
+[[path]]
+match  = ["/private/tmp/claude-501/**"]   # this session's scratchpad is fine
+action = "allow"
+
+[[path]]
+match  = ["/tmp/**", "/private/tmp/**"]    # everything else in temp is not
+action = "deny"
+hint   = "scratch goes in .claude/scratch/ or `kv set`, never /tmp"
+
+[[path]]
+match  = ["~/.ssh/**", "~/.aws/**"]
+action = "ask"
+hint   = "touching credentials — confirm intent"
 ```
 
 ```bash
 # jail (ask): outside the project
 cat /etc/hosts                → ask   (cat src/main.rs → silent)
+
+# path (deny): a temp write, with YOUR message — every path-bearing token is checked
+touch /tmp/notes.txt                       → deny: scratch goes in .claude/scratch/ …
+D=/private/tmp/scratch/exploit cargo build → deny (NAME=val prefix)
+export OUT=/tmp/build                       → deny (declaration assignment)
+echo secret > /tmp/leak                     → deny (write-redirect target)
+bash -c 'echo x > /tmp/nested'             → deny (redirect inside a nested shell)
+#   but the allow rule above carves out the session scratchpad:
+echo hi > /private/tmp/claude-501/x        → silent
 
 # activate: `.prototools` present, exit 127
 bun run build  → "bun: command not found"
@@ -335,8 +357,14 @@ git-mv = "rewrite"
 git-rm = "rewrite"
 delete-recreate = "ask"
 pm-cwd = "rewrite"
-abs-paths = "deny"                # nudge absolute paths → relative; ban /tmp scratch
+abs-paths = "deny"                # nudge in-project absolute paths → relative
 path-check = "warn"               # tell the agent when a program can't resolve on PATH
+
+# [[path]] — dir policy (temp/scratch/secrets); see the modules section
+[[path]]
+match  = ["/tmp/**", "/private/tmp/**"]
+action = "deny"
+hint   = "scratch goes in .claude/scratch/ or `kv set`, never /tmp"
 
 # --- project overrides ---
 [catalog.git-read]

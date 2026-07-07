@@ -1,17 +1,19 @@
 // dynamic modules: context-aware checks backed by read-only probes.
-// git_wrap and pm_cwd plan command rewrites before gating; jail and strikes
-// hook into the gate and the engine; activate hints after a not-found failure;
-// path_check stops guaranteed not-found commands before they run;
+// git_wrap and pm_cwd plan command rewrites before gating; jail gates paths
+// outside the project and (via relative_hints, the abs-paths setting) nudges
+// in-project absolute paths to relative; path_rules gates the user's [[path]]
+// dir globs; strikes hooks into the gate and the engine; activate hints after a
+// not-found failure; path_check stops guaranteed not-found commands before they run;
 // recreate flags delete+rewrite done instead of a rename;
 // self_rm tracks session-created paths so their own rm/git rm skips the ask;
 // retry_allow counts denies-per-rule so a deny-then-allow rule flips to
 // allow once its retry_count is spent within retry_window.
 // One module per file, tests included.
-pub mod abspath;
 pub mod activate;
 pub mod git_wrap;
 pub mod jail;
 pub mod path_check;
+pub mod path_rules;
 pub mod pm_cwd;
 pub mod recreate;
 pub mod retry_allow;
@@ -44,7 +46,7 @@ pub fn plan(
 ) -> Plan {
     let mut plan = git_wrap::plan(extraction, config, tracked);
     pm_cwd::plan(extraction, config, &mut plan);
-    abspath::plan(extraction, config, cwd, &mut plan);
+    jail::relative_hints(extraction, config, cwd, &mut plan);
     path_check::plan(extraction, config, cwd, &mut plan);
     plan
 }

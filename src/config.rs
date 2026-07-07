@@ -74,6 +74,19 @@ pub struct EditRule {
     pub retry_window: Option<u64>,
 }
 
+// user-listed filesystem paths -> action + hint, matched against paths the
+// agent touches (Bash args + Write/Edit file_path). The opinion (which dirs,
+// what message) lives here in config, not in Rust — e.g. `/tmp/** -> deny,
+// "use .claude/scratch/ or kv"`. First matching rule wins.
+#[derive(Debug, Deserialize)]
+pub struct PathRule {
+    #[serde(rename = "match")]
+    pub globs: Vec<String>,
+    pub action: Action,
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MinifyRule {
     #[serde(rename = "match")]
@@ -207,6 +220,8 @@ pub struct Config {
     #[serde(default)]
     pub edit: Vec<EditRule>,
     #[serde(default)]
+    pub path: Vec<PathRule>,
+    #[serde(default)]
     pub minify: Vec<MinifyRule>,
     #[serde(default)]
     pub activate: Vec<ActivateRule>,
@@ -229,6 +244,7 @@ impl Config {
     pub fn merge(mut self, other: Config) -> Config {
         self.bash.extend(other.bash);
         self.edit.extend(other.edit);
+        self.path.extend(other.path);
         self.minify.extend(other.minify);
         self.activate.extend(other.activate);
         // same-name catalog block: later file (project) replaces earlier (user)
