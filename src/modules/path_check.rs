@@ -91,7 +91,7 @@ fn check_equals_expansion(extraction: &Extraction, setting: ModuleSetting, out: 
     }
 }
 
-fn on_path(name: &str) -> bool {
+pub fn on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return true; // no PATH visible: can't judge, stay silent
     };
@@ -127,7 +127,7 @@ fn push(out: &mut Plan, setting: ModuleSetting, message: String) {
         ModuleSetting::Deny => out.denies.push(message),
         ModuleSetting::Ask => out.asks.push(message),
         ModuleSetting::Warn => out.hints.push(message),
-        ModuleSetting::Rewrite | ModuleSetting::Off => {}
+        ModuleSetting::Rewrite | ModuleSetting::Off | ModuleSetting::Allow => {}
     }
 }
 

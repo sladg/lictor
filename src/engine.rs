@@ -1,7 +1,7 @@
 use crate::audit;
 use crate::config::{Action, Config, ModuleSetting};
 use crate::hook::{HookInput, HookOutput};
-use crate::modules::{activate, strikes};
+use crate::modules::{activate, retry_allow, strikes};
 use crate::{bash, content, minify, modules, rules};
 use serde_json::Value;
 
@@ -13,14 +13,33 @@ pub fn evaluate(input: &HookInput, config: &Config) -> Option<HookOutput> {
         ("PostToolUseFailure", "Bash") => post_failure(input, config),
         _ => Ok(None),
     };
-    match result {
+    let output = match result {
         Ok(output) => output,
         // config/rule compile error: fail closed on PreToolUse, stay silent on PostToolUse
         Err(error) => match input.hook_event_name.as_str() {
             "PreToolUse" => Some(error_output(&input.hook_event_name, &error)),
             _ => None,
         },
+    };
+    output.map(|o| deny_asks_in_auto_mode(o, input))
+}
+
+// auto mode has no human to answer a permission dialog — Claude Code's own
+// auto-mode classifier resolves the tool's own permission check, but a hook
+// explicitly asking still surfaces a prompt nobody can dismiss and stalls the
+// turn. Deny instead: the agent gets a deterministic answer and keeps moving.
+fn deny_asks_in_auto_mode(mut output: HookOutput, input: &HookInput) -> HookOutput {
+    let out = &mut output.hook_specific_output;
+    if input.permission_mode.as_deref() == Some("auto")
+        && out.permission_decision.as_deref() == Some("ask")
+    {
+        out.permission_decision = Some("deny".to_string());
+        out.permission_decision_reason = out
+            .permission_decision_reason
+            .as_deref()
+            .map(|r| format!("{r} (auto mode: no one to answer 'ask' — denying instead)"));
     }
+    output
 }
 
 pub fn error_output(event: &str, error: &str) -> HookOutput {
@@ -29,6 +48,27 @@ pub fn error_output(event: &str, error: &str) -> HookOutput {
     output.hook_specific_output.permission_decision_reason =
         Some(format!("lictor config error: {error}"));
     output
+}
+
+// deny-then-allow: a rule's retry_count denies within retry_window flip the
+// next resubmission to allow instead — the counter is spent (reset) once it does
+fn apply_deny_retry(outcome: &mut rules::GateOutcome, config: &Config, input: &HookInput) {
+    let Some(session) = input.session_id.as_deref() else {
+        return;
+    };
+    let Some((key, threshold, window)) = &outcome.deny_retry else {
+        return;
+    };
+    let prior = retry_allow::count(config, input.cwd.as_deref(), session, key, *window);
+    if prior >= *threshold {
+        outcome.decision = Some("allow");
+        outcome.reason = Some(format!(
+            "lictor: auto-allowed — resubmitted after {threshold} denies of rule `{key}` within {window}s"
+        ));
+        retry_allow::reset(config, input.cwd.as_deref(), session, key);
+    } else {
+        retry_allow::bump(config, input.cwd.as_deref(), session, key);
+    }
 }
 
 fn write_audit(
@@ -109,6 +149,7 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     let module_rewrote = command != original;
 
     let mut outcome = rules::gate(&extraction, &bash_rules, config, input.cwd.as_deref());
+    apply_deny_retry(&mut outcome, config, input);
 
     // module verdicts: a gate deny still wins; a module deny beats everything else
     if outcome.decision != Some("deny") {
@@ -126,6 +167,29 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
             }
             // ask reasons only reach the user's prompt; the model learns via hint
             plan.hints.push(reason.clone());
+        }
+    }
+
+    // self-cleanup: rm/git rm of paths created earlier this session skips the
+    // ask — but only when no other module is already asking about this command
+    if outcome.decision == Some("ask")
+        && plan.asks.is_empty()
+        && let Some((setting, message)) = modules::self_rm::check(
+            &extraction,
+            config,
+            input.cwd.as_deref(),
+            input.session_id.as_deref(),
+        )
+    {
+        match setting {
+            ModuleSetting::Allow => {
+                outcome.decision = Some("allow");
+                outcome.reason = Some(message);
+            }
+            ModuleSetting::Warn if !outcome.hints.contains(&message) => {
+                outcome.hints.push(message);
+            }
+            _ => {}
         }
     }
 
@@ -148,6 +212,12 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     // fingerprint rm targets while the files still exist, for delete/recreate detection
     if outcome.decision != Some("deny") {
         modules::recreate::record(
+            &extraction,
+            config,
+            input.cwd.as_deref(),
+            input.session_id.as_deref(),
+        );
+        modules::self_rm::record_bash(
             &extraction,
             config,
             input.cwd.as_deref(),
@@ -205,6 +275,7 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
     };
     let edit_rules = content::compile_edit_rules(config)?;
     let mut outcome = content::gate_content(&path, &contents, &edit_rules);
+    apply_deny_retry(&mut outcome, config, input);
 
     // jail: Write/Edit/MultiEdit/NotebookEdit's file_path is a literal, already-
     // resolved path — same containment check as Bash's jail module, just without
@@ -217,7 +288,7 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
             "lictor: `{resolved}` is outside the project jail — stay in the repo or have the user extend settings.jail_allow"
         );
         match action {
-            Action::Allow | Action::Log => {}
+            Action::Allow | Action::Log | Action::Skip => {}
             Action::Warn => {
                 if !outcome.hints.contains(&message) {
                     outcome.hints.push(message);
@@ -240,6 +311,12 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
     // delete/recreate: a Write that resurrects a just-deleted file is a rename
     // done the history-destroying way
     if input.tool_name == "Write" && outcome.decision != Some("deny") {
+        modules::self_rm::record_write(
+            config,
+            input.cwd.as_deref(),
+            input.session_id.as_deref(),
+            &path,
+        );
         let hit = modules::recreate::check(
             config,
             input.cwd.as_deref(),

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use lictor::{config, content, engine, hook::HookInput, minify, rules};
+use lictor::{config, content, engine, hook::HookInput, minify, modules, rules};
 use serde_json::Value;
 use std::io::{IsTerminal, Read};
 
@@ -28,6 +28,9 @@ enum Cmd {
         /// Command to gate + run + minify (everything after --)
         #[arg(last = true)]
         command: Vec<String>,
+        /// Resolve config as if permission_mode were this value (e.g. auto, bypassPermissions)
+        #[arg(long)]
+        mode: Option<String>,
     },
     /// Print the settings.json hooks snippet
     Init {
@@ -49,8 +52,8 @@ fn main() {
             let _ = Cli::command().print_help();
         }
         None | Some(Cmd::Hook) => run_hook(),
-        Some(Cmd::Check { command }) if !command.is_empty() => check_command(command),
-        Some(Cmd::Check { .. }) => check(),
+        Some(Cmd::Check { command, mode }) if !command.is_empty() => check_command(command, mode),
+        Some(Cmd::Check { mode, .. }) => check(mode),
         Some(Cmd::Init { write }) => init(write),
         Some(Cmd::Gain) => gain(),
     }
@@ -90,7 +93,7 @@ fn quote(word: &str) -> String {
 // `check -- <cmd...>`: run one command through the same PreToolUse -> exec ->
 // PostToolUse pipeline the hooks use, narrating decisions on stderr. The
 // model-visible output (post minify/spill) lands on stdout; exit code propagates.
-fn check_command(args: Vec<String>) {
+fn check_command(args: Vec<String>, mode: Option<String>) {
     if args.is_empty() {
         eprintln!("lictor: check -- needs a command, e.g. `lictor check -- git commit -m x`");
         std::process::exit(1);
@@ -103,7 +106,7 @@ fn check_command(args: Vec<String>) {
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(String::from));
-    let mut config = match config::load(cwd.as_deref()) {
+    let mut config = match config::load(cwd.as_deref(), mode.as_deref()) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("lictor: config error: {error}");
@@ -122,6 +125,7 @@ fn check_command(args: Vec<String>) {
         cwd: cwd.clone(),
         session_id: None,
         duration_ms: None,
+        permission_mode: mode.clone(),
     };
     let mut final_command = command.clone();
     let mut decision = None;
@@ -185,6 +189,7 @@ fn check_command(args: Vec<String>) {
         cwd,
         session_id: None,
         duration_ms: Some(duration_ms),
+        permission_mode: mode,
     };
     let mut shown = stdout;
     if let Some(output) = engine::evaluate(&post, &config) {
@@ -214,7 +219,7 @@ fn check_command(args: Vec<String>) {
 fn gain() {
     let cwd = std::env::current_dir().ok();
     let cwd = cwd.as_ref().and_then(|p| p.to_str());
-    let config = match config::load(cwd) {
+    let config = match config::load(cwd, None) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("lictor: {error}");
@@ -239,7 +244,7 @@ fn run_hook() {
     let Ok(input) = serde_json::from_str::<HookInput>(&raw) else {
         return;
     };
-    let output = match config::load(input.cwd.as_deref()) {
+    let output = match config::load(input.cwd.as_deref(), input.permission_mode.as_deref()) {
         Ok(config) => engine::evaluate(&input, &config),
         Err(error) if input.hook_event_name == "PreToolUse" => {
             Some(engine::error_output(&input.hook_event_name, &error))
@@ -251,7 +256,7 @@ fn run_hook() {
     }
 }
 
-fn check() {
+fn check(mode: Option<String>) {
     let cwd = std::env::current_dir().ok();
     let cwd = cwd.as_ref().and_then(|p| p.to_str());
     let mut found = false;
@@ -286,10 +291,13 @@ fn check() {
     if !found {
         println!("no config files found (user config + ancestor lictor.toml chain)");
     }
-    match config::load(cwd) {
+    match config::load(cwd, mode.as_deref()) {
         Ok(config) => {
             if !config.activated_catalogs.is_empty() {
                 println!("catalogs {}", config.activated_catalogs.join(", "));
+            }
+            if let Some(mode) = &mode {
+                println!("mode     {mode}");
             }
             println!(
                 "expanded {} bash, {} edit, {} minify rules total",
@@ -297,10 +305,23 @@ fn check() {
                 config.edit.len(),
                 config.minify.len()
             );
+            check_minify_tools(&config);
         }
         Err(error) => {
             println!("ERROR    merged config: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+// wrap/pipe name an external minifier (rtk, tokf, squeez, ...); missing ones
+// pass rule compilation fine but every matched command fails at run time.
+fn check_minify_tools(config: &config::Config) {
+    for program in minify::minify_tools(config) {
+        if !modules::on_path(program) {
+            println!(
+                "warn     minify tool `{program}` is not on PATH — matching commands will fail with 'command not found'"
+            );
         }
     }
 }

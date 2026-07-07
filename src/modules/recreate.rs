@@ -84,7 +84,7 @@ fn jaccard(a: &[u64], b: &[u64]) -> f64 {
 
 // literal path args of `rm [flags]` / `git rm [flags]`; --cached keeps the
 // file so it does not count as a deletion
-fn deletion_targets(command: &Command) -> Vec<String> {
+pub(super) fn deletion_targets(command: &Command) -> Vec<String> {
     let words: Vec<&str> = command
         .words
         .iter()
@@ -122,12 +122,12 @@ fn load(path: &PathBuf) -> Vec<Entry> {
         .collect()
 }
 
-fn resolve(path: &str, cwd: &str) -> String {
-    if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("{cwd}/{path}")
-    }
+// lexically collapses `.`/`..` and expands `~` (see jail::normalize) — a naive
+// `{cwd}/{path}` concatenation lets `scratch/../../outside/secret` pass a
+// tracked-prefix check for `scratch` while landing entirely outside it
+pub(super) fn resolve(path: &str, cwd: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    crate::modules::jail::normalize(path, cwd, &home)
 }
 
 pub fn record(extraction: &Extraction, config: &Config, cwd: Option<&str>, session: Option<&str>) {
@@ -238,6 +238,17 @@ mod tests {
 
     fn body(tag: &str) -> String {
         (1..=10).map(|i| format!("{tag} line {i}\n")).collect()
+    }
+
+    #[test]
+    fn resolve_collapses_traversal() {
+        // a naive `{cwd}/{path}` concatenation would leave `../..` intact,
+        // letting a prefix check on the result believe it's still inside cwd
+        assert_eq!(
+            resolve("scratch/../../outside/secret.txt", "/repo"),
+            "/outside/secret.txt"
+        );
+        assert_eq!(resolve("a/./b", "/repo"), "/repo/a/b");
     }
 
     #[test]

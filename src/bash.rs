@@ -432,6 +432,12 @@ const WRAPPERS: &[Wrapper] = &[
         skip_positional: 0,
         skip_env_assigns: false,
     },
+    Wrapper {
+        name: "watch",
+        flags_with_arg: &["-n", "--interval"],
+        skip_positional: 0,
+        skip_env_assigns: false,
+    },
 ];
 
 // peels wrapper programs (sudo env xargs ...) so rules see the real command;

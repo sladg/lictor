@@ -20,13 +20,46 @@ checked, so a monorepo root config applies in every package dir:
 
 `lictor init` writes a starter `lictor.toml` (the shipped [`src/default.toml`](../src/default.toml)).
 
+### Per-mode overrides (`[modes.*]`)
+
+A `[modes.<mode>]` block is one more config layer, applied last, only when the hook's
+`permission_mode` matches `<mode>` — one of `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
+`bypassPermissions`. Same merge rule as file layering: scalar `[modes.*.settings]` fields
+override, `[[modes.*.bash]]` / `[[modes.*.edit]]` rules append (most-restrictive-wins still
+applies across base + overlay rules).
+
+```toml
+# base: curl is fine
+[[bash]]
+match = "curl*"
+action = "allow"
+
+# auto/bypassPermissions: nobody's approving each call, so tighten the same command
+[[modes.auto.bash]]
+match = "curl*"
+action = "deny"
+reason = "auto mode: no unattended network access"
+
+[modes.bypassPermissions.settings]
+jail = "deny"   # a plain `warn` elsewhere becomes a hard deny when nothing else is watching
+```
+
+**Built in, no config needed:** in `auto` mode, any `ask` lictor would otherwise emit — from a
+`[[bash]]`/`[[edit]] action = "ask"` rule, a catalog, `jail`, `on_dangerous_env`, a module, a
+config error, anything — is downgraded to `deny`. Nobody's there to answer the permission dialog
+auto mode's own classifier doesn't cover, so an unanswerable `ask` would just stall the turn; a
+`deny` hands the agent a reason it can act on instead.
+
+Dry-run a mode without a live session: `lictor check --mode auto -- 'curl https://x'` or
+`lictor check --mode auto` (validates the merged config as that mode would see it).
+
 ### Actions — the shared vocabulary
 
 Every gate rule resolves to one action. When several rules match a command, **most-restrictive
 wins, order-independent**:
 
 ```
-deny  >  ask  >  warn  >  rewrite  >  allow
+deny  >  skip  >  ask  >  warn  >  rewrite  >  allow
 ```
 
 | Action | Effect |
@@ -37,8 +70,29 @@ deny  >  ask  >  warn  >  rewrite  >  allow
 | `warn` | no decision; attach a `hint` to the agent's context. |
 | `rewrite` | replace the command with a safer/cheaper form, then re-gate the result. |
 | `log` | audit-only: record the match, decide nothing. |
+| `skip` | true no-op — no decision, hint, edit, or log entry. Overrides any `ask`/`warn`/`log`/`allow` another rule gives the *same* match, so a narrow rule can carve an exception out of a broad catalog (e.g. exempt one `rm` pattern from `mutating`'s blanket ask). An explicit `deny` elsewhere still wins. With nothing left to decide, Claude Code's own permission rules apply. |
 
-Modules use the same words minus `log`, plus `off` (disabled).
+Modules use the same words minus `log`/`skip`, plus `off` (disabled).
+
+### Deny-then-allow (`retry_count` / `retry_window`)
+
+A `[[bash]]`/`[[edit]]` `deny` rule can carry `retry_count` (denies required)
+and `retry_window` (seconds); both must be set to activate. The rule denies
+as usual, but once it has denied the *same rule* `retry_count` times within
+`retry_window` seconds of the last deny, the next resubmission is
+auto-allowed instead — a cosmetic retry of a denied command shouldn't need
+to fight the same hint forever. The counter is per rule per session (`lictor
+check` never touches it — every debug run looks like a first attempt) and
+expires on its own if the agent doesn't retry in time.
+
+```toml
+[[bash]]
+match = "cat > *.sh"
+action = "deny"
+hint = "don't write bash scripts! use the Write tool. Resubmit if you must."
+retry_count = 1     # deny once, then allow the retry
+retry_window = 30    # ...if it lands within 30s of the deny
+```
 
 ---
 
@@ -67,6 +121,18 @@ add = ["git submodule status"]          # extend the built-in
 match  = ["terraform apply", "flyctl deploy", "kubectl * -n prod*"]
 action = "ask"
 reason = "production surface — confirm"
+```
+
+A one-off `skip` rule carves a narrower exception out of a catalog's blanket action instead of
+overriding the whole catalog:
+
+```toml
+[settings]
+catalogs = ["recommended"]      # mutating catalog: rm -> ask
+
+[[bash]]
+match  = "rm .claude/scratch/*"  # our own scratch dir specifically
+action = "skip"                 # -> no opinion; Claude Code's own rules decide
 ```
 
 ### Built-in catalogs
@@ -119,14 +185,15 @@ state). Two config styles:
 
 ### A. The `[modules]` namespace
 
-Toggle each by name. Values: `off | warn | rewrite | ask | deny` (each module accepts a subset).
-These run **before** gating, so a rewrite is judged in its final form.
+Toggle each by name. Values: `off | warn | rewrite | ask | deny | allow` (each module accepts a
+subset). These run **before** gating, so a rewrite is judged in its final form.
 
 | Module | Accepts | What it does |
 |---|---|---|
 | `git-mv` | off·warn·rewrite | `mv` of a git-tracked path → `git mv` (keeps history) |
 | `git-rm` | off·warn·rewrite | `rm` of a git-tracked path → `git rm` (records the deletion) |
 | `delete-recreate` | off·warn·ask·deny | a `Write` resembling a just-`rm`'d file → "restore + `git mv`" instead of delete+recreate |
+| `self-rm` | off·warn·allow | `rm`/`git rm` targeting only paths created earlier this session (via `Write`, `mkdir`, or `touch`) → skip the mutating-catalog ask |
 | `pm-cwd` | off·warn·rewrite·ask·deny | `cd pkg && bun run x` → `bun --cwd pkg run x` (also `pnpm -C`, `npm --prefix`, `yarn --cwd`) |
 | `abs-paths` | off·warn·ask·deny | absolute paths the agent needlessly builds → nudge to relative / ban temp scratch (see below) |
 | `path-check` | off·warn·ask·deny | guaranteed *command not found* flagged upfront: program word not on PATH, or an unquoted zsh `=cmd` word that can't resolve (see below) |
@@ -136,6 +203,7 @@ These run **before** gating, so a rewrite is judged in its final form.
 git-mv = "rewrite"
 git-rm = "rewrite"
 delete-recreate = "ask"
+self-rm = "allow"
 pm-cwd = "rewrite"
 abs-paths = "deny"        # opt-in; NOT in the shipped default
 path-check = "warn"
@@ -155,6 +223,11 @@ cd monorepo/pkg && bun run lint          → bun --cwd monorepo/pkg run lint
 
 # delete-recreate (ask): after `rm old.rs`, a Write of near-identical content →
 #   "this is 95% similar to recently deleted old.rs — git checkout -- old.rs, then git mv"
+
+# self-rm (allow): Write scratch.rs (new file), then...
+rm scratch.rs                            → allowed, no ask
+# ...but a chain touching anything untracked still asks
+rm scratch.rs other-preexisting-file.rs  → ask
 
 # abs-paths (deny): absolute path INSIDE the project
 grep -c "" /Users/me/proj/apps/courier/src/x.ts
@@ -276,6 +349,17 @@ add    = ["gh api"]
 [[bash]]                          # one-offs still work
 match  = "rm -rf node_modules"
 action = "allow"
+
+# --- unattended modes: tighten up when nothing's watching per call ---
+[modes.auto.settings]
+jail = "deny"                     # hard-confine to the repo; no human to approve an escape
+
+[modes.bypassPermissions.settings]
+jail = "deny"
+
+[[modes.bypassPermissions.bash]]
+match  = "curl*"
+action = "deny"                   # net-egress asks elsewhere; unattended mode can't ask
 
 [[activate]]
 file = ".prototools"

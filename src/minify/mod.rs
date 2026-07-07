@@ -53,6 +53,25 @@ pub fn compile_minify_rules(config: &Config) -> Result<Vec<CompiledMinifyRule<'_
         .collect()
 }
 
+// distinct first-word binaries named by wrap/pipe, so `lictor check` can flag
+// ones missing from PATH before a matching command fails at run time
+pub fn minify_tools(config: &Config) -> Vec<&str> {
+    let mut tools: Vec<&str> = Vec::new();
+    for rule in &config.minify {
+        for cmd in [rule.wrap.as_deref(), rule.pipe.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(program) = cmd.split_whitespace().next()
+                && !tools.contains(&program)
+            {
+                tools.push(program);
+            }
+        }
+    }
+    tools
+}
+
 fn matches(rule: &CompiledMinifyRule, words: &[crate::bash::Word]) -> bool {
     words.len() >= rule.words.len()
         && rule.words.iter().enumerate().all(|(i, re)| {
@@ -87,4 +106,28 @@ fn run_piped(shell_command: &str, input: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minify_tools_dedupes_first_words_of_wrap_and_pipe() {
+        let config: Config = toml::from_str(
+            r#"
+            [[minify]]
+            match = "git log*"
+            wrap = "rtk"
+            [[minify]]
+            match = "cargo test*"
+            wrap = "tokf run"
+            [[minify]]
+            match = "cargo build*"
+            pipe = "tokf filter"
+            "#,
+        )
+        .expect("test policy parses");
+        assert_eq!(minify_tools(&config), vec!["rtk", "tokf"]);
+    }
 }

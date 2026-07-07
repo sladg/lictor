@@ -18,6 +18,10 @@ pub struct HookInput {
     // PostToolUse: tool execution time, excludes permission prompts and hooks
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    // "default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions";
+    // not every event carries it
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]

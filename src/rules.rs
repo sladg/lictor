@@ -203,6 +203,9 @@ pub struct GateOutcome {
     pub logged: Vec<(String, String)>,
     // path-normalization rewrites; applied to updatedInput but never affect the decision
     pub cosmetic_edits: Vec<SpanEdit>,
+    // (rule key, retry_count, retry_window) of the deny rule that fired, when
+    // it carries a deny-then-allow retry policy
+    pub deny_retry: Option<(String, u32, u64)>,
 }
 
 // a chain auto-approves only when every site has a vetted variant
@@ -240,12 +243,30 @@ pub fn gate(
     let mut ask_hit: Option<String> = None;
     let mut synthetic_rewrite: Option<String> = None;
 
+    // a command a `skip` rule confidently matches is exempted from every OTHER
+    // rule's ask/warn/log/allow/rewrite verdict — only an explicit `deny`
+    // elsewhere still wins. Lets a narrow rule carve an exception out of a
+    // broad catalog (e.g. one `rm` pattern out of `mutating`'s blanket ask),
+    // handing the decision back to Claude Code's own permission rules.
+    let skipped: Vec<bool> = extraction
+        .commands
+        .iter()
+        .map(|command| {
+            rules.iter().any(|rule| {
+                rule.rule.action == Action::Skip && match_command(rule, command) == Match::Yes
+            })
+        })
+        .collect();
+
     // collect matches for every (command, rule) pair first; severity decides afterwards,
     // so config order can't let an ask/allow rule shadow a deny
     for (ci, command) in extraction.commands.iter().enumerate() {
         for rule in rules {
             let matched = match_command(rule, command);
-            if matched == Match::No {
+            if matched == Match::No || rule.rule.action == Action::Skip {
+                continue;
+            }
+            if skipped[ci] && rule.rule.action != Action::Deny {
                 continue;
             }
             let display = command.display();
@@ -255,6 +276,11 @@ pub fn gate(
                         "lictor: `{display}` is banned by rule `{}`",
                         rule.rule.pattern
                     )));
+                    if let (Some(n), Some(w)) = (rule.rule.retry_count, rule.rule.retry_window) {
+                        outcome
+                            .deny_retry
+                            .get_or_insert((rule.rule.pattern.clone(), n, w));
+                    }
                 }
                 (Action::Deny | Action::Ask, Match::Unknown) => {
                     unknown_hit.get_or_insert(format!(
@@ -303,7 +329,8 @@ pub fn gate(
                     }
                 }
                 (Action::Rewrite | Action::Allow | Action::Warn | Action::Log, Match::Unknown) => {}
-                (_, Match::No) => unreachable!(),
+                // filtered out above (Skip never reaches here, No never survives the continue)
+                (Action::Skip, _) | (_, Match::No) => unreachable!(),
             }
         }
     }
@@ -325,7 +352,7 @@ pub fn gate(
                 "lictor: `{path}` is outside the project jail — stay in the repo or have the user extend settings.jail_allow"
             );
             match action {
-                Action::Allow | Action::Log => {}
+                Action::Allow | Action::Log | Action::Skip => {}
                 Action::Warn => push_hint(&mut outcome.hints, message),
                 Action::Ask => {
                     ask_hit.get_or_insert(message);
@@ -350,6 +377,7 @@ pub fn gate(
     if let Some(reason) = &extraction.obfuscation {
         let message = format!("lictor: {reason}");
         match config.on_obfuscation() {
+            Action::Skip => {}
             Action::Allow | Action::Warn | Action::Log => push_hint(&mut outcome.hints, message),
             Action::Ask => return finish(outcome, "ask", message),
             _ => return finish(outcome, "deny", message),
@@ -358,6 +386,7 @@ pub fn gate(
     if let Some(reason) = &extraction.dangerous_env {
         let message = format!("lictor: {reason}");
         match config.on_dangerous_env() {
+            Action::Skip => {}
             Action::Allow | Action::Warn | Action::Log => push_hint(&mut outcome.hints, message),
             Action::Ask => return finish(outcome, "ask", message),
             _ => return finish(outcome, "deny", message),
@@ -373,6 +402,7 @@ pub fn gate(
         let message = format!("lictor: `{}`: {inline}", command.display());
         match config.on_inline_script() {
             Action::Deny => return finish(outcome, "deny", message),
+            Action::Skip => {}
             Action::Allow | Action::Warn | Action::Log => push_hint(&mut outcome.hints, message),
             _ => return finish(outcome, "ask", message),
         }
@@ -393,7 +423,7 @@ pub fn gate(
                 command.display()
             );
             match action {
-                Action::Allow | Action::Log => {}
+                Action::Allow | Action::Log | Action::Skip => {}
                 Action::Warn => push_hint(&mut outcome.hints, message),
                 Action::Ask => return finish(outcome, "ask", message),
                 _ => return finish(outcome, "deny", message),
@@ -404,6 +434,7 @@ pub fn gate(
         let message = format!("lictor: {reason}");
         match config.on_unparseable() {
             Action::Deny => return finish(outcome, "deny", message),
+            Action::Skip => {}
             Action::Allow | Action::Warn | Action::Log => push_hint(&mut outcome.hints, message),
             _ => return finish(outcome, "ask", message),
         }
@@ -511,7 +542,7 @@ fn strip_program_paths(
                     "lictor: bin-path program `{program}` is banned; invoke `{base}` directly"
                 ));
             }
-            Action::Allow | Action::Log => {}
+            Action::Allow | Action::Log | Action::Skip => {}
         }
     }
 }

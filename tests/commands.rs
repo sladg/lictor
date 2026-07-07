@@ -219,6 +219,8 @@ fn bash_deny_cases() {
         "sudo -u root git commit",
         "nohup git commit",
         "timeout 5 git commit",
+        "watch git commit",
+        "watch -n 5 git commit",
         "/usr/bin/git commit",
         "gi''t commit",
         "\"git\" commit",
@@ -637,6 +639,61 @@ fn bash_deny_beats_warn_and_rewrite() {
 }
 
 #[test]
+fn skip_carves_an_exception_out_of_a_broader_catalog_ask() {
+    let policy = format!("{BUNDLE_POLICY}\n[[bash]]\nmatch = \"rm build/*\"\naction = \"skip\"\n");
+    // exempted from mutating's blanket rm-ask: no opinion, Claude's own
+    // permission rules decide
+    let output = run_with(
+        &policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "rm build/tmp.log"}),
+        None,
+    );
+    assert_eq!(decision(&output), None, "got: {output:?}");
+    // an rm outside the exemption still asks as usual
+    let output = run_with(
+        &policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "rm -rf node_modules"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn skip_loses_to_an_explicit_deny() {
+    let policy = format!("{BUNDLE_POLICY}\n[[bash]]\nmatch = \"rm\"\naction = \"skip\"\n");
+    // destructive catalog's absolute-path rm deny still wins over skip
+    let output = run_with(
+        &policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "rm -rf /"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+}
+
+#[test]
+fn skip_alone_is_a_true_no_op() {
+    let policy = "[[bash]]\nmatch = \"true\"\naction = \"skip\"\n";
+    let output = run_with(
+        policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "true"}),
+        None,
+    );
+    assert_eq!(decision(&output), None, "got: {output:?}");
+    assert!(
+        output.is_none(),
+        "expected no hook output at all: {output:?}"
+    );
+}
+
+#[test]
 fn wrap_rewrites_and_auto_allows() {
     let output = bash("git log --oneline -3");
     assert_eq!(
@@ -687,6 +744,43 @@ fn write_ask_on_env_file() {
         None,
     );
     assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn edit_skip_overrides_ask_from_another_rule() {
+    let policy = format!("{POLICY}\n[[edit]]\npaths = [\"**/.env.test\"]\naction = \"skip\"\n");
+    // **/.env* (ask) and **/.env.test (skip) both match; skip wins
+    let output = run_with(
+        &policy,
+        "PreToolUse",
+        "Write",
+        json!({"file_path": "/repo/.env.test", "content": "KEY=1"}),
+        None,
+    );
+    assert_eq!(decision(&output), None, "got: {output:?}");
+    // an unrelated env file still asks
+    let output = run_with(
+        &policy,
+        "PreToolUse",
+        "Write",
+        json!({"file_path": "/repo/.env.local", "content": "KEY=1"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn edit_skip_loses_to_an_explicit_deny() {
+    let policy = "[[edit]]\npaths = [\"**/.env.prod\"]\naction = \"deny\"\n\n\
+                  [[edit]]\npaths = [\"**/.env.prod\"]\naction = \"skip\"\n";
+    let output = run_with(
+        policy,
+        "PreToolUse",
+        "Write",
+        json!({"file_path": "/repo/.env.prod", "content": "KEY=1"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
 }
 
 #[test]
@@ -1720,6 +1814,83 @@ fn strikes_isolated_per_session() {
     );
 }
 
+// --- deny-then-allow: retry_count/retry_window flip a repeated deny to allow ---
+
+fn run_retry(
+    policy: &str,
+    tool: &str,
+    tool_input: Value,
+    session: &str,
+    cwd: &std::path::Path,
+) -> Option<Value> {
+    let mut config: Config = toml::from_str(policy).expect("test policy parses");
+    config.finalize().expect("config finalizes");
+    let input: HookInput = serde_json::from_value(json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": tool_input,
+        "session_id": session,
+        "cwd": cwd.to_str(),
+    }))
+    .unwrap();
+    evaluate(&input, &config).map(|o| serde_json::to_value(o).unwrap()["hookSpecificOutput"].take())
+}
+
+// modeled on a real rule from this project's own lictor policy (grep -> rg,
+// see out-of-git/bullshit-corpus.md: a third of real denials were retried
+// near-identically within 3 calls) — retry_count = 3 exercises the general
+// N-denies-then-allow case, not just the degenerate N = 1 shortcut
+#[test]
+fn bash_retry_allow_denies_until_threshold_then_allows() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("retry-bash");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = format!(
+        "[settings]\nlog_file = \"{}/audit.jsonl\"\n[[bash]]\nmatch = \"grep*\"\naction = \"deny\"\nreason = \"Use rg instead.\"\nretry_count = 3\nretry_window = 30\n",
+        dir.display()
+    );
+    let session = "retry-bash-session";
+    let command = json!({"command": "grep -rn TODO src/"});
+    for attempt in 1..=3 {
+        assert_eq!(
+            decision(&run_retry(&policy, "Bash", command.clone(), session, &dir)),
+            Some("deny".into()),
+            "attempt {attempt} should still deny"
+        );
+    }
+    assert_eq!(
+        decision(&run_retry(&policy, "Bash", command.clone(), session, &dir)),
+        Some("allow".into()),
+        "4th attempt should auto-allow"
+    );
+    // the counter reset on allow; a fresh command hitting the same rule denies again
+    assert_eq!(
+        decision(&run_retry(&policy, "Bash", command, session, &dir)),
+        Some("deny".into())
+    );
+}
+
+#[test]
+fn edit_retry_allow_flips_after_threshold() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("retry-edit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = format!(
+        "[settings]\nlog_file = \"{}/audit.jsonl\"\n[[edit]]\npaths = [\"**/*.sh\"]\naction = \"deny\"\nretry_count = 1\nretry_window = 30\n",
+        dir.display()
+    );
+    let session = "retry-edit-session";
+    let input = json!({"file_path": format!("{}/foo.sh", dir.display()), "content": "echo hi"});
+    assert_eq!(
+        decision(&run_retry(&policy, "Write", input.clone(), session, &dir)),
+        Some("deny".into())
+    );
+    assert_eq!(
+        decision(&run_retry(&policy, "Write", input, session, &dir)),
+        Some("allow".into())
+    );
+}
+
 // --- jail: literal paths outside the project ---
 
 const JAIL_DIR: &str = "/Users/nobody/project";
@@ -2027,6 +2198,89 @@ fn recreate_rejects_unsupported_setting() {
     let mut config: Config = toml::from_str("[modules]\ngit-mv = \"deny\"").unwrap();
     let err = config.finalize().unwrap_err();
     assert!(err.contains("does not support"), "{err}");
+}
+
+// --- self-rm: rm of paths created earlier this session skips the ask ---
+
+fn self_rm_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("self-rm-{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn self_rm_policy(dir: &std::path::Path) -> String {
+    format!(
+        "[settings]\ncatalogs = [\"recommended\"]\nlog_file = \"{}/audit.jsonl\"\n[modules]\nself-rm = \"allow\"\n",
+        dir.display()
+    )
+}
+
+#[test]
+fn self_rm_allows_cleanup_of_a_session_created_dir() {
+    let dir = self_rm_dir("cleanup");
+    let policy = self_rm_policy(&dir);
+    run_in(
+        &policy,
+        &dir,
+        "s1",
+        "Bash",
+        json!({"command": "mkdir scratch"}),
+    );
+    // the mkdir hasn't actually run yet in this test; do it now, matching the
+    // real PreToolUse-before-execution order
+    std::fs::create_dir_all(dir.join("scratch")).unwrap();
+    let output = run_in(
+        &policy,
+        &dir,
+        "s1",
+        "Bash",
+        json!({"command": "rm -rf scratch"}),
+    );
+    assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
+}
+
+#[test]
+fn self_rm_does_not_allow_an_untracked_target() {
+    let dir = self_rm_dir("untracked");
+    let policy = self_rm_policy(&dir);
+    let output = run_in(
+        &policy,
+        &dir,
+        "s2",
+        "Bash",
+        json!({"command": "rm -rf node_modules"}),
+    );
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
+fn self_rm_traversal_out_of_a_tracked_dir_is_not_allowed() {
+    // regression test: a naive (non-normalizing) prefix check on the tracked
+    // "scratch" dir would let `scratch/../../outside/secret.txt` pass as
+    // "inside scratch" even though it resolves entirely outside the project
+    let dir = self_rm_dir("traversal");
+    let outside = self_rm_dir("traversal-outside");
+    std::fs::write(outside.join("secret.txt"), "s3cr3t").unwrap();
+    let policy = self_rm_policy(&dir);
+    run_in(
+        &policy,
+        &dir,
+        "s3",
+        "Bash",
+        json!({"command": "mkdir scratch"}),
+    );
+    std::fs::create_dir_all(dir.join("scratch")).unwrap();
+    let escape = format!(
+        "rm scratch/../../{}/secret.txt",
+        outside.file_name().unwrap().to_str().unwrap()
+    );
+    let output = run_in(&policy, &dir, "s3", "Bash", json!({"command": escape}));
+    assert_ne!(
+        decision(&output),
+        Some("allow".into()),
+        "traversal target must not be auto-allowed: {output:?}"
+    );
+    assert!(outside.join("secret.txt").exists());
 }
 
 // --- pm-cwd: cd into a package to run a task -> root-level flag ---

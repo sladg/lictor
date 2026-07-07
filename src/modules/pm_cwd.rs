@@ -74,7 +74,7 @@ pub fn plan(extraction: &Extraction, config: &Config, out: &mut Plan) {
         ModuleSetting::Warn => out.hints.push(message),
         ModuleSetting::Ask => out.asks.push(message),
         ModuleSetting::Deny => out.denies.push(message),
-        ModuleSetting::Off => unreachable!(),
+        ModuleSetting::Off | ModuleSetting::Allow => unreachable!(),
     }
 }
 

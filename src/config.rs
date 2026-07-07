@@ -13,6 +13,11 @@ pub enum Action {
     Warn,
     // audit-only: record the match in the log file, decide nothing
     Log,
+    // true no-op: contributes no decision, hint, edit, or log entry, and
+    // overrides any ask/warn/log/allow another rule gives the same match —
+    // Claude Code's own permission rules decide instead. An explicit `deny`
+    // elsewhere still wins.
+    Skip,
 }
 
 // dynamic built-in modules (src/modules/): context-aware suggestions/rewrites;
@@ -25,6 +30,7 @@ pub enum ModuleSetting {
     Rewrite,
     Ask,
     Deny,
+    Allow,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +50,13 @@ pub struct BashRule {
     pub rewrite: Option<String>,
     #[serde(default)]
     pub hint: Option<String>,
+    // deny-then-allow: after this many denies of this rule within
+    // retry_window seconds, the next resubmission is auto-allowed instead.
+    // Both fields must be set to activate; only meaningful on action = deny.
+    #[serde(default)]
+    pub retry_count: Option<u32>,
+    #[serde(default)]
+    pub retry_window: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +68,10 @@ pub struct EditRule {
     pub action: Action,
     #[serde(default)]
     pub hint: Option<String>,
+    #[serde(default)]
+    pub retry_count: Option<u32>,
+    #[serde(default)]
+    pub retry_window: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +216,11 @@ pub struct Config {
     pub modules: HashMap<String, ModuleSetting>,
     #[serde(default)]
     pub settings: Settings,
+    // per-permission-mode overlay, applied like one more config layer on top of
+    // everything else when its key matches the hook's `permission_mode`
+    // ("default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions")
+    #[serde(default)]
+    pub modes: HashMap<String, Config>,
     #[serde(skip)]
     pub activated_catalogs: Vec<String>,
 }
@@ -212,6 +234,8 @@ impl Config {
         // same-name catalog block: later file (project) replaces earlier (user)
         self.catalog.extend(other.catalog);
         self.modules.extend(other.modules);
+        // same-name mode block: later file replaces earlier, same as catalogs
+        self.modes.extend(other.modes);
         self.settings.catalogs.extend(other.settings.catalogs);
         if other.settings.on_unparseable.is_some() {
             self.settings.on_unparseable = other.settings.on_unparseable;
@@ -293,6 +317,15 @@ impl Config {
 
     pub fn strikes_window(&self) -> u64 {
         self.settings.strikes_window.unwrap_or(600)
+    }
+
+    // resolves the [modes.<mode>] overlay (if declared) as one more merge pass,
+    // so scalar settings override and rule lists append, same as file layering
+    pub fn apply_mode(mut self, mode: Option<&str>) -> Config {
+        if let Some(overlay) = mode.and_then(|m| self.modes.remove(m)) {
+            self = self.merge(overlay);
+        }
+        self
     }
 
     pub fn jail(&self) -> Option<Action> {
@@ -430,6 +463,8 @@ impl Config {
                         reason: catalog.reason.clone(),
                         rewrite: catalog.rewrite.clone(),
                         hint: catalog.hint.clone(),
+                        retry_count: None,
+                        retry_window: None,
                     });
                 }
                 if has_minify {
@@ -468,7 +503,7 @@ pub fn config_paths(cwd: Option<&str>) -> Vec<PathBuf> {
     paths
 }
 
-pub fn load(cwd: Option<&str>) -> Result<Config, String> {
+pub fn load(cwd: Option<&str>, mode: Option<&str>) -> Result<Config, String> {
     let mut config = Config::default();
     for path in config_paths(cwd) {
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -478,6 +513,7 @@ pub fn load(cwd: Option<&str>) -> Result<Config, String> {
             toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
         config = config.merge(parsed);
     }
+    config = config.apply_mode(mode);
     config.finalize()?;
     Ok(config)
 }

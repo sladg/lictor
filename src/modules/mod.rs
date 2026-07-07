@@ -2,7 +2,10 @@
 // git_wrap and pm_cwd plan command rewrites before gating; jail and strikes
 // hook into the gate and the engine; activate hints after a not-found failure;
 // path_check stops guaranteed not-found commands before they run;
-// recreate flags delete+rewrite done instead of a rename.
+// recreate flags delete+rewrite done instead of a rename;
+// self_rm tracks session-created paths so their own rm/git rm skips the ask;
+// retry_allow counts denies-per-rule so a deny-then-allow rule flips to
+// allow once its retry_count is spent within retry_window.
 // One module per file, tests included.
 pub mod abspath;
 pub mod activate;
@@ -11,9 +14,12 @@ pub mod jail;
 pub mod path_check;
 pub mod pm_cwd;
 pub mod recreate;
+pub mod retry_allow;
+pub mod self_rm;
 pub mod strikes;
 
 pub use git_wrap::git_tracked;
+pub use path_check::on_path;
 
 use crate::bash::Extraction;
 use crate::config::{Config, ModuleSetting};
@@ -68,6 +74,14 @@ const ALLOWED: &[(&str, &[ModuleSetting])] = &[
             ModuleSetting::Warn,
             ModuleSetting::Ask,
             ModuleSetting::Deny,
+        ],
+    ),
+    (
+        "self-rm",
+        &[
+            ModuleSetting::Off,
+            ModuleSetting::Warn,
+            ModuleSetting::Allow,
         ],
     ),
     (

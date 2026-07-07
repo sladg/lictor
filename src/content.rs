@@ -71,6 +71,7 @@ pub fn target_of(tool_name: &str, input: &Value) -> Option<(String, Vec<String>)
 pub fn gate_content(path: &str, contents: &[String], rules: &[CompiledEditRule]) -> GateOutcome {
     let mut outcome = GateOutcome::default();
     let mut allowed = false;
+    let mut skip_hit = false;
     for rule in rules {
         if rule.paths.as_ref().is_some_and(|g| !g.is_match(path)) {
             continue;
@@ -94,6 +95,14 @@ pub fn gate_content(path: &str, contents: &[String], rules: &[CompiledEditRule])
             Action::Deny => {
                 outcome.decision = Some("deny");
                 outcome.reason = Some(message);
+                if let (Some(n), Some(w)) = (rule.rule.retry_count, rule.rule.retry_window) {
+                    let key = rule
+                        .rule
+                        .pattern
+                        .clone()
+                        .unwrap_or_else(|| rule.rule.paths.join(","));
+                    outcome.deny_retry = Some((key, n, w));
+                }
                 return outcome;
             }
             Action::Ask => {
@@ -118,7 +127,14 @@ pub fn gate_content(path: &str, contents: &[String], rules: &[CompiledEditRule])
                 }
             }
             Action::Rewrite => {}
+            // overrides ask/warn/log/allow from every other matching rule (an
+            // earlier Deny already returned above); Claude Code's own
+            // permission rules decide instead
+            Action::Skip => skip_hit = true,
         }
+    }
+    if skip_hit {
+        return GateOutcome::default();
     }
     if outcome.decision.is_none() && allowed {
         outcome.decision = Some("allow");

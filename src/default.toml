@@ -61,12 +61,27 @@ action = "allow"
 # action = "deny"
 # reason = "Commits are manual."
 
+# [[bash]]                        # "skip" carves an exception out of a catalog's
+# match = "rm .claude/scratch/*"  # blanket action (mutating: rm -> ask above) —
+# action = "skip"                 # no opinion; Claude Code's own rules decide
+
+# [modes.*]: per permission_mode overlay (default|plan|acceptEdits|auto|dontAsk|
+# bypassPermissions) — settings override, [[bash]]/[[edit]] rules append. Dry-run
+# with `lictor check --mode auto -- <cmd>`.
+# [modes.auto.settings]
+# jail = "deny"                   # no human approves each call — hard-confine to the repo
+#
+# [[modes.bypassPermissions.bash]]
+# match = "curl*"
+# action = "deny"                 # net-egress can only "ask" elsewhere; unattended can't
+
 # dynamic modules: context-aware rewrites backed by read-only probes.
 # off | warn (hint only) | rewrite
 [modules]
 git-mv = "rewrite"        # mv of git-tracked paths -> git mv (keeps history)
 git-rm = "rewrite"        # rm of git-tracked paths -> git rm (records the deletion)
 delete-recreate = "ask"   # a Write resembling a just-deleted file -> rename it properly
+self-rm = "allow"         # rm/git rm of paths created earlier this session -> skip the ask
 pm-cwd = "rewrite"        # cd pkg && bun run x -> bun --cwd pkg run x (pnpm -C, npm --prefix)
 # flag guaranteed "command not found" upfront: program not on PATH, or an
 # unquoted `=x` word zsh would equals-expand and abort on (`echo ===`).

@@ -65,6 +65,7 @@ propose a commit message and wait for the user." reaches the agent instead of a 
 - **Project jail** — literal paths outside the project and its allowed roots warn/ask/deny; catches `cat ~/.zshrc`, `cp x /tmp/y`, `../` escapes, `--flag=/abs/path`.
 - **Rogue-actor guard** — N consecutive denies pause shell autonomy: every Bash call asks until a command actually executes, which puts the user back in the loop.
 - **File-edit gates** — `Edit`/`Write`/`MultiEdit`/`NotebookEdit` matched by path glob + content regex.
+- **Per-mode overrides** — `[modes.auto]` / `[modes.bypassPermissions]` blocks layer on top of the base policy only when the session's `permission_mode` matches; settings override, rule lists append. Built in, no config needed: in `auto` mode any `ask` lictor would emit is downgraded to `deny` — nobody's there to answer a permission dialog, so an unanswerable `ask` would just stall the turn.
 
 **Rewrite** — fix commands instead of blocking them; the result is re-gated, so bans still apply:
 
@@ -97,6 +98,7 @@ Then wire it into Claude Code:
 lictor init --write            # starter lictor.toml + the hooks snippet for settings.json
 lictor check                   # validates every config file it can find
 lictor check -- <command...>   # gate + run + minify one command — see what the model would see
+lictor check --mode auto -- <command...>   # dry-run as if permission_mode were `auto`
 lictor gain                    # audit-log summary: decisions + minify/spill bytes saved
 ```
 
@@ -235,9 +237,10 @@ tools = ["node", "npm", "bun", "tsc"]
 
 The fully annotated example (every rule type, every option) is in
 [`examples/lictor.toml`](examples/lictor.toml). [`docs/reference.md`](docs/reference.md)
-lists every built-in catalog, bundle, module, and structural detector with a copy-paste
-example each; the catalog definitions themselves — every command each one covers — live
-in [`src/catalogs/builtin.toml`](src/catalogs/builtin.toml).
+lists every built-in catalog, bundle, module, structural detector, and the
+[`[modes.*]` per-permission-mode overlay](docs/reference.md#per-mode-overrides-modes)
+with a copy-paste example each; the catalog definitions themselves — every command each
+one covers — live in [`src/catalogs/builtin.toml`](src/catalogs/builtin.toml).
 
 Behavior worth knowing before first run:
 

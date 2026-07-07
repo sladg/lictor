@@ -56,7 +56,7 @@ pub fn plan(extraction: &Extraction, config: &Config, cwd: Option<&str>, out: &m
             ModuleSetting::Deny => out.denies.push(message),
             ModuleSetting::Ask => out.asks.push(message),
             ModuleSetting::Warn => out.hints.push(message),
-            ModuleSetting::Rewrite | ModuleSetting::Off => {}
+            ModuleSetting::Rewrite | ModuleSetting::Off | ModuleSetting::Allow => {}
         }
     }
 }
@@ -72,6 +72,11 @@ fn is_under(path: &str, root: &str) -> bool {
 // in-project check first: if cwd itself sits under a temp root (CI tmp checkout),
 // a real project path must still read as in-project, not temp
 fn classify(resolved: &str, cwd: &str) -> Option<String> {
+    if resolved == cwd {
+        return Some(format!(
+            "lictor: `{resolved}` is the project root itself — you're already there, so omit the argument entirely; only fall back to `.` if the flag requires a value"
+        ));
+    }
     if is_under(resolved, cwd) {
         let rel = resolved
             .strip_prefix(&format!("{cwd}/"))
@@ -145,6 +150,24 @@ mod tests {
     fn flag_attached_in_project_path_denied() {
         let plan = plan_for("rg foo --path=/Users/nobody/project/src", "deny");
         assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+    }
+
+    #[test]
+    fn project_root_itself_gets_omit_hint_not_a_self_referential_one() {
+        // the bug: resolved == cwd made strip_prefix miss, echoing the same
+        // absolute path back as the "relative" fix
+        let plan = plan_for(&format!("rg --files --cwd {CWD}"), "deny");
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+        assert!(
+            plan.denies[0].contains("project root itself") && plan.denies[0].contains("omit"),
+            "{:?}",
+            plan.denies
+        );
+        assert!(
+            !plan.denies[0].contains("reference it relative"),
+            "{:?}",
+            plan.denies
+        );
     }
 
     #[test]

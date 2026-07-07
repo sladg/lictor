@@ -52,6 +52,7 @@ match = [
   "git cat-file", "git grep", "git worktree list", "git stash list",
   "git branch --list", "git branch -a", "git branch -r", "git branch -v",
   "git remote -v", "git tag --list", "git config --get", "git config --list",
+  "git submodule status", "git config get", "git config list",
 ]
 
 [catalog.gh-read]
@@ -65,7 +66,7 @@ match = [
 
 [catalog.docker-read]
 action = "allow"
-match = ["docker ps", "docker images", "docker inspect", "docker logs", "docker stats --no-stream", "docker top", "docker history", "docker version", "docker info", "docker diff"]
+match = ["docker ps", "docker images", "docker inspect", "docker logs", "docker stats --no-stream", "docker top", "docker history", "docker version", "docker info", "docker diff", "docker volume ls", "docker network ls", "docker search", "docker port"]
 
 [catalog.kubectl-read]
 action = "allow"
@@ -82,7 +83,7 @@ match = ["helm list", "helm status", "helm get", "helm show", "helm history", "h
 
 [catalog.tf-read]
 action = "allow"
-match = ["terraform validate", "terraform fmt -check", "terraform show", "terraform output", "terraform state list", "terraform version", "terraform providers", "terraform graph"]
+match = ["terraform validate", "terraform fmt -check", "terraform show", "terraform output", "terraform state list", "terraform version", "terraform providers", "terraform graph", "terraform workspace list", "terraform workspace show"]
 
 [catalog.svc-read]
 action = "allow"
