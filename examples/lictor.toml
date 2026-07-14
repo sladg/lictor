@@ -185,6 +185,8 @@ tools = ["node", "npm", "npx", "yarn"]
 # removed_pattern  — fires when old content matched but new doesn't (gate deletions;
 #                    Write sends no prior content, so it never fires there)
 # required_pattern — fires when written content is MISSING the regex (demand boilerplate)
+# changed_pattern  — fires when a text the regex matched in old content no longer
+#                    appears verbatim in new (in-place edits; additions stay silent)
 # all specified conditions must hold for the rule to fire
 
 [[edit]]
@@ -215,6 +217,17 @@ hint = "Bump `updated_at:` in the frontmatter as part of this edit."
 paths = ["**/.env*"]
 action = "ask"
 hint = "Touching environment files."
+
+# tests are not made to pass blindly: editing an existing expectation string
+# denies once with a consult instruction; the resubmit after consulting passes.
+# Adding new tests never fires (old matches all survive verbatim).
+[[edit]]
+paths = ["**/*.test.ts", "**/*.spec.ts", "**/*_test.go", "**/tests/**/*.rs"]
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "Test expectation edited — did the behaviour change, and is that wanted? Confirm with the user, then resubmit."
+retry_count = 1
+retry_window = 600
 
 # ---- path rules: dir globs -> action + your own hint, matched against every
 # filesystem path a command touches — Bash args (cd-aware), NAME=val / export

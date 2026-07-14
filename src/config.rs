@@ -73,6 +73,12 @@ pub struct EditRule {
     pub removed_pattern: Option<String>,
     #[serde(default)]
     pub required_pattern: Option<String>,
+    // per-match survival: every text this regex matches in the OLD content must
+    // appear verbatim in the NEW content — fires on in-place edits and removals
+    // of the matched text, never on pure additions (unlike removed_pattern,
+    // which only fires when NO match is left)
+    #[serde(default)]
+    pub changed_pattern: Option<String>,
     pub action: Action,
     #[serde(default)]
     pub hint: Option<String>,

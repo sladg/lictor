@@ -26,7 +26,7 @@ End state: you either click "approve" all day or turn the checks off. Lictor is 
 - **gates** — commands parsed with [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash), every command in a chain judged individually: pipes, subshells, `$(...)`, `bash -c "..."`, `eval`, loop bodies. Can't prove it statically → [fail closed](docs/features/fail-closed.md) to a prompt.
 - **talks back** — [deny](docs/features/deny.md) reasons and [warn](docs/features/warn.md) hints are your words, handed to the agent verbatim. Blocked agent with a reason corrects in one turn; blocked agent without one brute-forces variants.
 - **rewrites** — fix instead of block: `grep` → `rg` ([rewrite](docs/features/rewrite.md)), `mv` of a tracked file → `git mv` ([modules](docs/features/modules.md)). Result is re-gated, so a rewrite can't smuggle past a ban.
-- **gates file edits too** — by path + content: what's added, what's deleted, what must be present ([edit rules](docs/features/edit-rules.md)).
+- **gates file edits too** — by path + content: what's added, what's deleted, what must be present, what's changed in place ([edit rules](docs/features/edit-rules.md)).
 - **gates URLs** — domain allowlists and extension denylists for `curl`/`wget`/`WebFetch`, or reroute a fetch through a markdown proxy ([web rules](docs/features/web.md)). Subagent prompts and outputs get regex rules too ([agent rules](docs/features/agent.md)).
 - **mode-aware** — one shared rule, different action per permission mode: `modes = { plan = "allow", auto = "deny" }`; remap final decisions per mode, or flip to a deny-by-default allowlist ([modes](docs/features/modes.md)).
 - **shrinks output** — [minify](docs/features/minify.md) noisy CLIs, [spill](docs/features/spill.md) oversized output to a local cache; the model gets the tail + a retrieval command instead of 3 000 lines.
@@ -506,15 +506,18 @@ updated_at: 2026-07-14
 
 # Edit rules
 
-Gate the file-authoring tools (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) by path glob plus content regexes — in three directions. Use them for the stuff bash rules can't see: what the agent writes *into* files.
+Gate the file-authoring tools (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) by path glob plus content regexes — in four directions. Use them for the stuff bash rules can't see: what the agent writes *into* files.
 
 | Field | Fires when… |
 |---|---|
 | `pattern` | written content **matches** — gate what's added |
 | `removed_pattern` | old content matched, new doesn't — gate what's deleted |
 | `required_pattern` | written content is **missing** the regex — demand boilerplate |
+| `changed_pattern` | a text the regex matched in the old content no longer appears **verbatim** in the new — gate in-place edits |
 
 All specified conditions must hold. Actions are the same as bash rules (`deny`/`ask`/`warn`/`allow`/`log`/`skip`).
+
+`changed_pattern` vs `removed_pattern`: `removed_pattern` asks "does *any* match survive?" — so swapping `toBe("foo")` for `toBe("bar")` never fires (the new text still matches the regex). `changed_pattern` checks **each match individually**: `"foo"` is gone, so it fires. Pure additions keep every old match and stay silent, and `Write` (no prior content) can never fire it.
 
 ## Config
 
@@ -536,6 +539,16 @@ paths = ["docs/**/*.md"]
 required_pattern = '(?m)^updated_at: \d{4}-\d{2}-\d{2}'
 action = "deny"
 hint = "Bump `updated_at:` in the frontmatter as part of this edit."
+
+# tests are not made to pass blindly: editing an existing expectation denies
+# once with a consult instruction; a resubmit after consulting passes
+[[edit]]
+paths = ["**/*.test.ts", "**/*_test.go", "**/tests/**/*.rs"]
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "Test expectation edited — consult the user: did the behaviour change, and is that wanted? If confirmed, resubmit."
+retry_count = 1
+retry_window = 600
 ```
 
 ## What happens
@@ -547,6 +560,8 @@ Write docs/x.md without updated_at:        → blocked (Write = full content che
 Edit docs/x.md, body only                  → blocked (Edit = new_strings checked; none carries updated_at)
 MultiEdit: body change + updated_at bump   → passes (any pair satisfying the pattern is enough)
 Write with no old content                  → removed_pattern never fires (nothing was deleted)
+Edit swaps toBe("ok") for toBe("fine")     → blocked once (changed_pattern); resubmit after consulting passes
+Edit appends a brand-new it(...) block     → silent (additions keep every old match)
 ```
 
 Worked examples: [markdown frontmatter](../use-cases/markdown-frontmatter.md), [TypeScript discipline](../use-cases/typescript.md), [protect docs & tests](../use-cases/protect-docs-and-tests.md).
@@ -911,7 +926,7 @@ deny  >  skip  >  ask  >  warn  >  rewrite  >  allow
 | Doc | One-liner |
 |---|---|
 | [catalogs](catalogs.md) | named command groups — gate ~150 commands with one line |
-| [edit rules](edit-rules.md) | gate file edits by path + what's added / removed / missing |
+| [edit rules](edit-rules.md) | gate file edits by path + what's added / removed / missing / changed in place |
 | [path rules](path-rules.md) | your own dir policy, matched against every path a command touches |
 | [web rules](web.md) | domain/URL policy for curl/wget/WebFetch — allow, deny, or proxy-rewrite |
 | [agent rules](agent.md) | regex over subagent prompts (gate) and outputs (hint) |
@@ -1385,6 +1400,30 @@ Edit: "it('rejects empty input', …)" block deleted   → deny: never delete te
 ```
 
 A `warn` doesn't block — the edit lands and the hint lands with it, so the agent restores the comment in its next edit or explains why it had to go. A `deny` blocks outright; the assertion never leaves the file.
+
+## Changed expectations, not just deleted ones
+
+`removed_pattern` can't see a value swap — `toBe("foo")` → `toBe("bar")` still matches the regex, so nothing fires. `changed_pattern` checks each old match individually: fire when *that exact text* is gone from the new content. Pair it with deny-then-allow so the first attempt gets the consult instruction and the resubmission (after consulting) passes:
+
+```toml
+[[edit]]
+paths = ["**/*.test.ts", "**/*.spec.ts", "**/*_test.go", "**/tests/**/*.rs"]
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "Test expectation edited — tests are not made to pass blindly. Did the behaviour change, and is that wanted? Confirm with the user, then resubmit."
+retry_count = 1
+retry_window = 600
+```
+
+Adding a brand-new test never fires (old matches all survive); `Write` sends no prior content, so it never fires there either. The same trick closes `removed_pattern`'s blind spot on comments — deleting one comment while another survives:
+
+```toml
+[[edit]]
+paths = ["**/*.ts", "**/*.rs", "**/*.go"]
+changed_pattern = '(?m)[ \t]*//[^\n]*'
+action = "warn"
+hint = "A comment was edited or removed — restore it unless the user asked."
+```
 
 ## Variations
 
