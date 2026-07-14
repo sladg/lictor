@@ -145,12 +145,12 @@ match = ["*.zip", "*.tar.gz", "*.tgz", "*.sh", "*.dmg", "*.pkg"]
 action = "deny"
 reason = "no downloading archives or scripts"
 
-# WebFetch only: reroute Cloudflare-walled pages through a markdown proxy
-# instead of failing — {url} expands to the original URL
+# WebFetch only: reroute Cloudflare-walled pages through a markdown proxy like
+# PullMD (github.com/AeternaLabsHQ/pullmd) — {url} expands to the original URL
 [[web]]
 domains = ["*.medium.com"]
 action = "rewrite"
-rewrite = "https://pure.md/{url}"
+rewrite = "https://pullmd.example/api?url={url}"
 
 # ---- agent rules: regex over subagent (Task tool) traffic.
 # on = "prompt" gates before launch (deny/ask/warn); on = "output" attaches a

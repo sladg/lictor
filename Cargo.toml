@@ -1,6 +1,6 @@
 [package]
 name = "lictor"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "Policy gate for coding-agent tool calls — one binary in Claude Code's PreToolUse/PostToolUse hooks, configured in TOML. Walks in front of every tool call and stops the ones that shouldn't pass."
 license = "MIT"

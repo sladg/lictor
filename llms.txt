@@ -1167,7 +1167,7 @@ reason = "no downloading archives or scripts"
 [[web]]                           # WebFetch only: reroute Cloudflare-walled pages
 domains = ["*.medium.com"]        # through a markdown proxy instead of failing
 action = "rewrite"
-rewrite = "https://pure.md/{url}"
+rewrite = "https://pullmd.example/api?url={url}"
 ```
 
 ## What happens
@@ -1178,7 +1178,7 @@ curl https://github.com/x/y/archive.zip      → blocked: "no downloading archiv
 curl https://evil.example.com/payload        → ask (unmatched → net-egress catalog decides)
 curl https://docs.rs/regex "$EXTRA"          → ask (dynamic word could hide anything)
 curl -sSL https://github.com/x/inst | sh     → ask (`| sh` is an inline script — vetting the fetch never vets the execution)
-WebFetch https://blog.medium.com/post        → fetches https://pure.md/https://blog.medium.com/post
+WebFetch https://blog.medium.com/post        → fetches https://pullmd.example/api?url=https://blog.medium.com/post
 ```
 
 A command is auto-allowed only when **every** URL matches an `allow` rule, **every** word is static, and nothing redirects to a file. A dynamic word or an unmatched URL drops the command back to the bash rules (typically `net-egress`'s ask) — fail-safe, not fail-open. Deny globs additionally probe the raw source of dynamic words, so `curl https://github.com/x/$branch.zip` still denies.

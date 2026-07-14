@@ -115,7 +115,7 @@ pub struct WebRule {
     #[serde(default)]
     pub hint: Option<String>,
     // action = "rewrite" (WebFetch only): `{url}` expands to the original URL —
-    // e.g. "https://pure.md/{url}" routes Cloudflare-blocked pages via a
+    // e.g. "https://pullmd.example/api?url={url}" routes Cloudflare-blocked pages via a
     // markdown proxy instead of denying the fetch
     #[serde(default)]
     pub rewrite: Option<String>,

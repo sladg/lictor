@@ -245,7 +245,7 @@ fn webfetch_rewrite_routes_through_proxy() {
 [[web]]
 domains = ["*.medium.com"]
 action = "rewrite"
-rewrite = "https://pure.md/{url}"
+rewrite = "https://pullmd.example/api?url={url}"
 "#;
     let output = fetch(policy, None, "https://blog.medium.com/post");
     assert_eq!(decision(&output), Some("allow".to_string()));
@@ -255,7 +255,10 @@ rewrite = "https://pure.md/{url}"
         .and_then(|u| u.get("url"))
         .and_then(Value::as_str)
         .unwrap();
-    assert_eq!(url, "https://pure.md/https://blog.medium.com/post");
+    assert_eq!(
+        url,
+        "https://pullmd.example/api?url=https://blog.medium.com/post"
+    );
 }
 
 #[test]
