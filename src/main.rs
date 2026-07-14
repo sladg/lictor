@@ -309,12 +309,38 @@ fn check(mode: Option<String>) {
                 config.minify.len()
             );
             check_minify_tools(&config);
+            check_spill_tool(&config);
         }
         Err(error) => {
             println!("ERROR    merged config: {error}");
             std::process::exit(1);
         }
     }
+}
+
+// spill is configured but its storage CLI (default `kv`) is missing: output
+// would be truncated with nothing retrievable — hard error, unlike the minify
+// warn, because the retrieval notes the model sees would all be lies.
+fn check_spill_tool(config: &config::Config) {
+    if let Some(program) = missing_spill_tool(config) {
+        println!(
+            "ERROR    spill tool `{program}` is not on PATH — spill_lines/spill_seconds are set but output can't be stored. Install it (`brew install AmrSaber/tap/kv`) or remove the spill settings."
+        );
+        std::process::exit(1);
+    }
+}
+
+// Some(program) when spill is configured but its CLI can't resolve on PATH
+fn missing_spill_tool(config: &config::Config) -> Option<String> {
+    if config.settings.spill_lines.is_none() && config.settings.spill_seconds.is_none() {
+        return None;
+    }
+    let program = config
+        .spill_command()
+        .split_whitespace()
+        .next()
+        .unwrap_or("kv");
+    (!modules::on_path(program)).then(|| program.to_string())
 }
 
 // wrap/pipe name an external minifier (rtk, tokf, squeez, ...); missing ones
@@ -370,4 +396,64 @@ Bootstrap a starter policy: lictor init --write
 Validate config files:     lictor check
 Audit + savings summary:   lictor gain"#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_of(toml_str: &str) -> config::Config {
+        toml::from_str(toml_str).expect("config parses")
+    }
+
+    #[test]
+    fn spill_not_configured_no_check() {
+        // no spill_lines/spill_seconds — spill is off, a missing CLI is fine
+        let config = config_of("[settings]\nspill_command = \"definitely-missing-cli\"\n");
+        assert_eq!(missing_spill_tool(&config), None);
+    }
+
+    #[test]
+    fn spill_configured_missing_cli_reported() {
+        let config = config_of(
+            "[settings]\nspill_lines = 100\nspill_command = \"definitely-missing-cli\"\n",
+        );
+        assert_eq!(
+            missing_spill_tool(&config),
+            Some("definitely-missing-cli".into())
+        );
+    }
+
+    #[test]
+    fn spill_seconds_alone_triggers_the_check() {
+        let config = config_of(
+            "[settings]\nspill_seconds = 30\nspill_command = \"definitely-missing-cli\"\n",
+        );
+        assert!(missing_spill_tool(&config).is_some());
+    }
+
+    #[test]
+    fn spill_cli_on_path_passes() {
+        // `sh` resolves everywhere the tests run
+        let config = config_of("[settings]\nspill_lines = 100\nspill_command = \"sh\"\n");
+        assert_eq!(missing_spill_tool(&config), None);
+    }
+
+    #[test]
+    fn spill_command_with_args_checks_first_word_only() {
+        let config = config_of("[settings]\nspill_lines = 100\nspill_command = \"sh -c\"\n");
+        assert_eq!(missing_spill_tool(&config), None);
+    }
+
+    #[test]
+    fn default_spill_command_is_kv() {
+        // no spill_command override — the check falls back to the shipped default
+        let config = config_of("[settings]\nspill_lines = 100\n");
+        let missing = missing_spill_tool(&config);
+        // kv may or may not be installed where tests run; either way the probe
+        // must target `kv`, not error out
+        if let Some(program) = missing {
+            assert_eq!(program, "kv");
+        }
+    }
 }

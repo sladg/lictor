@@ -74,9 +74,13 @@ pub fn plan(
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = jail::normalize(cwd, cwd, &home);
+    // unlike the jail (which only cares about escapes, so absolute/~/.. forms),
+    // path rules must also see relative in-project spellings — `cat
+    // .claude/settings.json` names the same file `cat /repo/.claude/settings.json`
+    // does. Any word with a `/` is a candidate; non-paths just match no glob.
     let candidate_of = |text: &str| {
         let candidate = jail::path_candidate(text);
-        jail::looks_like_path(candidate).then(|| candidate.to_string())
+        (jail::looks_like_path(candidate) || candidate.contains('/')).then(|| candidate.to_string())
     };
     // path args (cd-aware, including nested shells), plus the two path-bearing
     // token classes the parser split off from `words`: `NAME=val` prefix values
@@ -90,7 +94,7 @@ pub fn plan(
         .iter()
         .chain(&extraction.redirect_targets)
     {
-        if jail::looks_like_path(raw) {
+        if jail::looks_like_path(raw) || raw.contains('/') {
             candidates.push(jail::normalize(raw, &cwd, &home));
         }
     }
@@ -243,6 +247,31 @@ mod tests {
         assert_eq!(plan_bash(warn, "touch /tmp/x").hints.len(), 1);
         let ask = "[[path]]\nmatch = [\"/tmp/**\"]\naction = \"ask\"\n";
         assert_eq!(plan_bash(ask, "touch /tmp/x").asks.len(), 1);
+    }
+
+    #[test]
+    fn relative_project_path_matched() {
+        // self-protection shape: the file named relative to the repo is the same
+        // file as the absolute spelling
+        let rules = "[[path]]\nmatch = [\"**/.claude/settings.json\"]\naction = \"ask\"\n";
+        assert_eq!(plan_bash(rules, "cat .claude/settings.json").asks.len(), 1);
+        assert_eq!(
+            plan_bash(rules, "sed -i '' 's/a/b/' .claude/settings.json")
+                .asks
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn relative_redirect_target_matched() {
+        let rules = "[[path]]\nmatch = [\"**/.claude/settings.json\"]\naction = \"ask\"\n";
+        assert_eq!(
+            plan_bash(rules, "jq . tmp.json > .claude/settings.json")
+                .asks
+                .len(),
+            1
+        );
     }
 
     #[test]

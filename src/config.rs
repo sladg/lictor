@@ -65,6 +65,10 @@ pub struct EditRule {
     pub paths: Vec<String>,
     #[serde(default)]
     pub pattern: Option<String>,
+    #[serde(default)]
+    pub removed_pattern: Option<String>,
+    #[serde(default)]
+    pub required_pattern: Option<String>,
     pub action: Action,
     #[serde(default)]
     pub hint: Option<String>,

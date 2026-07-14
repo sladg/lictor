@@ -206,6 +206,10 @@ pub struct GateOutcome {
     // (rule key, retry_count, retry_window) of the deny rule that fired, when
     // it carries a deny-then-allow retry policy
     pub deny_retry: Option<(String, u32, u64)>,
+    // (rule key, retry_count, retry_window, hint_message) of the warn rule that fired,
+    // when it carries a hint-then-allow retry policy; message is stored so only that
+    // specific hint is suppressed once the threshold is reached
+    pub hint_retry: Option<(String, u32, u64, String)>,
 }
 
 // a chain auto-approves only when every site has a vetted variant

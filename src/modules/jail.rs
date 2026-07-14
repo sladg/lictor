@@ -99,8 +99,9 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
 // file INSIDE the project is pure token waste vs a relative path (and a
 // cwd-drift footgun). Literal paths only (args + `NAME=val` prefixes); dynamic
 // values are left alone. Gated by the `abs-paths` module setting. Boundary is
-// cwd, not the git root — the nudge suggests a path you can type from where you
-// are, a different question than jail's "did you escape the repo".
+// the repo root (jail's primary root), not cwd — a shell that drifted into a
+// subdir must not blind the nudge (`cd /abs/repo-root && …` used to sail
+// through). Relative resolution of later words still follows the cwd/cd chain.
 pub fn relative_hints(extraction: &Extraction, config: &Config, cwd: Option<&str>, out: &mut Plan) {
     let setting = match config.modules.get("abs-paths") {
         Some(s) if *s != ModuleSetting::Off => *s,
@@ -111,7 +112,18 @@ pub fn relative_hints(extraction: &Extraction, config: &Config, cwd: Option<&str
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = normalize(cwd, cwd, &home);
+    let root = git_root(&cwd).map_or_else(|| cwd.clone(), |r| normalize(&r, &cwd, &home));
+    relative_hints_at(extraction, setting, &cwd, &root, &home, out);
+}
 
+fn relative_hints_at(
+    extraction: &Extraction,
+    setting: ModuleSetting,
+    cwd: &str,
+    root: &str,
+    home: &str,
+    out: &mut Plan,
+) {
     // never the program word — bin paths are strip_program_paths' job. Split
     // only genuine flag-style values (--path=/abs); a bare `msg=/tmp/x` word
     // (commit message, echo payload) must not be mistaken for a path.
@@ -123,13 +135,13 @@ pub fn relative_hints(extraction: &Extraction, config: &Config, cwd: Option<&str
         };
         is_absolute(candidate).then(|| candidate.to_string())
     };
-    let mut candidates: Vec<String> = walk_words(extraction, &cwd, &home, false, candidate_of)
+    let mut candidates: Vec<String> = walk_words(extraction, cwd, home, false, candidate_of)
         .into_iter()
         .map(|(_, resolved)| resolved)
         .collect();
     for raw in extraction.assignments.iter().map(String::as_str) {
         if is_absolute(raw) {
-            candidates.push(normalize(raw, &cwd, &home));
+            candidates.push(normalize(raw, cwd, home));
         }
     }
 
@@ -138,7 +150,7 @@ pub fn relative_hints(extraction: &Extraction, config: &Config, cwd: Option<&str
         if seen.contains(&resolved) {
             continue;
         }
-        let Some(message) = classify_in_project(&resolved, &cwd) else {
+        let Some(message) = classify_in_project(&resolved, root) else {
             continue;
         };
         seen.push(resolved);
@@ -159,15 +171,15 @@ fn is_under(path: &str, root: &str) -> bool {
     path == root || path.starts_with(&format!("{root}/"))
 }
 
-fn classify_in_project(resolved: &str, cwd: &str) -> Option<String> {
-    if resolved == cwd {
+fn classify_in_project(resolved: &str, root: &str) -> Option<String> {
+    if resolved == root {
         return Some(format!(
-            "lictor: `{resolved}` is the project root itself — you're already there, so omit the argument entirely; only fall back to `.` if the flag requires a value"
+            "lictor: `{resolved}` is the project root itself — you're already in this repo, so omit it (drop a redundant `cd`; only fall back to `.` if a flag requires a value)"
         ));
     }
-    if is_under(resolved, cwd) {
+    if is_under(resolved, root) {
         let rel = resolved
-            .strip_prefix(&format!("{cwd}/"))
+            .strip_prefix(&format!("{root}/"))
             .unwrap_or(resolved);
         return Some(format!(
             "lictor: `{resolved}` is inside the project — reference it relative to the repo root as `{rel}`, not by absolute path (saves tokens, avoids cwd-drift path bugs)"
@@ -422,6 +434,48 @@ mod tests {
         );
         assert!(
             !plan.denies[0].contains("reference it relative"),
+            "{:?}",
+            plan.denies
+        );
+    }
+
+    fn drifted_hints_for(command: &str, cwd: &str) -> Plan {
+        let mut plan = Plan::default();
+        relative_hints_at(
+            &bash::extract(command),
+            ModuleSetting::Deny,
+            cwd,
+            CWD,
+            "/Users/nobody",
+            &mut plan,
+        );
+        plan
+    }
+
+    #[test]
+    fn drifted_cwd_still_flags_absolute_cd_to_root() {
+        // the gap: shell drifted into a subdir, agent cds back by absolute path
+        let plan = drifted_hints_for(
+            &format!("cd {CWD} && moon run notes:lint"),
+            &format!("{CWD}/packages/notes"),
+        );
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+        assert!(
+            plan.denies[0].contains("project root itself"),
+            "{:?}",
+            plan.denies
+        );
+    }
+
+    #[test]
+    fn drifted_cwd_still_flags_absolute_in_project_arg() {
+        let plan = drifted_hints_for(
+            "cat /Users/nobody/project/src/main.rs",
+            &format!("{CWD}/packages/notes"),
+        );
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+        assert!(
+            plan.denies[0].contains("`src/main.rs`"),
             "{:?}",
             plan.denies
         );

@@ -242,3 +242,106 @@ fn pipe_skips_output_below_min_lines() {
     let out = post_bash(PIPE, "npm install x", "one\ntwo");
     assert!(out.is_none(), "2 lines < min_lines=3");
 }
+
+// ── default-policy self-protection: the hook wiring and lictor's own config ──
+// The shipped starter policy must surface any touch of .claude/settings.json /
+// lictor.toml to the user — otherwise the agent can unhook or rewrite the
+// policy without anyone noticing.
+
+const DEFAULT_POLICY: &str = include_str!("../src/default.toml");
+const PROJECT: &str = "/Users/nobody/project";
+
+fn pre_with_cwd(tool: &str, input: Value, cwd: &str) -> Option<Value> {
+    let mut config: Config = toml::from_str(DEFAULT_POLICY).expect("default policy parses");
+    config.finalize().expect("catalogs expand");
+    let hook: HookInput = serde_json::from_value(json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": input,
+        "cwd": cwd,
+    }))
+    .unwrap();
+    evaluate(&hook, &config).map(|o| serde_json::to_value(o).unwrap()["hookSpecificOutput"].take())
+}
+
+#[test]
+fn default_policy_asks_on_settings_json_write_tool() {
+    // the direct vector: Write straight onto the hooks file
+    let out = pre_with_cwd(
+        "Write",
+        json!({"file_path": "/Users/nobody/project/.claude/settings.json", "content": "{}"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+}
+
+#[test]
+fn default_policy_asks_on_relative_bash_touch() {
+    // relative spelling names the same file as the absolute one
+    let out = pre_with_cwd(
+        "Bash",
+        json!({"command": "cat .claude/settings.json"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+
+    let out = pre_with_cwd(
+        "Bash",
+        json!({"command": "sed -i '' 's/hooks/x/' .claude/settings.local.json"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+}
+
+#[test]
+fn default_policy_asks_on_absolute_bash_touch() {
+    let out = pre_with_cwd(
+        "Bash",
+        json!({"command": "cp evil.json /Users/nobody/project/.claude/settings.json"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+}
+
+#[test]
+fn default_policy_asks_on_lictor_config_touch() {
+    let out = pre_with_cwd(
+        "Bash",
+        json!({"command": "cat .claude/lictor.toml"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+
+    let out = pre_with_cwd(
+        "Write",
+        json!({"file_path": "/Users/nobody/project/lictor.toml", "content": "[settings]"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+}
+
+#[test]
+fn default_policy_asks_on_redirect_into_settings() {
+    // no content-emitter involved (jq isn't on_shell_write's radar) — the
+    // [[path]] rule alone must catch the redirect target
+    let out = pre_with_cwd(
+        "Bash",
+        json!({"command": "jq . tmp.json > .claude/settings.json"}),
+        PROJECT,
+    );
+    assert_eq!(decision(&out), Some("ask".into()));
+}
+
+#[test]
+fn default_policy_leaves_ordinary_project_files_alone() {
+    // a file that merely *sounds* similar is not gated by the self-protection rule
+    let out = pre_with_cwd("Bash", json!({"command": "cat src/settings.rs"}), PROJECT);
+    assert_ne!(decision(&out), Some("ask".into()), "{out:?}");
+
+    let out = pre_with_cwd(
+        "Write",
+        json!({"file_path": "/Users/nobody/project/src/config.toml", "content": "x"}),
+        PROJECT,
+    );
+    assert_ne!(decision(&out), Some("ask".into()), "{out:?}");
+}

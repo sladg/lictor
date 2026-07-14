@@ -45,6 +45,19 @@ action = "allow"
 match = "lictor gain"
 action = "allow"
 
+# --- self-protection: the hook wiring and the policy itself ---
+# Editing .claude/settings.json can unhook lictor entirely; lictor.toml IS the
+# policy. One [[path]] rule covers every vector — Write/Edit file paths, bash
+# args, redirect targets, cp/mv/sed -i. Reads prompt too, which also keeps the
+# agent from casually enumerating what's allowed. auto mode turns ask into deny.
+[[path]]
+match = [
+  "**/.claude/settings.json", "**/.claude/settings.local.json",
+  "**/lictor.toml", "**/lictor/config.toml",
+]
+action = "ask"
+hint = "touches the policy hook's wiring/config — confirm intent"
+
 # --- override examples ---
 
 # [catalog.net-egress]

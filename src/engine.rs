@@ -52,6 +52,22 @@ pub fn error_output(event: &str, error: &str) -> HookOutput {
 
 // deny-then-allow: a rule's retry_count denies within retry_window flip the
 // next resubmission to allow instead — the counter is spent (reset) once it does
+fn apply_hint_retry(outcome: &mut rules::GateOutcome, config: &Config, input: &HookInput) {
+    let Some(session) = input.session_id.as_deref() else {
+        return;
+    };
+    let Some((key, threshold, window, message)) = &outcome.hint_retry else {
+        return;
+    };
+    let prior = retry_allow::count(config, input.cwd.as_deref(), session, key, *window);
+    if prior >= *threshold {
+        outcome.hints.retain(|h| h != message);
+        retry_allow::reset(config, input.cwd.as_deref(), session, key);
+    } else {
+        retry_allow::bump(config, input.cwd.as_deref(), session, key);
+    }
+}
+
 fn apply_deny_retry(outcome: &mut rules::GateOutcome, config: &Config, input: &HookInput) {
     let Some(session) = input.session_id.as_deref() else {
         return;
@@ -272,12 +288,13 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
 }
 
 fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, String> {
-    let Some((path, contents)) = content::target_of(&input.tool_name, &input.tool_input) else {
+    let Some((path, pairs)) = content::target_of(&input.tool_name, &input.tool_input) else {
         return Ok(None);
     };
     let edit_rules = content::compile_edit_rules(config)?;
-    let mut outcome = content::gate_content(&path, &contents, &edit_rules);
+    let mut outcome = content::gate_content(&path, &pairs, &edit_rules);
     apply_deny_retry(&mut outcome, config, input);
+    apply_hint_retry(&mut outcome, config, input);
 
     // jail: Write/Edit/MultiEdit/NotebookEdit's file_path is a literal, already-
     // resolved path — same containment check as Bash's jail module, just without
@@ -347,12 +364,13 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
             input.session_id.as_deref(),
             &path,
         );
+        let new_strings: Vec<String> = pairs.iter().map(|(_, n)| n.clone()).collect();
         let hit = modules::recreate::check(
             config,
             input.cwd.as_deref(),
             input.session_id.as_deref(),
             &path,
-            &contents,
+            &new_strings,
         );
         if let Some((setting, hit)) = hit {
             let message = format!(

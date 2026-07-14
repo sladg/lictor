@@ -31,6 +31,26 @@ spill_keep = 40
 spill_expires = "24h"   # forwarded to `kv set --expires-after`
 # spill_command = "kv"  # override the storage CLI
 
+# project jail: literal paths outside the project (and allowed roots) -> warn | ask | deny.
+# project root = the git repo containing cwd, so the agent moves freely inside the repo.
+jail = "ask"
+jail_allow = ["~/Downloads"]
+
+# rogue-actor guard: N consecutive denies with nothing executed in between ->
+# every Bash call asks until one actually runs
+strikes = 5
+
+# dynamic modules: context-aware checks backed by read-only probes (git ls-files,
+# PATH resolve, session state). Each accepts a subset of off|warn|rewrite|ask|deny|allow.
+[modules]
+git-mv = "rewrite"          # mv of a git-tracked path -> git mv (keeps history)
+git-rm = "rewrite"          # rm of a git-tracked path -> git rm (records the deletion)
+delete-recreate = "ask"     # a Write resembling a just-deleted file -> rename it properly
+self-rm = "allow"           # rm of files the agent itself created this session -> no prompt
+pm-cwd = "rewrite"          # cd pkg && bun run x -> bun --cwd pkg run x
+abs-paths = "warn"          # absolute path to an in-project file -> use the relative one
+path-check = "warn"         # program guaranteed not to resolve on PATH -> tell the agent why
+
 # ---- bash rules: matched against EVERY command in a chain, after unwrapping
 # sudo/env/xargs/nohup/timeout/..., bash -c "...", eval '...', $(...), subshells,
 # git global flags (git -C x commit == git commit), /usr/bin/git == git
@@ -131,13 +151,36 @@ file = ".nvmrc"
 run = "nvm use"
 tools = ["node", "npm", "npx", "yarn"]
 
-# ---- edit rules: path globs + regex over written content (Edit/Write/MultiEdit/NotebookEdit)
+# ---- edit rules: path globs + content regexes (Edit/Write/MultiEdit/NotebookEdit)
+# pattern          — fires when written content MATCHES (gate what's added)
+# removed_pattern  — fires when old content matched but new doesn't (gate deletions;
+#                    Write sends no prior content, so it never fires there)
+# required_pattern — fires when written content is MISSING the regex (demand boilerplate)
+# all specified conditions must hold for the rule to fire
 
 [[edit]]
 paths = ["**/*.ts", "**/*.tsx"]
 pattern = "as (any|never|unknown)"
 action = "deny"
 hint = "No type assertions — fix the type design instead."
+
+# deletions: doc-comments must survive refactors. retry_count/retry_window on a
+# warn = deliver the hint N times inside the window, then go quiet (on a deny
+# rule the same pair means: deny N times, then allow the identical resubmission)
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+removed_pattern = '(?s)/\*\*.*?\*/'
+action = "warn"
+hint = "A doc-comment was removed by this edit — keep it unless asked."
+retry_count = 2
+retry_window = 300
+
+# required content: every edit to a doc must carry the updated_at bump
+[[edit]]
+paths = ["docs/**/*.md"]
+required_pattern = '(?m)^updated_at: \d{4}-\d{2}-\d{2}'
+action = "deny"
+hint = "Bump `updated_at:` in the frontmatter as part of this edit."
 
 [[edit]]
 paths = ["**/.env*"]
@@ -183,3 +226,20 @@ pipe = "tail -20"
 [[minify]]
 match = "vitest*"
 max_lines = 80
+
+# ---- per-mode overrides: one more config layer, applied only when the session's
+# permission_mode matches (default | plan | acceptEdits | auto | dontAsk |
+# bypassPermissions). Settings override, rule lists append, most-restrictive wins.
+# Built in, no config: in `auto` mode every `ask` becomes `deny` (nobody's there
+# to answer a dialog).
+
+[modes.auto.settings]
+jail = "deny"                 # unattended: hard-confine to the repo
+
+[modes.bypassPermissions.settings]
+jail = "deny"
+
+[[modes.bypassPermissions.bash]]
+match = "curl*"
+action = "deny"               # net-egress asks elsewhere; unattended mode can't ask
+reason = "no unattended network access"
