@@ -1,5 +1,11 @@
 # lictor starter policy — `lictor check` validates, `lictor gain` shows savings
+# full reference (all rules, settings, and recipes, LLM-friendly single file):
+#   https://raw.githubusercontent.com/sladg/lictor/master/llms.txt
 [settings]
+# permission-mode names are matched verbatim against what the harness sends —
+# if a rename ever breaks that, map the new name to the one this config uses
+# (single hop; keys = harness name, values = name in this file):
+# mode_aliases = { unattended = "auto" }
 on_unparseable = "ask"
 on_inline_script = "ask"
 on_obfuscation = "deny"
@@ -78,6 +84,12 @@ hint = "touches the policy hook's wiring/config — confirm intent"
 # match = "rm .claude/scratch/*"  # blanket action (mutating: rm -> ask above) —
 # action = "skip"                 # no opinion; Claude Code's own rules decide
 
+# auto mode runs unattended: nobody can answer a permission dialog, so a hook
+# "ask" would stall the turn. [remap] rewrites the FINAL decision, applied last.
+[modes.auto.remap]
+ask = "deny"
+# warn = "skip"                   # also drop hints for fully binary decisions
+
 # [modes.*]: per permission_mode overlay (default|plan|acceptEdits|auto|dontAsk|
 # bypassPermissions) — settings override, [[bash]]/[[edit]] rules append. Dry-run
 # with `lictor check --mode auto -- <cmd>`.
@@ -87,6 +99,51 @@ hint = "touches the policy hook's wiring/config — confirm intent"
 # [[modes.bypassPermissions.bash]]
 # match = "curl*"
 # action = "deny"                 # net-egress can only "ask" elsewhere; unattended can't
+
+# Per-rule mode overrides — the pattern is declared ONCE, only the action varies:
+# every [[bash]]/[[edit]]/[[path]]/[[web]]/[[agent]] rule and [catalog.*] block
+# takes `modes = { <mode> = <action> }`.
+# [catalog.mutating]
+# modes = { plan = "deny" }       # no mutations while planning; unchanged elsewhere
+
+# Allowlist lockdown: settings.default_bash/default_edit/default_web decide when
+# NO rule matched. Plan mode: read anything, write only markdown, research only
+# on vetted domains.
+# [modes.plan.settings]
+# default_bash = "deny"
+# default_edit = "deny"
+# default_web = "deny"
+#
+# [[modes.plan.edit]]
+# paths = ["**/*.md"]
+# action = "allow"
+
+# [[web]]: URL rules for static http(s) URLs in Bash args AND the WebFetch tool
+# (add WebFetch to the PreToolUse matcher — see `lictor init`). `domains` globs
+# test the host, `match` globs test the URL path; deny > ask > rewrite > warn >
+# allow, so the extension denylist below beats any domain allow.
+# [[web]]
+# domains = ["docs.rs", "github.com", "*.github.com"]
+# action = "ask"
+# modes = { plan = "allow", auto = "deny" }
+#
+# [[web]]
+# match = ["*.zip", "*.tar.gz", "*.tgz", "*.sh", "*.dmg", "*.pkg"]
+# action = "deny"
+# reason = "no downloading archives or scripts"
+#
+# [[web]]                         # WebFetch only: reroute Cloudflare-walled pages
+# domains = ["*.medium.com"]      # through a markdown proxy instead of failing
+# action = "rewrite"
+# rewrite = "https://pure.md/{url}"
+
+# [[agent]]: regex rules for subagents (Task/Agent tool). on = "prompt" gates
+# before launch (deny/ask/warn); on = "output" hints next to the result.
+# [[agent]]
+# pattern = "(?i)comprehensive analysis"
+# on = "output"
+# action = "warn"
+# hint = "subagent output smells like filler — ask for specifics"
 
 # dynamic modules: context-aware rewrites backed by read-only probes.
 # off | warn (hint only) | rewrite

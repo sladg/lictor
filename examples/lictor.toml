@@ -120,18 +120,47 @@ match = "npx tsc*"
 action = "deny"
 reason = "Use the project script instead of npx tsc."
 
-[[bash]]
-match = "curl*"
-action = "warn"
-hint = "Prefer PullMD for web pages: curl -s \"https://pullmd.example/api?url=<URL>\""
-
-# strict host allowlist: `contains` requires the PullMD URL to be present,
-# `only` forbids any other argument (extra URLs, -o file, ...). Flags pass via "-*".
+# strict arg allowlist: `only` forbids any argument not matching a glob
+# (extra URLs, -o file, ...); flags pass via "-*". For URL/domain policy
+# proper, prefer the [[web]] rules below.
 [[bash]]
 match = "curl"
-contains = ["https://pullmd.example/*"]
-only = ["-*", "https://pullmd.example/*"]
+only = ["-*", "https://internal.example/*"]
 action = "allow"
+
+# ---- web rules: URL policy for static http(s) URLs in Bash args AND the
+# WebFetch tool (add WebFetch to the PreToolUse matcher — `lictor init` shows it).
+# `domains` globs test the host ("*." does NOT cover the apex — list both),
+# `match` globs test the URL path. deny > ask > rewrite > warn > allow, so the
+# extension denylist beats any domain allow. A command auto-approves only when
+# every URL matches an allow rule and every word is static — a $VAR, a mixed
+# unknown URL, or an output redirect drops it back to the bash rules.
+
+[[web]]
+domains = ["docs.rs", "github.com", "*.github.com"]
+action = "allow"
+
+[[web]]
+match = ["*.zip", "*.tar.gz", "*.tgz", "*.sh", "*.dmg", "*.pkg"]
+action = "deny"
+reason = "no downloading archives or scripts"
+
+# WebFetch only: reroute Cloudflare-walled pages through a markdown proxy
+# instead of failing — {url} expands to the original URL
+[[web]]
+domains = ["*.medium.com"]
+action = "rewrite"
+rewrite = "https://pure.md/{url}"
+
+# ---- agent rules: regex over subagent (Task tool) traffic.
+# on = "prompt" gates before launch (deny/ask/warn); on = "output" attaches a
+# hint next to the result (the work already happened — warn/log only).
+
+[[agent]]
+pattern = "(?i)comprehensive analysis|deep dive"
+on = "output"
+action = "warn"
+hint = "subagent output smells like filler — ask for specifics"
 
 # audit without deciding: rule-log entries land in settings.log_file
 [[bash]]
@@ -227,12 +256,23 @@ pipe = "tail -20"
 match = "vitest*"
 max_lines = 80
 
-# ---- per-mode overrides: one more config layer, applied only when the session's
-# permission_mode matches (default | plan | acceptEdits | auto | dontAsk |
-# bypassPermissions). Settings override, rule lists append, most-restrictive wins.
-# Built in, no config: in `auto` mode every `ask` becomes `deny` (nobody's there
-# to answer a dialog).
+# ---- per-mode policy (permission_mode: default | plan | acceptEdits | auto |
+# dontAsk | bypassPermissions). Three tools, least to most sweeping:
+#   1. per-rule `modes` map — one shared pattern, mode-specific action
+#   2. [modes.<mode>] overlay — extra rules/settings only in that mode
+#   3. [modes.<mode>.remap] — rewrite the FINAL decision, applied last
+# Dry-run: `lictor check --mode auto -- <cmd>`.
 
+# 1. shared rule, per-mode action (works on bash/edit/path/web/agent + catalogs):
+[[bash]]
+match = "cargo test*"
+action = "allow"
+modes = { plan = "deny" }     # no test runs while planning
+
+[catalog.mutating]
+modes = { plan = "deny" }     # no mutations while planning; unchanged elsewhere
+
+# 2. overlay: settings override, rule lists append, most-restrictive wins
 [modes.auto.settings]
 jail = "deny"                 # unattended: hard-confine to the repo
 
@@ -243,3 +283,25 @@ jail = "deny"
 match = "curl*"
 action = "deny"               # net-egress asks elsewhere; unattended mode can't ask
 reason = "no unattended network access"
+
+# 3. remap: nobody answers a dialog in auto mode — every final `ask` becomes
+# `deny`; `warn = "skip"` would drop hints too
+[modes.auto.remap]
+ask = "deny"
+
+# allowlist lockdown: default_bash/default_edit/default_web decide when NO rule
+# matched — plan mode reads anything, writes only markdown, researches only
+# vetted domains
+[modes.plan.settings]
+default_bash = "deny"
+default_edit = "deny"
+default_web = "deny"
+
+[[modes.plan.edit]]
+paths = ["**/*.md"]
+action = "allow"
+
+# if the harness ever renames a permission mode, map the new name to the one
+# this file uses (keys = harness name, single hop) — no lictor update needed:
+# [settings]
+# mode_aliases = { unattended = "auto" }

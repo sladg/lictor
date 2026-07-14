@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod audit;
 pub mod bash;
 pub mod catalogs;
@@ -9,3 +10,4 @@ pub mod hook;
 pub mod minify;
 pub mod modules;
 pub mod rules;
+pub mod web;

@@ -235,6 +235,7 @@ pub fn site_coverage(extraction: &Extraction, vetted: &[usize]) -> bool {
 pub fn gate(
     extraction: &Extraction,
     rules: &[CompiledBashRule],
+    web_rules: &[crate::web::CompiledWebRule],
     config: &Config,
     cwd: Option<&str>,
 ) -> GateOutcome {
@@ -262,6 +263,15 @@ pub fn gate(
         })
         .collect();
 
+    // [[web]] verdicts, computed first: a fully-vetted command (every URL on an
+    // allow rule, all words static) is exempted from other rules' ask/warn — the
+    // verified URL is the vetting they'd ask for. An explicit deny still wins.
+    let web_verdicts: Vec<crate::web::CommandVerdict> = extraction
+        .commands
+        .iter()
+        .map(|command| crate::web::gate_command(web_rules, command))
+        .collect();
+
     // collect matches for every (command, rule) pair first; severity decides afterwards,
     // so config order can't let an ask/allow rule shadow a deny
     for (ci, command) in extraction.commands.iter().enumerate() {
@@ -270,7 +280,7 @@ pub fn gate(
             if matched == Match::No || rule.rule.action == Action::Skip {
                 continue;
             }
-            if skipped[ci] && rule.rule.action != Action::Deny {
+            if (skipped[ci] || web_verdicts[ci].vetted) && rule.rule.action != Action::Deny {
                 continue;
             }
             let display = command.display();
@@ -336,6 +346,26 @@ pub fn gate(
                 // filtered out above (Skip never reaches here, No never survives the continue)
                 (Action::Skip, _) | (_, Match::No) => unreachable!(),
             }
+        }
+    }
+
+    for (ci, verdict) in web_verdicts.into_iter().enumerate() {
+        if let Some(reason) = verdict.deny {
+            deny_hit.get_or_insert(reason);
+            continue;
+        }
+        if skipped[ci] {
+            continue;
+        }
+        if let Some(reason) = verdict.ask {
+            ask_hit.get_or_insert(reason);
+        }
+        for hint in verdict.hints {
+            push_hint(&mut outcome.hints, hint);
+        }
+        if verdict.vetted {
+            allowed.push(ci);
+            allow_reasons.extend(verdict.allow_reasons);
         }
     }
 

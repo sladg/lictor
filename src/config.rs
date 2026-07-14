@@ -57,6 +57,10 @@ pub struct BashRule {
     pub retry_count: Option<u32>,
     #[serde(default)]
     pub retry_window: Option<u64>,
+    // per-permission-mode action override: the pattern is shared, only the
+    // action varies — `modes = { plan = "allow", auto = "deny" }`
+    #[serde(default)]
+    pub modes: HashMap<String, Action>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +80,8 @@ pub struct EditRule {
     pub retry_count: Option<u32>,
     #[serde(default)]
     pub retry_window: Option<u64>,
+    #[serde(default)]
+    pub modes: HashMap<String, Action>,
 }
 
 // user-listed filesystem paths -> action + hint, matched against paths the
@@ -89,6 +95,55 @@ pub struct PathRule {
     pub action: Action,
     #[serde(default)]
     pub hint: Option<String>,
+    #[serde(default)]
+    pub modes: HashMap<String, Action>,
+}
+
+// URL rules, matched against static http(s) URLs in Bash arguments and the
+// WebFetch tool's `url`. `domains` globs test the host, `match` globs test the
+// URL path; both present = both must match. Severity resolves like bash rules
+// (deny > ask), so an extension denylist beats a domain allowlist.
+#[derive(Debug, Deserialize)]
+pub struct WebRule {
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(rename = "match", default)]
+    pub paths: Vec<String>,
+    pub action: Action,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub hint: Option<String>,
+    // action = "rewrite" (WebFetch only): `{url}` expands to the original URL —
+    // e.g. "https://pure.md/{url}" routes Cloudflare-blocked pages via a
+    // markdown proxy instead of denying the fetch
+    #[serde(default)]
+    pub rewrite: Option<String>,
+    #[serde(default)]
+    pub modes: HashMap<String, Action>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentOn {
+    Prompt,
+    Output,
+}
+
+// subagent (Task/Agent tool) content rules: regex over the prompt (PreToolUse,
+// can deny/ask) or over the returned output (PostToolUse, hint only — the work
+// already happened; warn is the strongest verdict that still makes sense)
+#[derive(Debug, Deserialize)]
+pub struct AgentRule {
+    pub pattern: String,
+    pub on: AgentOn,
+    pub action: Action,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub hint: Option<String>,
+    #[serde(default)]
+    pub modes: HashMap<String, Action>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +219,21 @@ pub struct Settings {
     pub jail: Option<Action>,
     #[serde(default)]
     pub jail_allow: Option<Vec<String>>,
+    // fallback when no rule produced a decision: flips lictor from blocklist to
+    // allowlist (e.g. plan mode: default_bash/default_edit = "deny", only the
+    // explicit allow rules pass). default_web covers unmatched WebFetch URLs.
+    #[serde(default)]
+    pub default_bash: Option<Action>,
+    #[serde(default)]
+    pub default_edit: Option<Action>,
+    #[serde(default)]
+    pub default_web: Option<Action>,
+    // harness mode name -> the mode name this config uses, e.g.
+    // `mode_aliases = { unattended = "auto" }` keeps every [modes.auto] block
+    // and `modes = { auto = ... }` map working after a harness rename.
+    // Single hop, no chains.
+    #[serde(default)]
+    pub mode_aliases: HashMap<String, String>,
 }
 
 // membership entry with argument constraints, e.g. secret files read by pagers
@@ -205,6 +275,8 @@ pub struct Catalog {
     pub min_lines: Option<usize>,
     #[serde(default)]
     pub preserve: Option<Vec<String>>,
+    #[serde(default)]
+    pub modes: HashMap<String, Action>,
 }
 
 // toolchain activation: when a managed program fails and its marker file is in
@@ -226,6 +298,10 @@ pub struct Config {
     #[serde(default)]
     pub path: Vec<PathRule>,
     #[serde(default)]
+    pub web: Vec<WebRule>,
+    #[serde(default)]
+    pub agent: Vec<AgentRule>,
+    #[serde(default)]
     pub minify: Vec<MinifyRule>,
     #[serde(default)]
     pub activate: Vec<ActivateRule>,
@@ -240,6 +316,12 @@ pub struct Config {
     // ("default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions")
     #[serde(default)]
     pub modes: HashMap<String, Config>,
+    // final-decision remap, applied after everything else resolved. Keys are
+    // decisions ("allow"|"ask"|"deny") plus "warn" (= emitted hints). Usually
+    // declared per mode: `[modes.auto.remap] ask = "deny"` — unattended runs
+    // get a deterministic answer instead of a prompt nobody can dismiss.
+    #[serde(default)]
+    pub remap: HashMap<String, Action>,
     #[serde(skip)]
     pub activated_catalogs: Vec<String>,
 }
@@ -249,6 +331,8 @@ impl Config {
         self.bash.extend(other.bash);
         self.edit.extend(other.edit);
         self.path.extend(other.path);
+        self.web.extend(other.web);
+        self.agent.extend(other.agent);
         self.minify.extend(other.minify);
         self.activate.extend(other.activate);
         // same-name catalog block: later file (project) replaces earlier (user)
@@ -256,6 +340,7 @@ impl Config {
         self.modules.extend(other.modules);
         // same-name mode block: later file replaces earlier, same as catalogs
         self.modes.extend(other.modes);
+        self.remap.extend(other.remap);
         self.settings.catalogs.extend(other.settings.catalogs);
         if other.settings.on_unparseable.is_some() {
             self.settings.on_unparseable = other.settings.on_unparseable;
@@ -308,6 +393,18 @@ impl Config {
         if other.settings.jail_allow.is_some() {
             self.settings.jail_allow = other.settings.jail_allow;
         }
+        if other.settings.default_bash.is_some() {
+            self.settings.default_bash = other.settings.default_bash;
+        }
+        if other.settings.default_edit.is_some() {
+            self.settings.default_edit = other.settings.default_edit;
+        }
+        if other.settings.default_web.is_some() {
+            self.settings.default_web = other.settings.default_web;
+        }
+        self.settings
+            .mode_aliases
+            .extend(other.settings.mode_aliases);
         self
     }
 
@@ -340,12 +437,69 @@ impl Config {
     }
 
     // resolves the [modes.<mode>] overlay (if declared) as one more merge pass,
-    // so scalar settings override and rule lists append, same as file layering
+    // so scalar settings override and rule lists append, same as file layering;
+    // then per-rule `modes = { <mode> = <action> }` maps replace each rule's
+    // action — one shared pattern, mode-specific verdicts, no duplication
     pub fn apply_mode(mut self, mode: Option<&str>) -> Config {
+        // settings.mode_aliases: the user's escape hatch when the harness
+        // renames a permission mode — resolve the incoming name first so every
+        // overlay, per-rule map, and remap keyed on the config's name still fires
+        let mode = mode.map(|m| {
+            self.settings
+                .mode_aliases
+                .get(m)
+                .cloned()
+                .unwrap_or_else(|| m.to_string())
+        });
+        let mode = mode.as_deref();
         if let Some(overlay) = mode.and_then(|m| self.modes.remove(m)) {
             self = self.merge(overlay);
         }
+        let Some(mode) = mode else { return self };
+        for rule in &mut self.bash {
+            if let Some(action) = rule.modes.get(mode) {
+                rule.action = *action;
+            }
+        }
+        for rule in &mut self.edit {
+            if let Some(action) = rule.modes.get(mode) {
+                rule.action = *action;
+            }
+        }
+        for rule in &mut self.path {
+            if let Some(action) = rule.modes.get(mode) {
+                rule.action = *action;
+            }
+        }
+        for rule in &mut self.web {
+            if let Some(action) = rule.modes.get(mode) {
+                rule.action = *action;
+            }
+        }
+        for rule in &mut self.agent {
+            if let Some(action) = rule.modes.get(mode) {
+                rule.action = *action;
+            }
+        }
+        // runs before finalize, so the override flows into the expanded rules
+        for catalog in self.catalog.values_mut() {
+            if let Some(action) = catalog.modes.get(mode) {
+                catalog.action = Some(*action);
+            }
+        }
         self
+    }
+
+    pub fn default_bash(&self) -> Option<Action> {
+        self.settings.default_bash
+    }
+
+    pub fn default_edit(&self) -> Option<Action> {
+        self.settings.default_edit
+    }
+
+    pub fn default_web(&self) -> Option<Action> {
+        self.settings.default_web
     }
 
     pub fn jail(&self) -> Option<Action> {
@@ -411,6 +565,56 @@ impl Config {
     pub fn finalize(&mut self) -> Result<(), String> {
         for (name, setting) in &self.modules {
             crate::modules::validate(name, *setting)?;
+        }
+        for (key, target) in &self.remap {
+            match (key.as_str(), target) {
+                (
+                    "allow" | "ask" | "deny",
+                    Action::Allow | Action::Ask | Action::Deny | Action::Warn | Action::Skip,
+                ) => {}
+                // "warn" remaps the emitted hints: skip drops them
+                ("warn", Action::Skip | Action::Log) => {}
+                ("allow" | "ask" | "deny" | "warn", _) => {
+                    return Err(format!("remap '{key}' has an unsupported target action"));
+                }
+                _ => {
+                    return Err(format!(
+                        "remap key '{key}' must be one of allow/ask/deny/warn"
+                    ));
+                }
+            }
+        }
+        for rule in &self.web {
+            if rule.domains.is_empty() && rule.paths.is_empty() {
+                return Err("web rule needs `domains` and/or `match` globs".to_string());
+            }
+            if rule.action == Action::Rewrite
+                && !rule.rewrite.as_deref().is_some_and(|t| t.contains("{url}"))
+            {
+                return Err(
+                    "web rewrite rule needs a `rewrite` template containing {url}".to_string(),
+                );
+            }
+            if rule.action == Action::Log {
+                return Err("web rules do not support action = \"log\"".to_string());
+            }
+        }
+        for rule in &self.agent {
+            let valid = match rule.on {
+                AgentOn::Prompt => matches!(
+                    rule.action,
+                    Action::Deny | Action::Ask | Action::Warn | Action::Log | Action::Skip
+                ),
+                AgentOn::Output => {
+                    matches!(rule.action, Action::Warn | Action::Log | Action::Skip)
+                }
+            };
+            if !valid {
+                return Err(format!(
+                    "agent rule '{}': on = \"output\" supports warn/log, on = \"prompt\" adds deny/ask",
+                    rule.pattern
+                ));
+            }
         }
         let builtins = builtin_catalogs()?;
         let mut active: BTreeMap<String, Catalog> = BTreeMap::new();
@@ -485,6 +689,8 @@ impl Config {
                         hint: catalog.hint.clone(),
                         retry_count: None,
                         retry_window: None,
+                        // catalog-level modes already resolved in apply_mode
+                        modes: HashMap::new(),
                     });
                 }
                 if has_minify {

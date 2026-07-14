@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use lictor::{config, content, engine, hook::HookInput, minify, modules, rules};
+use lictor::{agent, config, content, engine, hook::HookInput, minify, modules, rules, web};
 use serde_json::Value;
 use std::io::{IsTerminal, Read};
 
@@ -273,15 +273,18 @@ fn check(mode: Option<String>) {
                 content::compile_edit_rules(&config)?;
                 minify::compile_minify_rules(&config)?;
                 modules::path_rules::compile(&config)?;
+                web::compile(&config)?;
+                agent::compile(&config)?;
                 Ok(config)
             });
         match loaded {
             Ok(config) => println!(
-                "ok       {} ({} bash, {} edit, {} path, {} minify rules)",
+                "ok       {} ({} bash, {} edit, {} path, {} web, {} minify rules)",
                 path.display(),
                 config.bash.len(),
                 config.edit.len(),
                 config.path.len(),
+                config.web.len(),
                 config.minify.len()
             ),
             Err(error) => {
@@ -302,10 +305,11 @@ fn check(mode: Option<String>) {
                 println!("mode     {mode}");
             }
             println!(
-                "expanded {} bash, {} edit, {} path, {} minify rules total",
+                "expanded {} bash, {} edit, {} path, {} web, {} minify rules total",
                 config.bash.len(),
                 config.edit.len(),
                 config.path.len(),
+                config.web.len(),
                 config.minify.len()
             );
             check_minify_tools(&config);
@@ -373,19 +377,20 @@ fn init(write: bool) {
     println!(
         r#"Add to .claude/settings.json (or ~/.claude/settings.json):
 (PreToolUse must list Write/Edit/MultiEdit/NotebookEdit alongside Bash — jail
-and edit-rule checks key off each tool's own file_path, not just Bash commands.)
+and edit-rule checks key off each tool's own file_path, not just Bash commands.
+WebFetch enables [[web]] URL rules; Task enables [[agent]] rules, on both events.)
 
 {{
   "hooks": {{
     "PreToolUse": [
       {{
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Task",
         "hooks": [{{ "type": "command", "command": "lictor" }}]
       }}
     ],
     "PostToolUse": [
       {{
-        "matcher": "Bash",
+        "matcher": "Bash|Task",
         "hooks": [{{ "type": "command", "command": "lictor" }}]
       }}
     ]

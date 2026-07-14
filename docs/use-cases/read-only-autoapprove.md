@@ -65,9 +65,12 @@ remove = ["git grep"]
 
 ## Unattended modes
 
-In `auto` mode any `ask` is downgraded to `deny` (nobody's there to answer), so a read-only allowlist is what keeps an unattended agent moving. Pair it with a jail so "read-only" also means "inside the repo":
+The starter policy remaps every `ask` to `deny` in `auto` mode (nobody's there to answer), so a read-only allowlist is what keeps an unattended agent moving. Pair it with a jail so "read-only" also means "inside the repo":
 
 ```toml
+[modes.auto.remap]
+ask = "deny"
+
 [modes.auto.settings]
 jail = "deny"
 ```

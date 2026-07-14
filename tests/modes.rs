@@ -93,11 +93,16 @@ fn mode_overlay_settings_scalar_overrides_base() {
     assert_eq!(decision(&output), Some("deny".to_string()));
 }
 
+// the shipped default.toml declares this remap; the hardcoded auto special-case
+// is gone — the mechanism is config all the way down
 const ASK_POLICY: &str = r#"
 [[bash]]
 match = "git push*"
 action = "ask"
 reason = "Pushing needs a look."
+
+[modes.auto.remap]
+ask = "deny"
 "#;
 
 #[test]
@@ -122,4 +127,140 @@ fn other_modes_keep_ask_as_is() {
         let output = run(ASK_POLICY, mode, "git push");
         assert_eq!(decision(&output), Some("ask".to_string()), "mode: {mode:?}");
     }
+}
+
+// ── per-rule modes map: one pattern, mode-specific actions ────────────────────
+
+const PER_RULE_POLICY: &str = r#"
+[[bash]]
+match = "cargo test*"
+action = "allow"
+modes = { plan = "deny", acceptEdits = "ask" }
+"#;
+
+#[test]
+fn per_rule_modes_map_overrides_action_per_mode() {
+    let output = run(PER_RULE_POLICY, None, "cargo test");
+    assert_eq!(decision(&output), Some("allow".to_string()));
+
+    let output = run(PER_RULE_POLICY, Some("plan"), "cargo test");
+    assert_eq!(decision(&output), Some("deny".to_string()));
+
+    let output = run(PER_RULE_POLICY, Some("acceptEdits"), "cargo test");
+    assert_eq!(decision(&output), Some("ask".to_string()));
+
+    // a mode not listed in the map keeps the base action
+    let output = run(PER_RULE_POLICY, Some("auto"), "cargo test");
+    assert_eq!(decision(&output), Some("allow".to_string()));
+}
+
+#[test]
+fn catalog_modes_map_flows_into_expanded_rules() {
+    let policy = r#"
+[catalog.git-read]
+action = "allow"
+modes = { plan = "ask" }
+"#;
+    let output = run(policy, None, "git status");
+    assert_eq!(decision(&output), Some("allow".to_string()));
+
+    let output = run(policy, Some("plan"), "git status");
+    assert_eq!(decision(&output), Some("ask".to_string()));
+}
+
+// ── default_bash: allowlist lockdown ──────────────────────────────────────────
+
+const LOCKDOWN_POLICY: &str = r#"
+[[bash]]
+match = "git status*"
+action = "allow"
+
+[modes.plan.settings]
+default_bash = "deny"
+"#;
+
+#[test]
+fn default_bash_denies_unmatched_commands_in_mode() {
+    // outside the mode: no rule matched -> no opinion (Claude Code decides)
+    let output = run(LOCKDOWN_POLICY, None, "cargo build");
+    assert_eq!(decision(&output), None);
+
+    // in plan mode the fallback closes the hole
+    let output = run(LOCKDOWN_POLICY, Some("plan"), "cargo build");
+    assert_eq!(decision(&output), Some("deny".to_string()));
+
+    // explicit allow rules still pass
+    let output = run(LOCKDOWN_POLICY, Some("plan"), "git status");
+    assert_eq!(decision(&output), Some("allow".to_string()));
+}
+
+// ── remap: warn -> skip drops hints ───────────────────────────────────────────
+
+#[test]
+fn remap_warn_skip_suppresses_hints() {
+    let policy = r#"
+[[bash]]
+match = "curl*"
+action = "warn"
+hint = "Prefer the project HTTP client."
+
+[modes.auto.remap]
+warn = "skip"
+"#;
+    let output = run(policy, None, "curl https://example.com");
+    assert!(hint(&output).is_some_and(|h| h.contains("HTTP client")));
+
+    let output = run(policy, Some("auto"), "curl https://example.com");
+    assert_eq!(hint(&output), None);
+}
+
+// ── mode_aliases: harness renames a mode, config maps it back ─────────────────
+
+#[test]
+fn mode_alias_resolves_overlay_per_rule_map_and_remap() {
+    let policy = r#"
+[settings]
+mode_aliases = { unattended = "auto" }
+
+[[bash]]
+match = "cargo test*"
+action = "allow"
+modes = { auto = "deny" }
+
+[[bash]]
+match = "git push*"
+action = "ask"
+
+[modes.auto.remap]
+ask = "deny"
+"#;
+    // the harness sends the new name; everything keyed on "auto" still fires
+    let output = run(policy, Some("unattended"), "cargo test");
+    assert_eq!(decision(&output), Some("deny".to_string()));
+    let output = run(policy, Some("unattended"), "git push");
+    assert_eq!(decision(&output), Some("deny".to_string()));
+
+    // the config name itself keeps working
+    let output = run(policy, Some("auto"), "cargo test");
+    assert_eq!(decision(&output), Some("deny".to_string()));
+
+    // unrelated modes untouched
+    let output = run(policy, Some("plan"), "cargo test");
+    assert_eq!(decision(&output), Some("allow".to_string()));
+}
+
+#[test]
+fn remap_ask_to_warn_demotes_decision_to_hint() {
+    let policy = r#"
+[[bash]]
+match = "git push*"
+action = "ask"
+reason = "Pushing needs a look."
+
+[modes.acceptEdits.remap]
+ask = "warn"
+"#;
+    let output = run(policy, Some("acceptEdits"), "git push");
+    assert_eq!(decision(&output), None);
+    assert!(hint(&output).is_some_and(|h| h.contains("Pushing needs a look.")));
 }

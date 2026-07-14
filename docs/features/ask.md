@@ -46,4 +46,4 @@ eval "$PAYLOAD"               → prompt (opaque)
 python -c "import os; …"      → prompt (inline script, on_inline_script = ask)
 ```
 
-In `auto` mode every `ask` is downgraded to `deny` — nobody's there to answer the dialog, and a deny gives the agent a reason it can act on instead of a stalled turn. See [modes](modes.md).
+The starter policy ships `[modes.auto.remap] ask = "deny"`: in `auto` mode every `ask` becomes `deny` — nobody's there to answer the dialog, and a deny gives the agent a reason it can act on instead of a stalled turn. See [modes](modes.md).

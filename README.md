@@ -27,6 +27,8 @@ End state: you either click "approve" all day or turn the checks off. Lictor is 
 - **talks back** — [deny](docs/features/deny.md) reasons and [warn](docs/features/warn.md) hints are your words, handed to the agent verbatim. Blocked agent with a reason corrects in one turn; blocked agent without one brute-forces variants.
 - **rewrites** — fix instead of block: `grep` → `rg` ([rewrite](docs/features/rewrite.md)), `mv` of a tracked file → `git mv` ([modules](docs/features/modules.md)). Result is re-gated, so a rewrite can't smuggle past a ban.
 - **gates file edits too** — by path + content: what's added, what's deleted, what must be present ([edit rules](docs/features/edit-rules.md)).
+- **gates URLs** — domain allowlists and extension denylists for `curl`/`wget`/`WebFetch`, or reroute a fetch through a markdown proxy ([web rules](docs/features/web.md)). Subagent prompts and outputs get regex rules too ([agent rules](docs/features/agent.md)).
+- **mode-aware** — one shared rule, different action per permission mode: `modes = { plan = "allow", auto = "deny" }`; remap final decisions per mode, or flip to a deny-by-default allowlist ([modes](docs/features/modes.md)).
 - **shrinks output** — [minify](docs/features/minify.md) noisy CLIs, [spill](docs/features/spill.md) oversized output to a local cache; the model gets the tail + a retrieval command instead of 3 000 lines.
 
 | agent runs | lictor decides |
@@ -35,6 +37,8 @@ End state: you either click "approve" all day or turn the checks off. Lictor is 
 | `bash -c "gi''t commit"` | **deny** — payload parsed, quote-splice resolved |
 | `grep -r TODO src/` | **rewrite** → `rg TODO src/`, auto-approved |
 | `mv src/a.ts src/b.ts` | **rewrite** → `git mv src/a.ts src/b.ts` (file is git-tracked) |
+| `curl -sSL https://docs.rs/regex \| jq .` | **allow** — every URL on an allowed domain, statically verified |
+| `wget https://github.com/x/archive.zip` | **deny** — "no downloading archives…" (extension beats domain allow) |
 | `cat ~/.zshrc` | **ask** — path outside the project jail |
 | `git $ACTION` | **ask** — dynamic arg defeats the ban check, fail closed |
 | `cargo test` (3 400 lines) | output **spilled** to `kv`; model sees the tail + a `kv get` note |
@@ -51,10 +55,11 @@ Or with Rust 1.85+: `cargo install --git https://github.com/sladg/lictor`.
 lictor init --write            # starter lictor.toml + the hooks snippet for settings.json
 lictor check                   # validate config (a broken config fails closed: everything asks until this passes)
 lictor check -- <command...>   # dry-run one command through the exact hook pipeline
+lictor check --mode auto -- …  # dry-run as a specific permission mode
 lictor gain                    # audit-log summary: decisions + tokens/bytes saved
 ```
 
-`lictor init` prints the hooks block to paste into `.claude/settings.json` (or `~/.claude/settings.json`): `PreToolUse` for Bash and the file-edit tools, `PostToolUse` for output minify. Optional companions: [`kv`](https://github.com/AmrSaber/kv) for spill (`brew install AmrSaber/tap/kv`) and [`rtk`](https://github.com/rtk-ai/rtk) for wrap. Without `kv`, spill falls back to plain truncation — nothing is lost. `wrap` rules rewrite unconditionally, so only write them for tools you actually have installed.
+`lictor init` prints the hooks block to paste into `.claude/settings.json` (or `~/.claude/settings.json`): `PreToolUse` for Bash, the file-edit tools, `WebFetch` (web rules), and `Task` (agent rules); `PostToolUse` for output minify and agent-output rules. Optional companions: [`kv`](https://github.com/AmrSaber/kv) for spill (`brew install AmrSaber/tap/kv`) and [`rtk`](https://github.com/rtk-ai/rtk) for wrap. Without `kv`, spill falls back to plain truncation — nothing is lost. `wrap` rules rewrite unconditionally, so only write them for tools you actually have installed.
 
 Dry-run anything before trusting it:
 
@@ -87,6 +92,11 @@ paths   = ["**/*.ts", "**/*.tsx"]
 pattern = "as (any|never|unknown)"   # regex over written content
 action  = "deny"
 hint    = "No type assertions — fix the type design instead."
+
+[[web]]
+domains = ["docs.rs", "github.com", "*.github.com"]
+action  = "ask"                           # one shared rule…
+modes   = { plan = "allow", auto = "deny" }  # …different action per permission mode
 ```
 
 Full annotated config: [`examples/lictor.toml`](examples/lictor.toml). Every command each catalog covers: [`src/catalogs/builtin.toml`](src/catalogs/builtin.toml).
@@ -98,7 +108,7 @@ One short doc per feature — what it does, config, and exactly what happens whe
 | Area | Docs |
 |---|---|
 | Actions | [allow](docs/features/allow.md) · [deny](docs/features/deny.md) · [ask](docs/features/ask.md) · [warn](docs/features/warn.md) · [rewrite](docs/features/rewrite.md) · [log](docs/features/log.md) · [skip](docs/features/skip.md) |
-| Rule types | [catalogs](docs/features/catalogs.md) · [edit rules](docs/features/edit-rules.md) · [path rules](docs/features/path-rules.md) · [retries](docs/features/retries.md) |
+| Rule types | [catalogs](docs/features/catalogs.md) · [edit rules](docs/features/edit-rules.md) · [path rules](docs/features/path-rules.md) · [web rules](docs/features/web.md) · [agent rules](docs/features/agent.md) · [retries](docs/features/retries.md) |
 | Guards | [jail](docs/features/jail.md) · [strikes](docs/features/strikes.md) · [detectors](docs/features/detectors.md) · [fail-closed](docs/features/fail-closed.md) · [modes](docs/features/modes.md) |
 | Output & context | [minify](docs/features/minify.md) · [spill](docs/features/spill.md) |
 | Helpers | [modules](docs/features/modules.md) · [activate](docs/features/activate.md) |

@@ -11,6 +11,33 @@
 // min_lines guards) is exercised end to end.
 
 use lictor::config::Config;
+
+// the README points users at these two files — they must always parse, expand,
+// and compile, in every permission mode
+#[test]
+fn shipped_example_and_default_configs_stay_valid() {
+    for (name, raw) in [
+        (
+            "examples/lictor.toml",
+            include_str!("../examples/lictor.toml"),
+        ),
+        ("src/default.toml", include_str!("../src/default.toml")),
+    ] {
+        for mode in [None, Some("plan"), Some("auto"), Some("bypassPermissions")] {
+            let config: Config =
+                toml::from_str(raw).unwrap_or_else(|e| panic!("{name} parses: {e}"));
+            let mut config = config.apply_mode(mode);
+            config
+                .finalize()
+                .unwrap_or_else(|e| panic!("{name} finalizes (mode {mode:?}): {e}"));
+            lictor::rules::compile_bash_rules(&config).unwrap_or_else(|e| panic!("{name}: {e}"));
+            lictor::content::compile_edit_rules(&config).unwrap_or_else(|e| panic!("{name}: {e}"));
+            lictor::web::compile(&config).unwrap_or_else(|e| panic!("{name}: {e}"));
+            lictor::agent::compile(&config).unwrap_or_else(|e| panic!("{name}: {e}"));
+            lictor::minify::compile_minify_rules(&config).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+}
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
 use serde_json::{Value, json};

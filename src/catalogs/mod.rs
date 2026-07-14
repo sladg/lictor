@@ -91,5 +91,10 @@ pub fn merge_catalog(base: Option<Catalog>, user: Catalog) -> Catalog {
         max_lines: user.max_lines.or(base.max_lines),
         min_lines: user.min_lines.or(base.min_lines),
         preserve: user.preserve.or(base.preserve),
+        modes: if user.modes.is_empty() {
+            base.modes
+        } else {
+            user.modes
+        },
     }
 }

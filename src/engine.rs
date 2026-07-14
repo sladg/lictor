@@ -2,14 +2,18 @@ use crate::audit;
 use crate::config::{Action, Config, ModuleSetting};
 use crate::hook::{HookInput, HookOutput};
 use crate::modules::{activate, retry_allow, strikes};
-use crate::{bash, content, minify, modules, rules};
+use crate::{agent, bash, content, minify, modules, rules, web};
 use serde_json::Value;
 
 pub fn evaluate(input: &HookInput, config: &Config) -> Option<HookOutput> {
     let result = match (input.hook_event_name.as_str(), input.tool_name.as_str()) {
         ("PreToolUse", "Bash") => pre_bash(input, config),
+        ("PreToolUse", "WebFetch") => pre_web(input, config),
+        // the subagent tool is "Task" in Claude Code, "Agent" in newer harnesses
+        ("PreToolUse", "Task" | "Agent") => pre_agent(input, config),
         ("PreToolUse", _) => pre_content(input, config),
         ("PostToolUse", "Bash") => post_bash(input, config),
+        ("PostToolUse", "Task" | "Agent") => post_agent(input, config),
         ("PostToolUseFailure", "Bash") => post_failure(input, config),
         _ => Ok(None),
     };
@@ -21,25 +25,91 @@ pub fn evaluate(input: &HookInput, config: &Config) -> Option<HookOutput> {
             _ => None,
         },
     };
-    output.map(|o| deny_asks_in_auto_mode(o, input))
+    output.map(|o| apply_remap(o, config, input))
 }
 
-// auto mode has no human to answer a permission dialog — Claude Code's own
-// auto-mode classifier resolves the tool's own permission check, but a hook
-// explicitly asking still surfaces a prompt nobody can dismiss and stalls the
-// turn. Deny instead: the agent gets a deterministic answer and keeps moving.
-fn deny_asks_in_auto_mode(mut output: HookOutput, input: &HookInput) -> HookOutput {
+// [remap]: final-decision lookup applied last, e.g. `[modes.auto.remap]
+// ask = "deny"` — unattended runs have nobody to answer a prompt, so the agent
+// gets a deterministic answer instead of a dialog that stalls the turn.
+// `warn = "skip"` drops the emitted hints for the same reason.
+fn apply_remap(mut output: HookOutput, config: &Config, input: &HookInput) -> HookOutput {
+    if input.hook_event_name != "PreToolUse" || config.remap.is_empty() {
+        return output;
+    }
     let out = &mut output.hook_specific_output;
-    if input.permission_mode.as_deref() == Some("auto")
-        && out.permission_decision.as_deref() == Some("ask")
+    let mode = input.permission_mode.as_deref().unwrap_or("lictor");
+    if let Some(decision) = out.permission_decision.as_deref()
+        && let Some(target) = config.remap.get(decision)
     {
-        out.permission_decision = Some("deny".to_string());
-        out.permission_decision_reason = out
-            .permission_decision_reason
-            .as_deref()
-            .map(|r| format!("{r} (auto mode: no one to answer 'ask' — denying instead)"));
+        let note = |r: Option<&str>, to: &str| {
+            let suffix = format!("({mode} mode remap: {decision} → {to})");
+            match r {
+                Some(r) => format!("{r} {suffix}"),
+                None => format!("lictor: {suffix}"),
+            }
+        };
+        match target {
+            Action::Allow | Action::Ask | Action::Deny => {
+                let to = match target {
+                    Action::Allow => "allow",
+                    Action::Ask => "ask",
+                    _ => "deny",
+                };
+                if to != decision {
+                    out.permission_decision_reason =
+                        Some(note(out.permission_decision_reason.as_deref(), to));
+                    out.permission_decision = Some(to.to_string());
+                }
+            }
+            // demote the decision to a hint the model sees
+            Action::Warn => {
+                let hint = note(out.permission_decision_reason.as_deref(), "warn");
+                out.permission_decision = None;
+                out.permission_decision_reason = None;
+                out.additional_context = match out.additional_context.take() {
+                    Some(existing) => Some(format!("{existing}\n{hint}")),
+                    None => Some(hint),
+                };
+            }
+            // hand the call back to Claude Code's own permission rules
+            Action::Skip => {
+                out.permission_decision = None;
+                out.permission_decision_reason = None;
+            }
+            Action::Rewrite | Action::Log => {}
+        }
+    }
+    if matches!(config.remap.get("warn"), Some(Action::Skip | Action::Log)) {
+        out.additional_context = None;
     }
     output
+}
+
+// fallback when no rule produced a decision (settings.default_bash/default_edit/
+// default_web): deny/ask/allow decide, warn hints — flips lictor to an allowlist
+fn apply_default(outcome: &mut rules::GateOutcome, default: Option<Action>, subject: &str) {
+    let Some(action) = default else { return };
+    if outcome.decision.is_some() {
+        return;
+    }
+    let message = format!("lictor: `{subject}` matches no rule — mode default applies");
+    match action {
+        Action::Deny => {
+            outcome.decision = Some("deny");
+            outcome.reason = Some(message);
+        }
+        Action::Ask => {
+            outcome.decision = Some("ask");
+            outcome.reason = Some(message);
+        }
+        Action::Allow => outcome.decision = Some("allow"),
+        Action::Warn => {
+            if !outcome.hints.contains(&message) {
+                outcome.hints.push(message);
+            }
+        }
+        Action::Rewrite | Action::Log | Action::Skip => {}
+    }
 }
 
 pub fn error_output(event: &str, error: &str) -> HookOutput {
@@ -147,6 +217,7 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
         return Ok(None);
     };
     let bash_rules = rules::compile_bash_rules(config)?;
+    let web_rules = web::compile(config)?;
     let minify_rules = minify::compile_minify_rules(config)?;
     let mut extraction = bash::extract(original);
 
@@ -166,7 +237,13 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     let command = command.as_str();
     let module_rewrote = command != original;
 
-    let mut outcome = rules::gate(&extraction, &bash_rules, config, input.cwd.as_deref());
+    let mut outcome = rules::gate(
+        &extraction,
+        &bash_rules,
+        &web_rules,
+        config,
+        input.cwd.as_deref(),
+    );
     apply_deny_retry(&mut outcome, config, input);
 
     // module verdicts: a gate deny still wins; a module deny beats everything else
@@ -226,6 +303,8 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
             }
         }
     }
+
+    apply_default(&mut outcome, config.default_bash(), original);
 
     // fingerprint rm targets while the files still exist, for delete/recreate detection
     if outcome.decision != Some("deny") {
@@ -403,6 +482,8 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
         }
     }
 
+    apply_default(&mut outcome, config.default_edit(), &path);
+
     write_audit(config, input, &path, outcome.decision, &outcome.logged, &[]);
     if outcome.decision.is_none() && outcome.hints.is_empty() {
         return Ok(None);
@@ -413,6 +494,147 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
     if !outcome.hints.is_empty() {
         output.hook_specific_output.additional_context = Some(outcome.hints.join("\n"));
     }
+    Ok(Some(output))
+}
+
+// WebFetch: the tool's `url` field judged by [[web]] rules alone; unmatched
+// URLs fall to settings.default_web, then Claude Code's own permission flow
+fn pre_web(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, String> {
+    let Some(raw_url) = input.tool_input.get("url").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let web_rules = web::compile(config)?;
+    let mut outcome = rules::GateOutcome::default();
+    let mut rewritten: Option<String> = None;
+    // a non-http(s)/unparseable URL is left to Claude Code's own rules
+    if let Some(url) = web::parse(raw_url) {
+        match web::check_url(&web_rules, &url) {
+            Some((Action::Deny, rule)) => {
+                outcome.decision = Some("deny");
+                outcome.reason = Some(web::deny_message(rule, raw_url));
+            }
+            Some((Action::Ask, rule)) => {
+                outcome.decision = Some("ask");
+                outcome.reason = Some(web::ask_message(rule, raw_url));
+            }
+            // route through the configured proxy (pure.md-style) and auto-approve
+            Some((Action::Rewrite, rule)) => {
+                if let Some(target) = web::rewrite_url(rule, raw_url) {
+                    outcome.decision = Some("allow");
+                    outcome.hints.push(
+                        rule.hint
+                            .clone()
+                            .unwrap_or(format!("lictor: rewrote fetch `{raw_url}` -> `{target}`")),
+                    );
+                    rewritten = Some(target);
+                }
+            }
+            Some((Action::Warn, rule)) => outcome.hints.push(web::warn_message(rule, raw_url)),
+            Some((Action::Allow, _)) => outcome.decision = Some("allow"),
+            _ => apply_default(&mut outcome, config.default_web(), raw_url),
+        }
+    }
+
+    write_audit(config, input, raw_url, outcome.decision, &[], &[]);
+    if outcome.decision.is_none() && outcome.hints.is_empty() {
+        return Ok(None);
+    }
+    let mut output = HookOutput::new(&input.hook_event_name);
+    output.hook_specific_output.permission_decision = outcome.decision.map(str::to_string);
+    output.hook_specific_output.permission_decision_reason = outcome.reason;
+    if let Some(target) = rewritten {
+        let mut updated = input.tool_input.clone();
+        updated["url"] = Value::String(target);
+        output.hook_specific_output.updated_input = Some(updated);
+    }
+    if !outcome.hints.is_empty() {
+        output.hook_specific_output.additional_context = Some(outcome.hints.join("\n"));
+    }
+    Ok(Some(output))
+}
+
+fn pre_agent(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, String> {
+    let Some(prompt) = input.tool_input.get("prompt").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let agent_rules = agent::compile(config)?;
+    let mut outcome = rules::GateOutcome::default();
+    for hit in agent::matching(&agent_rules, crate::config::AgentOn::Prompt, prompt) {
+        let message = agent::message(hit.rule, "the subagent prompt");
+        match hit.rule.action {
+            Action::Deny => {
+                outcome.decision = Some("deny");
+                outcome.reason = Some(message);
+                break;
+            }
+            Action::Ask => {
+                if outcome.decision.is_none() {
+                    outcome.decision = Some("ask");
+                    outcome.reason = Some(message);
+                }
+            }
+            Action::Warn => {
+                if !outcome.hints.contains(&message) {
+                    outcome.hints.push(message);
+                }
+            }
+            Action::Log => outcome.logged.push((hit.rule.pattern.clone(), message)),
+            _ => {}
+        }
+    }
+
+    write_audit(
+        config,
+        input,
+        prompt,
+        outcome.decision,
+        &outcome.logged,
+        &[],
+    );
+    if outcome.decision.is_none() && outcome.hints.is_empty() {
+        return Ok(None);
+    }
+    let mut output = HookOutput::new(&input.hook_event_name);
+    output.hook_specific_output.permission_decision = outcome.decision.map(str::to_string);
+    output.hook_specific_output.permission_decision_reason = outcome.reason;
+    if !outcome.hints.is_empty() {
+        output.hook_specific_output.additional_context = Some(outcome.hints.join("\n"));
+    }
+    Ok(Some(output))
+}
+
+// output rules are hint-only: the subagent already ran, so the strongest
+// useful verdict is context the model sees next to the result
+fn post_agent(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, String> {
+    let Some(response) = &input.tool_response else {
+        return Ok(None);
+    };
+    let agent_rules = agent::compile(config)?;
+    if agent_rules
+        .iter()
+        .all(|r| r.rule.on != crate::config::AgentOn::Output)
+    {
+        return Ok(None);
+    }
+    // response shape varies by harness; match the serialized JSON text
+    let text = response.to_string();
+    let mut hints: Vec<String> = Vec::new();
+    let mut logged: Vec<(String, String)> = Vec::new();
+    for hit in agent::matching(&agent_rules, crate::config::AgentOn::Output, &text) {
+        let message = agent::message(hit.rule, "the subagent output");
+        match hit.rule.action {
+            Action::Warn if !hints.contains(&message) => hints.push(message),
+            Action::Log => logged.push((hit.rule.pattern.clone(), message)),
+            _ => {}
+        }
+    }
+
+    write_audit(config, input, "agent output", None, &logged, &[]);
+    if hints.is_empty() {
+        return Ok(None);
+    }
+    let mut output = HookOutput::new(&input.hook_event_name);
+    output.hook_specific_output.additional_context = Some(hints.join("\n"));
     Ok(Some(output))
 }
 
