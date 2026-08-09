@@ -17,17 +17,26 @@ pub struct CompiledPathRule<'a> {
 }
 
 pub fn compile(config: &Config) -> Result<Vec<CompiledPathRule<'_>>, String> {
+    compile_rules(&config.path, "path rule")
+}
+
+// shared with `[[delete]]`, which is the same glob-list-to-verdict shape applied
+// to a narrower set of paths. `label` names the block in error messages so a bad
+// glob points at the right one.
+pub(crate) fn compile_rules<'a>(
+    rules: &'a [PathRule],
+    label: &str,
+) -> Result<Vec<CompiledPathRule<'a>>, String> {
     let home = std::env::var("HOME").unwrap_or_default();
-    config
-        .path
+    rules
         .iter()
         .map(|rule| {
             let mut builder = GlobSetBuilder::new();
             for glob in &rule.globs {
                 let expanded = expand_tilde(glob, &home);
-                builder.add(Glob::new(&expanded).map_err(|e| format!("path rule: {e}"))?);
+                builder.add(Glob::new(&expanded).map_err(|e| format!("{label}: {e}"))?);
             }
-            let globs = builder.build().map_err(|e| format!("path rule: {e}"))?;
+            let globs = builder.build().map_err(|e| format!("{label}: {e}"))?;
             Ok(CompiledPathRule { rule, globs })
         })
         .collect()
@@ -43,6 +52,19 @@ fn expand_tilde(glob: &str, home: &str) -> String {
 
 // first rule whose globs match the resolved path (either spelling); the rule's
 // action + the message to surface (its hint, or a generic fallback).
+// the rule itself, so callers that build their own message (delete rules, whose
+// reason depends on whether the path matched directly) don't have to unpick one
+pub(crate) fn find_rule<'a>(
+    rules: &[CompiledPathRule<'a>],
+    resolved: &str,
+) -> Option<&'a PathRule> {
+    let real = jail::real_path(resolved);
+    rules
+        .iter()
+        .find(|r| r.globs.is_match(resolved) || r.globs.is_match(&real))
+        .map(|r| r.rule)
+}
+
 fn match_path<'a>(rules: &[CompiledPathRule<'a>], resolved: &str) -> Option<(Action, String)> {
     let real = jail::real_path(resolved);
     rules.iter().find_map(|r| {

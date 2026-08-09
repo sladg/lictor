@@ -328,11 +328,12 @@ fn check(mode: Option<String>, config_path: Option<String>) {
                 });
             match loaded {
                 Ok(config) => println!(
-                    "ok       {} ({} bash, {} edit, {} path, {} web, {} minify rules)",
+                    "ok       {} ({} bash, {} edit, {} path, {} delete, {} web, {} minify rules)",
                     path.display(),
                     config.bash.len(),
                     config.edit.len(),
                     config.path.len(),
+                    config.delete.len(),
                     config.web.len(),
                     config.minify.len()
                 ),
@@ -355,10 +356,11 @@ fn check(mode: Option<String>, config_path: Option<String>) {
                 println!("mode     {mode}");
             }
             println!(
-                "expanded {} bash, {} edit, {} path, {} web, {} minify rules total",
+                "expanded {} bash, {} edit, {} path, {} delete, {} web, {} minify rules total",
                 config.bash.len(),
                 config.edit.len(),
                 config.path.len(),
+                config.delete.len(),
                 config.web.len(),
                 config.minify.len()
             );

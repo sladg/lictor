@@ -251,10 +251,15 @@ fn run_case(file: &CaseFile, case: &Case) -> Result<(), Vec<String>> {
         .config
         .clone()
         .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-    let mut config: Config = match policy.try_into() {
+    let parsed: Config = match policy.try_into() {
         Ok(config) => config,
         Err(e) => return Err(vec![format!("[config] is not a valid policy: {e}")]),
     };
+    // Build the config the way `config::load_from` does, not just by
+    // deserializing. Skipping the merge means a field the parser accepts but
+    // `Config::merge` forgets to carry looks fine here and is silently dropped in
+    // production — which is exactly what happened to `[[delete]]`.
+    let mut config = Config::default().merge(parsed);
     let input: HookInput = match serde_json::from_value(hook) {
         Ok(input) => input,
         Err(e) => return Err(vec![format!("does not form a valid hook input: {e}")]),
