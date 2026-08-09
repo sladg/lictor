@@ -61,14 +61,22 @@ pub struct BashRule {
     // action varies — `modes = { plan = "allow", auto = "deny" }`
     #[serde(default)]
     pub modes: HashMap<String, Action>,
-    // adjacency: matches only if the NEXT command in the same pipeline matches this glob
+    // graph traversal queries over the command's chain: `--pipe--> head*`,
+    // `<--and-- git*`, `!<--any+--> *`. EVERY query must hold. The three fields
+    // below are sugar over this one surface — see docs/features/allow.md.
+    #[serde(default)]
+    pub graph: Vec<String>,
+    // adjacency: matches only if the NEXT command in the same pipeline matches
+    // this glob. Sugar for `graph = ["--pipe--> <glob>"]`
     #[serde(default)]
     pub piped_into: Option<String>,
-    // matches if ANY of these globs matches ANY other command in the same pipeline/chain
+    // matches if ANY of these globs matches ANY other command in the same
+    // pipeline/chain. Sugar for `graph = ["<--any+--> <glob>, <glob>"]`
     #[serde(default)]
     pub with: Vec<String>,
     // structural constraint on this command's spot in its pipeline/chain.
-    // only "only" is recognized today — matches a standalone invocation
+    // only "only" is recognized today — matches a standalone invocation.
+    // Sugar for `graph = ["!<--any+--> *"]`
     #[serde(default)]
     pub position: Option<String>,
 }
@@ -748,6 +756,7 @@ impl Config {
                         // catalog-level modes already resolved in apply_mode
                         modes: HashMap::new(),
                         // pipeline predicates aren't expressible in catalogs yet
+                        graph: Vec::new(),
                         piped_into: None,
                         with: Vec::new(),
                         position: None,
