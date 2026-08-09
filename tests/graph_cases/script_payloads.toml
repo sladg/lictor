@@ -1,0 +1,100 @@
+name  = "a shell script argument is re-parsed, not treated as an opaque word"
+issue = 13
+
+# `bash -c 'cat /etc/passwd'` used to claim NOTHING. `kind = "code"` produces no
+# edges by design, and the `spawns` edge the model always promised for `bash -c`
+# was never actually minted — so the classic jail-escape vector was the one
+# interpreter form with no backstop, since `on_inline_script` stays quiet
+# precisely *because* the payload parses.
+#
+# `kind = "shell"` says "this is source AND this parser can read it". The string
+# is lowered on its own and grafted behind a `spawns` edge. The grafted nodes
+# own no bytes — the script's text is already owned by the `Value` holding it,
+# and two owners for one stretch of source is the span-surgery bug (#7) — so
+# every case here asserts P1 for free.
+
+[[case]]
+name    = "the case that was silent"
+command = "bash -c 'cat /etc/passwd'"
+expect  = { commands = [
+  "bash",
+  "cat",
+], local = [
+  "execs cat",
+  "reads /etc/passwd",
+], spawns = ["bash spawns cat"] }
+
+[[case]]
+name    = "eval takes its script as a positional"
+command = "eval 'cat /etc/shadow'"
+expect  = { commands = ["eval", "cat"], local = ["execs cat", "reads /etc/shadow"] }
+
+[[case]]
+# the graft must preserve the script's own structure, and must not perturb the
+# chain the holder sits in
+name    = "inner structure survives, outer chain is undisturbed"
+command = "bash -c 'cat a | grep pat b.txt'"
+expect  = { commands = [
+  "bash",
+  "cat",
+  "grep",
+], local = [
+  "execs cat",
+  "execs grep",
+  "reads a",
+  "reads b.txt",
+], flow = ["cat --pipe--> grep"] }
+
+[[case]]
+name    = "privilege is inherited through two hops"
+command = "sudo bash -c 'rm /etc/x'"
+expect  = { commands = [
+  "sudo !root",
+  "bash !root",
+  "rm !root",
+], local = ["execs bash", "execs rm", "deletes /etc/x"] }
+
+[[case]]
+name    = "and so is locality — the script runs where its shell runs"
+command = "ssh host bash -c 'rm /etc/y'"
+expect  = { commands = [
+  "ssh",
+  "bash @host",
+  "rm @host",
+], local = [], remote = ["execs bash", "execs rm", "deletes /etc/y"] }
+
+[[case]]
+name    = "a dynamic script has no text to read, so it abstains"
+command = "bash -c \"$SCRIPT\""
+expect  = { commands = ["bash"], local = [] }
+
+[[case]]
+# the case that justifies `shell` being a separate kind from `code`: lowering a
+# python payload as bash would manufacture claims about a language this parser
+# cannot read
+name    = "an interpreter's payload stays code and claims nothing"
+command = "python3 -c 'open(\"/etc/passwd\")'"
+expect  = { commands = ["python3"], local = [] }
+
+[[case]]
+name    = "nesting works"
+command = "bash -c 'bash -c \"cat /etc/passwd\"'"
+expect  = { local = [
+  "execs bash",
+  "execs cat",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+# the `when = { without = ["-c"] }` guard still holds: with no `-c`, slot 0 is a
+# script FILE, which is a path and is read
+name    = "without -c the first positional is still a script file"
+command = "bash script.sh"
+expect  = { commands = ["bash"], local = ["reads script.sh"] }
+
+[[case]]
+# an rcfile is executed before the script is, so it is a read the jail cares
+# about — this was unmapped, and `bash --rcfile /tmp/evil.rc` claimed nothing
+name    = "an rcfile is a path"
+command = "bash --rcfile /tmp/evil.rc -c 'true'"
+expect  = { local = ["execs true", "reads /tmp/evil.rc"] }

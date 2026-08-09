@@ -241,3 +241,52 @@ fn cd_tracking_survives_the_switch() {
         violations("graph", escape)
     );
 }
+
+#[test]
+fn a_nested_shell_payload_is_not_a_blind_spot() {
+    // The gap that made the graph source unshippable as a default: a `-c` script
+    // claimed NOTHING, so `bash -c 'cat /etc/passwd'` went from deny to silence
+    // the moment the jail took path identity from the graph.
+    //
+    // It was also the one interpreter form with no backstop. `on_inline_script`
+    // covers a shell reading its script from stdin or a heredoc, and it stays
+    // quiet here precisely BECAUSE the payload parses.
+    //
+    // Asserting both sources, not just the graph, is the point: this is a
+    // regression test against the graph falling behind, and comparing it to the
+    // heuristic is what keeps it honest.
+    for escape in [
+        "bash -c 'cat /etc/passwd'",
+        "sh -c 'rm -rf /etc/x'",
+        "eval 'cat /etc/shadow'",
+        "sudo bash -c 'cat /etc/passwd'",
+        // the shells the heuristic covered via bash.rs's SHELLS table and the
+        // graph did not, until they got recipes of their own
+        "zsh -c 'cat /etc/passwd'",
+        "dash -c 'cat /etc/passwd'",
+    ] {
+        assert!(
+            !violations("graph", escape).is_empty(),
+            "the graph source sees nothing in {escape:?} — the payload is a blind spot again"
+        );
+        assert!(
+            !violations("heuristic", escape).is_empty(),
+            "the heuristic stopped catching {escape:?}, so this comparison is moot"
+        );
+    }
+}
+
+#[test]
+fn an_interpreter_payload_is_still_not_re_parsed_as_shell() {
+    // `shell` and `code` are separate kinds so that this stays silent: lowering
+    // a python payload as bash would manufacture claims about a language this
+    // parser cannot read.
+    //
+    // NEITHER source flags it, and that is the right answer rather than a gap —
+    // this is the case `on_inline_script` exists for, and it does speak ("inline
+    // python script cannot be analyzed"). Asserting both are empty pins that the
+    // `shell` kind did not quietly widen to every `-c` flag in every recipe.
+    let payload = "python3 -c 'open(\"/etc/passwd\")'";
+    assert_eq!(violations("graph", payload), Vec::<String>::new());
+    assert_eq!(violations("heuristic", payload), Vec::<String>::new());
+}

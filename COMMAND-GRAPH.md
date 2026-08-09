@@ -192,7 +192,7 @@ effect = ["write", "create"]
 | field | values |
 |---|---|
 | `slots` | `all` · `first` · `last` · `except-last` · `rest` · `N+` (from slot N onward) · a number — counted **after** flag arguments are removed |
-| `kind` | `none` · `path` · `pathset` · `cmd` · `host` / `container` (name the machine a payload runs on) · `glob` `regex` `code` `url` (accepted, consumed later) |
+| `kind` | `none` · `path` · `pathset` · `cmd` · `shell` (a script this parser re-parses) · `host` / `container` (name the machine a payload runs on) · `glob` `regex` `code` `url` (accepted, consumed later) |
 | `effect` | `read` · `write` · `delete` · `create` · `exec` — a set |
 | `when` | `{ with = [...], without = [...] }` — guards an entry on the flags present |
 
@@ -327,6 +327,42 @@ supplying only its resolution machinery (cd tracking, `~` expansion). The
 heuristic source has no path list of its own, so the default is untouched, and
 `compare` will record the difference against real usage the way sub-task 8
 intended.
+
+### A script argument is a nested parse
+
+`bash -c 'cat /etc/passwd'` claimed **nothing**. `code` produces no edges by
+design, and the `spawns` edge this document has always promised for `bash -c`
+was never actually minted — so the classic escape vector was the one interpreter
+form with no backstop at all, since `on_inline_script` stays quiet precisely
+*because* the payload parses.
+
+`shell` is a second kind alongside `code`. Both say "this is source, not a path",
+which is all #4 needed; `shell` adds "and this parser can read it", which is what
+licenses re-parsing the string and grafting the result behind a `spawns` edge.
+Only the shells get it. Lowering a Python payload as bash would manufacture
+claims about a language the graph cannot parse, and inferring shell-ness from the
+program name would reintroduce `bash.rs`'s `SHELLS` table — one of the thirteen
+this whole issue exists to delete.
+
+The grafted nodes **own no bytes**. Their spans index the script string, not this
+source, so copying them into the segment table would corrupt every offset after
+the graft; the script's text is already owned by the `Value` holding it, and two
+owners for one stretch is the span-surgery bug (#7) by construction. They borrow
+the holder's spans instead — borrowed rather than empty, because `commands()` and
+`groups()` both order by first span, and at `usize::MAX` a payload would sort
+after every outer command instead of at its own position.
+
+**Both merge gates are structurally out of the blast radius**, and by
+construction rather than by luck: P1 and P2 run on the bare lowering, this
+happens in `apply_maps`, and it adds no segments. Emission is bit-identical.
+
+Locality and privilege are inherited the way a wrapper's payload inherits them,
+so `sudo bash -c 'rm /etc/x'` is root all the way down and
+`ssh h bash -c 'rm /etc/y'` is remote all the way down.
+
+Accepted gap: `eval "cat" "/etc/shadow"` stays silent. The graph cannot say "join
+these words with a space", and taking all of them would lower `/etc/shadow` as a
+program name — worse than silence.
 
 ### Nested subcommands
 

@@ -44,7 +44,7 @@ effect = ["write", "create"]
 | `name` | the program, matched on its basename (`/usr/bin/rm` matches `rm`) |
 | `subcommand` | only apply when the leading positionals match — `git rm` and `git log` share a binary and nothing else. Space-separated for a tree: `"s3 cp"` matches `aws s3 cp`, and the deepest matching entry wins |
 | `slots` | `all` · `first` · `last` · `except-last` · `rest` · `N+` · a number |
-| `kind` | `none` · `path` · `pathset` · `cmd` · `host` / `container` — plus `glob` `regex` `code` `url`, which validate but produce no edges yet |
+| `kind` | `none` · `path` · `pathset` · `cmd` · `shell` · `host` / `container` — plus `glob` `regex` `code` `url`, which validate but produce no edges yet |
 | `effect` | `read` · `write` · `delete` · `create` · `exec` — a set |
 | `when` | `{ with = [...], without = [...] }` — guards an entry on the flags present |
 | `[cmd.flags]` | per flag: `takes`, `kind`, `effect` |
@@ -97,6 +97,30 @@ Those two entries together already say the payload runs on that machine, so
 there is no third field to set and no way to write a recipe where they disagree.
 The payload is lowered as its own command, `cat`'s recipe applies to it, and
 every path it names is marked remote.
+
+## `shell` vs `code`
+
+Both say "this argument is source, not a filesystem path", which is all issue #4
+ever needed. They differ in what follows from that:
+
+- **`code`** — source in *some* language. Nothing more can be said about it, so
+  it produces no edges. `python3 -c`, `perl -e`.
+- **`shell`** — source in a language *this parser can read*. The string is
+  re-parsed and grafted onto the command behind a `spawns` edge, so
+  `bash -c 'cat /etc/passwd'` claims the read instead of claiming nothing.
+
+```toml
+[cmd.flags]
+"-c" = { takes = true, kind = "shell", effect = ["exec"] }
+```
+
+Only the shells get `shell`. Lowering a Python payload as bash would manufacture
+claims about a language the graph cannot parse, which is worse than silence —
+and `settings.on_inline_script` already covers the interpreters that stay quiet.
+
+Inferring this from the program name instead would mean a hand-maintained list
+of which programs are shells, which is one of the tables issue #13 exists to
+delete.
 
 `slots = "1+"` means "from slot 1 onward". `rest` is slot 0 onward, which is what
 `sudo` and `xargs` want and what would make ssh run the *hostname*.

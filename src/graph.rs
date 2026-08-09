@@ -314,8 +314,10 @@ pub enum EdgeKind {
     /// command → command, joined by a connector (carried on the edge so a
     /// traversal can ask "piped into" without re-deriving it)
     Flow(Connector),
-    /// command → command it starts in a fresh parse (`bash -c '…'`, and in
-    /// sub-task 2 an unquoted heredoc body)
+    /// command → command it starts in a fresh parse: a `$(…)` substitution, a
+    /// wrapper's payload (`sudo rm x`), or a shell script argument re-parsed and
+    /// grafted in (`bash -c '…'`, `eval '…'`). A heredoc body fed to a shell's
+    /// stdin is the one form still missing — see issue #36.
     Spawns,
     /// stream/heredoc → the command it attaches to
     On,
@@ -1598,6 +1600,22 @@ pub fn lower_with_maps(source: &str, maps: &crate::cmdmap::Maps) -> Graph {
 ///    to the words after `sudo`, so the inner program's arguments mean what
 ///    *it* says they mean.
 pub fn apply_maps(graph: &mut Graph, maps: &crate::cmdmap::Maps) {
+    apply_maps_at(graph, &Mapping { maps, depth: 0 });
+}
+
+/// The recipes plus how deep the re-parse already is — they travel together
+/// through the whole traversal, the context-struct convention from #19.
+struct Mapping<'a> {
+    maps: &'a crate::cmdmap::Maps,
+    depth: usize,
+}
+
+/// `bash -c 'bash -c "bash -c …"'` terminates on its own — each inner string is
+/// strictly shorter — but the cost is exponential in the nesting, so it is
+/// capped the way `bash::MAX_DEPTH` caps the word-level re-parse.
+const MAX_SCRIPT_DEPTH: usize = 5;
+
+fn apply_maps_at(graph: &mut Graph, ctx: &Mapping) {
     let commands: Vec<NodeId> = graph.commands().map(|(id, _)| id).collect();
     for id in commands {
         let Node::Command(cmd) = &graph.nodes[id] else {
@@ -1607,7 +1625,7 @@ pub fn apply_maps(graph: &mut Graph, maps: &crate::cmdmap::Maps) {
             continue;
         };
         let words = ordered_words(graph, id);
-        apply_program(graph, id, &name, &words, maps);
+        apply_program(graph, id, &name, &words, ctx);
     }
     apply_redirects(graph);
 }
@@ -1693,8 +1711,9 @@ fn apply_program(
     command: NodeId,
     name: &str,
     words: &[(NodeId, bool)],
-    maps: &crate::cmdmap::Maps,
+    ctx: &Mapping,
 ) {
+    let maps = ctx.maps;
     // Finding the subcommand needs the global flags, because a flag that takes
     // an argument hides the subcommand behind it: in `git -c core.pager=x rm f`
     // the first *word* is `core.pager=x`, not `rm`. Real audit-log data shows
@@ -1726,7 +1745,7 @@ fn apply_program(
             if let Some(spec) = flag_spec(graph, program, flag)
                 .or_else(|| global.and_then(|g| flag_spec(graph, g, flag)))
             {
-                emit_effects(graph, command, *id, spec.kind, &spec.effect);
+                emit_effects(graph, command, *id, spec.kind, &spec.effect, ctx);
             }
             continue;
         }
@@ -1781,7 +1800,7 @@ fn apply_program(
         // x` lost the `-rf`, and `sudo grep -e pat file` never bound `-e` at all,
         // so a flag carrying a path (`grep -f list`) lost its read edge too.
         let inner: Vec<(NodeId, bool)> = words[index + 1..].to_vec();
-        apply_program(graph, payload, &payload_name, &inner, maps);
+        apply_program(graph, payload, &payload_name, &inner, ctx);
         return;
     }
     let slotted: Vec<NodeId> = slotted.into_iter().map(|(id, _)| id).collect();
@@ -1814,7 +1833,7 @@ fn apply_program(
             }
             _ => *value,
         };
-        emit_effects(graph, command, target, arg.kind, &arg.effect);
+        emit_effects(graph, command, target, arg.kind, &arg.effect, ctx);
     }
 }
 
@@ -1950,6 +1969,133 @@ fn spawn_payload(graph: &mut Graph, outer: NodeId, payload: Payload) -> NodeId {
     }))
 }
 
+/// Re-parse a shell script argument and graft what it says onto `outer`.
+///
+/// `bash -c 'cat /etc/passwd'` used to claim **nothing**. `Kind::Code` produces
+/// no edges by design, and the `Spawns` edge this doc has always promised for
+/// `bash -c` was never minted, so the classic jail-escape vector was the one
+/// interpreter form with no backstop: `on_inline_script` stays quiet precisely
+/// *because* the payload parses.
+///
+/// The grafted nodes **own no bytes**. The script's text is already owned by the
+/// `Value` holding it, and two owners for one stretch of source is the
+/// span-surgery bug (#7) by construction — so the inner nodes borrow the
+/// holder's spans for ordering and reporting, and the segment table is left
+/// bit-identical. That is what keeps both merge gates out of the blast radius:
+/// P1 and P2 run on the bare lowering, and this is `apply_maps`.
+///
+/// Borrowed rather than empty spans because [`Graph::commands`] and
+/// [`Graph::groups`] both sort on the first span: at the holder's offset,
+/// `bash -c 'rm x' | grep y` orders `bash`, `rm`, `grep`; at `usize::MAX` the
+/// payload would sort after every outer command.
+/// The two ends of a script argument: the command that will run it, and the
+/// `Value` holding its text. Neither means anything without the other — the
+/// context-struct convention from #19, same as [`Payload`].
+struct Script {
+    outer: NodeId,
+    holder: NodeId,
+}
+
+fn spawn_script(graph: &mut Graph, script_arg: Script, ctx: &Mapping) {
+    let Script { outer, holder } = script_arg;
+    if ctx.depth >= MAX_SCRIPT_DEPTH {
+        return;
+    }
+    // a dynamic script (`bash -c "$CMD"`) has no text to read, and abstaining is
+    // the documented convention for one
+    let Some(script) = value_text(graph, holder) else {
+        return;
+    };
+    if script.trim().is_empty() {
+        return;
+    }
+    let inner = lower(&script);
+    if inner.nodes.is_empty() {
+        return;
+    }
+    let base = graph.nodes.len();
+    let spans = graph.nodes[holder].spans().to_vec();
+    let (locality, host, privilege) = match &graph.nodes[outer] {
+        Node::Command(cmd) => (cmd.locality, cmd.host.clone(), cmd.privilege),
+        _ => (Locality::Local, None, Privilege::Normal),
+    };
+    // segments are deliberately NOT copied: the inner offsets index the script
+    // string, not this graph's source, and nothing may own bytes twice
+    for node in inner.nodes {
+        graph.nodes.push(match node {
+            Node::Command(cmd) => Node::Command(CommandNode {
+                spans: spans.clone(),
+                // where the script runs is where its shell runs — `ssh h bash -c
+                // 'rm x'` is remote all the way down, and `sudo bash -c 'rm x'`
+                // is root all the way down
+                locality: cmd.locality.or(locality),
+                host: cmd.host.clone().or_else(|| host.clone()),
+                privilege: match cmd.privilege {
+                    Privilege::Elevated => Privilege::Elevated,
+                    _ => privilege,
+                },
+                ..cmd
+            }),
+            Node::Flag(n) => Node::Flag(FlagNode {
+                spans: spans.clone(),
+                ..n
+            }),
+            Node::Value(n) => Node::Value(ValueNode {
+                spans: spans.clone(),
+                ..n
+            }),
+            Node::Stream(n) => Node::Stream(StreamNode {
+                spans: spans.clone(),
+                ..n
+            }),
+            Node::Heredoc(n) => Node::Heredoc(HeredocNode {
+                spans: spans.clone(),
+                ..n
+            }),
+            Node::Connector(n) => Node::Connector(ConnectorNode {
+                spans: spans.clone(),
+                ..n
+            }),
+            Node::PathSet(n) => Node::PathSet(PathSetNode {
+                spans: spans.clone(),
+                ..n
+            }),
+        });
+    }
+    for edge in inner.edges {
+        graph.edges.push(Edge {
+            from: edge.from + base,
+            to: edge.to + base,
+            kind: edge.kind,
+        });
+    }
+    // the script's top-level commands are what this one starts. Every command in
+    // the inner graph is top-level for this purpose: an inner pipeline's stages
+    // are all spawned by the same `-c`.
+    let inner_commands: Vec<NodeId> = (base..graph.nodes.len())
+        .filter(|id| matches!(graph.nodes[*id], Node::Command(_)))
+        .collect();
+    for id in &inner_commands {
+        graph.link(outer, *id, EdgeKind::Spawns);
+        graph.link(outer, *id, EdgeKind::Execs);
+    }
+    // and now the inner commands get their own recipes applied, one level down
+    let deeper = Mapping {
+        maps: ctx.maps,
+        depth: ctx.depth + 1,
+    };
+    for id in inner_commands {
+        let Node::Command(cmd) = &graph.nodes[id] else {
+            continue;
+        };
+        let Some(name) = cmd.name.clone() else {
+            continue;
+        };
+        let words = ordered_words(graph, id);
+        apply_program(graph, id, &name, &words, &deeper);
+    }
+}
+
 fn flag_spec<'a>(
     graph: &Graph,
     program: &'a crate::cmdmap::Program,
@@ -1969,8 +2115,22 @@ fn emit_effects(
     value: NodeId,
     kind: crate::cmdmap::Kind,
     effects: &[crate::cmdmap::Effect],
+    ctx: &Mapping,
 ) {
     use crate::cmdmap::Effect;
+    // a script is not a target to point an edge at, it is a command line to
+    // read: re-parse it and graft what it says onto this command
+    if kind == crate::cmdmap::Kind::Shell {
+        spawn_script(
+            graph,
+            Script {
+                outer: command,
+                holder: value,
+            },
+            ctx,
+        );
+        return;
+    }
     // only kinds that name something the graph can point at produce edges; the
     // rest are recorded in the map for later stages
     if !kind.is_path() {
@@ -2112,5 +2272,45 @@ mod tests {
             .segment_owner(node.spans[0])
             .expect("the program word is owned by something");
         assert!(matches!(g.node(owner), Node::Value(_)), "{owner:?}");
+    }
+
+    #[test]
+    fn a_grafted_script_owns_no_bytes() {
+        // The same invariant, one level harder: a re-parsed `-c` script's nodes
+        // carry spans that index the SCRIPT STRING, not this source, so copying
+        // them into the segment table would corrupt every offset after the
+        // graft. They borrow the holder `Value`'s spans for ordering and own
+        // nothing, which is what keeps P1 and P2 out of the blast radius — both
+        // gates run on the bare lowering, and this happens in `apply_maps`.
+        let maps = crate::cmdmap::Maps::builtin().expect("recipes");
+        let source = "bash -c 'cat /etc/passwd'";
+        let g = lower_with_maps(source, &maps);
+        assert!(g.overlapping_segments().is_none());
+        assert_eq!(g.emit(), source, "the graft must not disturb emission");
+        let (grafted, _) = g
+            .commands()
+            .find(|(_, c)| c.name.as_deref() == Some("cat"))
+            .expect("the script's command is grafted in");
+        assert!(g.owned_spans(grafted).is_empty());
+        // and the same for everything the graft brought with it, not just the
+        // command node — a `Value` claiming inner offsets is the dangerous one
+        assert!(
+            g.segments.iter().all(|(span, _)| span.end <= source.len()),
+            "a grafted node claimed bytes outside the source"
+        );
+    }
+
+    #[test]
+    fn a_grafted_script_sorts_at_its_holder() {
+        // `commands()` and `groups()` both order by first span. Empty spans
+        // would sort to `usize::MAX` and put the payload after every outer
+        // command; borrowing the holder's spans keeps source order.
+        let maps = crate::cmdmap::Maps::builtin().expect("recipes");
+        let g = lower_with_maps("bash -c 'rm x' | grep y", &maps);
+        let names: Vec<&str> = g
+            .commands()
+            .filter_map(|(_, c)| c.name.as_deref())
+            .collect();
+        assert_eq!(names, ["bash", "rm", "grep"]);
     }
 }

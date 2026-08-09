@@ -1,10 +1,10 @@
 # `-c` carries a shell script. `kind = "shell"` — not `code` — because this
 # parser can read it: the string is re-parsed and grafted behind a `spawns`
-# edge, so `bash -c 'cat /etc/passwd'` claims the read instead of nothing.
+# edge, so `ksh -c 'cat /etc/passwd'` claims the read instead of nothing.
 # The interpreters (python3, perl) keep `code`: lowering their payloads as
 # bash would manufacture claims about a language the graph cannot parse.
 [[cmd]]
-name = "bash"
+name = "ksh"
 [cmd.flags]
 "-c" = { takes = true, kind = "shell", effect = ["exec"] }
 "-o" = { takes = true }

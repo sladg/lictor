@@ -1,0 +1,10 @@
+# `eval` is the argument. Accepted gap: only the first word is taken, so
+# `eval "cat" "/etc/shadow"` stays silent — the graph cannot say "join these
+# words with a space", and `slots = "all"` would lower `/etc/shadow` as a
+# program name, which is worse than silence.
+[[cmd]]
+name = "eval"
+[[cmd.args]]
+slots = "first"
+kind = "shell"
+effect = ["exec"]

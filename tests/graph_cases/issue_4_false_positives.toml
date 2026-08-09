@@ -34,9 +34,19 @@ command = "find . -name '/etc/*'"
 expect  = { local = ["reads ./**"] }
 
 [[case]]
-name    = "a shell script is code"
+# This case used to expect `local = []`, and that was two claims wearing one
+# coat. "The word `rm -rf /tmp/x` is not a path" is true and is all #4 ever
+# asked for. "So this command references nothing" does not follow — the script
+# plainly deletes a directory, and expecting silence made `bash -c` the one
+# interpreter form with no backstop at all (`on_inline_script` stays quiet
+# precisely *because* the payload parses).
+#
+# The script is now re-parsed and grafted behind a `spawns` edge, so the claim
+# is about what the script does, not about the shape of the word. The word
+# itself is still not a path: no `reads sh -c …` edge appears below.
+name    = "a shell script is re-parsed, not read as a path"
 command = "sh -c 'rm -rf /tmp/x'"
-expect  = { local = [] }
+expect  = { local = ["deletes /tmp/x/**", "execs rm"] }
 
 [[case]]
 name    = "chmod's slot 0 is a mode, not a file called 0644"
