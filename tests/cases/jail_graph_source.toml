@@ -1,0 +1,97 @@
+name  = "what settings.jail_paths = \"graph\" decides"
+issue = 13
+
+# `tests/jail_graph_paths.rs` keeps the assertions that COMPARE the two sources
+# — "the heuristic misses this and the graph catches it" needs both in one
+# assertion, and a case file has one `[config]`. Everything that is just "under
+# the graph source, this command is/is not a violation" belongs here.
+#
+# `cwd` has no git repo above it, so `roots()` falls back to cwd itself and the
+# jail boundary is exactly that directory. It is deliberately several levels
+# deep: at `/repo`, a `../..` would clamp at the filesystem root whether or not
+# `cd` was tracked, and the cd cases below could not tell the two apart.
+
+[config]
+[config.settings]
+jail = "deny"
+jail_paths = "graph"
+
+# ── the program a command runs ──
+
+[[case]]
+name    = "a program outside the project is a violation"
+command = "/tmp/exploit.sh"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+# the rule that stops this being a claim on every command ever run: no slash,
+# so the shell searches PATH and the word names no file
+name    = "a bare name names no file"
+command = "npm run build"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "a bin directory is not an exemption"
+command = "/usr/bin/git status"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "the same tool by bare name is silent"
+command = "git status"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "a program inside the project is fine"
+command = "./node_modules/.bin/tsc --noEmit"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+# the exec reference existed all along — sudo's recipe mints it — and was
+# dropped because the accessor filtered `Exec` out
+name    = "a wrapper's payload is not exempt either"
+command = "sudo /tmp/exploit.sh"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "nor is one reached through a -c script"
+command = "bash -c '/tmp/exploit.sh'"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+# ── cd tracking, which the graph now owns ──
+
+[[case]]
+# The `cd` target is INSIDE the project on purpose. `cd /tmp && ./evil.sh` would
+# also deny, but for the wrong reason — `/tmp` is itself a violation, so the
+# case would pass with cd tracking removed entirely and pin nothing. Asserting
+# the resolved path in `reason` is the other half: only the tracked base
+# produces /a/b/evil.sh; without it the base never moves and the same
+# word lands on /a/evil.sh.
+name    = "a relative program resolves against the cd-tracked base"
+command = "cd src && ../../evil.sh"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "`/a/b/evil.sh` is outside" }
+
+[[case]]
+name    = "and a relative file does too"
+command = "cd src && cat ../../secret"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "`/a/b/secret` is outside" }
+
+[[case]]
+name    = "a cd that stays inside the project keeps later paths inside it"
+command = "cd src && cat main.rs"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "including a relative program"
+command = "cd src && ./gen.sh"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }

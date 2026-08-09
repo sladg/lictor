@@ -371,12 +371,6 @@ pub struct Reference {
     pub locality: Locality,
     /// the path as written — the whole word, `s3://bucket/key` included
     pub path: String,
-    /// the same path made absolute, from [`Graph::resolved_references`]; `None`
-    /// from [`Graph::references`], which says nothing about this machine.
-    ///
-    /// Kept alongside `path` rather than replacing it: `npm` and `./npm` resolve
-    /// alike, and only the written form says whether the shell searches `PATH`.
-    pub resolved: Option<String>,
     /// the split form, when this names something on another machine
     pub remote: Option<RemoteRef>,
 }
@@ -391,6 +385,19 @@ fn effect_of(kind: EdgeKind) -> Option<crate::cmdmap::Effect> {
         EdgeKind::Execs => Some(Effect::Exec),
         _ => None,
     }
+}
+
+/// A [`Reference`] placed on this machine: the same claim, plus where the path
+/// actually points once the working directory in effect has been applied.
+///
+/// A type rather than an optional field on `Reference`, so that a caller cannot
+/// hold an unresolved one and silently skip it. `reference.path` stays as
+/// written — `npm` and `./npm` resolve alike, and only the written form says
+/// whether the shell searches `PATH`.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub reference: Reference,
+    pub absolute: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -769,7 +776,6 @@ impl Graph {
                 effect,
                 locality: here.or(locality),
                 path,
-                resolved: None,
                 remote,
             });
         }
@@ -793,7 +799,7 @@ impl Graph {
         &self,
         base: &str,
         resolve: &dyn Fn(&str, &str) -> String,
-    ) -> Vec<Reference> {
+    ) -> Vec<Resolved> {
         let references = self.references();
         let mut cwd_at: HashMap<NodeId, String> = HashMap::new();
         let mut cwd = base.to_string();
@@ -814,10 +820,13 @@ impl Graph {
         }
         references
             .into_iter()
-            .map(|mut reference| {
+            .map(|reference| {
                 let at = cwd_at.get(&reference.command).map_or(base, |s| s.as_str());
-                reference.resolved = Some(resolve(&reference.path, at));
-                reference
+                let absolute = resolve(&reference.path, at);
+                Resolved {
+                    reference,
+                    absolute,
+                }
             })
             .collect()
     }
