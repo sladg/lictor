@@ -203,6 +203,19 @@ fn a_subcommand_selects_its_own_map() {
 }
 
 #[test]
+fn a_key_value_tool_claims_no_paths() {
+    // kv's arguments are KEYS, and a key is free-form — `kv get
+    // config/db/password` and `kv set /etc/thing v` name nothing on disk. It is
+    // the third most-used command in the audit corpus, so getting this wrong
+    // would be issue #4 at scale.
+    assert!(refs("kv get config/db/password").is_empty());
+    assert!(refs("kv set /etc/thing somevalue").is_empty());
+    assert!(refs("kv copy a@src b@dst").is_empty());
+    // `--db` consumes its value, so `mydb` is not mistaken for the subcommand
+    assert!(refs("kv --db mydb get somekey").is_empty());
+}
+
+#[test]
 fn an_unmapped_program_produces_no_claims() {
     // the inverted default, stated directly
     assert!(refs("some-tool-nobody-mapped /etc/passwd").is_empty());

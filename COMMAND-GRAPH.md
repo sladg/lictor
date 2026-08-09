@@ -208,6 +208,20 @@ after `sudo`, so the effects are rm's. Stage 1 could not say this at all, which
 is the gap the P2 gate surfaced. Reference edges land on the outer command node,
 because "what does this command line delete?" is the question rules ask.
 
+### Known format gaps
+
+**Nested subcommands.** `subcommand` matches one level, so `kv db set directory
+<name> <path>` cannot be targeted — the entry would have to guess a slot number
+that is right for that form and wrong for `db ls`, `db rm`, `db backup` and `db
+restore`. The recipe claims nothing there rather than claim the wrong thing.
+
+**Global flags are resolved in two passes.** Finding the subcommand needs to know
+which flags consume the next word, because `git -c core.pager=x rm f` puts the
+flag's *argument* where the subcommand would be. Real audit data showed this
+misfiring: `git core.pager='!id'` is one of the most frequent "subcommands" in a
+123k-invocation corpus and is not a subcommand at all. The bare entry is resolved
+first for its flags, and subcommand entries inherit them.
+
 ### What is deferred
 
 The issue's format also lists `[cmd.kv]` (`dd if=/of=`) and richer slot binding.
