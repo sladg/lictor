@@ -3,8 +3,9 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-tasks 1, 2, 3, 5 and 6 complete.** The graph IR and emitter are
-still mostly internal: `settings.jail_paths` is the one opt-in consumer, and the
+Status: **sub-tasks 1, 2, 3, 4, 5 and 6 complete.** The graph is what every
+extraction is now built alongside, and the structural predicates read it;
+`settings.jail_paths` is the one opt-in consumer for path identity, and that
 default is unchanged. Sub-task 2 (heredoc re-parenting) is the one behaviour
 change so far, and it landed in `bash.rs` as well as the graph because that is
 where today's rules read structure; it closes #12.
@@ -144,10 +145,10 @@ exactly what made every `piped_into` / `with` deny rule evadable by adding a
 heredoc. Sub-task 2 lifts the nested `pipeline`/`list` to its logical position,
 so the `Flow` edge above exists.
 
-The same correction is applied in `bash.rs`'s `group_info`, which is where
-today's rules actually read `group` / `position` / `group_len` / `connector`.
-Doing it there rather than inside any one predicate is the point: **one fix
-reaches every consumer**, and none of them can rediscover the bug
+`bash.rs` carried a second copy of this correction for a while, because that is
+where today's rules read `group` / `position` / `group_len` / `connector`. It is
+gone: those now come from the graph (see *Structure comes from the graph*), so
+there is **one** implementation and no consumer can rediscover the bug
 independently.
 
 It also closed a second, opposite bug. A heredoc previously left its owner with
@@ -496,11 +497,49 @@ yields a synthetic `git commit`, driven by the `WRAPPERS` table at
 program execs its argument" is a per-program map fact, and it becomes an `Execs`
 edge in sub-task 5 rather than a second phantom command.
 
+## Structure comes from the graph (sub-task 4)
+
+`bash::Extraction` and the graph were two views of **two parses**: `extract`
+walked the CST for words, and any consumer that wanted the graph re-parsed the
+source. Anything the graph knew that `words` did not was unreachable, which is
+how a redirect target stayed invisible even after the graph modelled it (#29).
+
+Now `extract` lowers the tree it already parsed, and the extraction carries it.
+`group`, `position`, `group_len` and `connector` are read from
+[`Graph::groups`] instead of by climbing the CST for the nearest
+`pipeline`/`list` ancestor — the second implementation of something the graph
+already models. It went, along with this file's copy of the heredoc
+re-parenting, and took two bugs with it:
+
+    ls; git stash                 a top-level `;` is not a `list`, so both
+                                  commands looked standalone -- a `with` rule
+                                  that fires on `&&` and `|` was evadable by
+                                  writing `;`
+    curl x && grep a b && git c   binary lists nest, so `git c` was position 1
+                                  of 2 rather than 2 of 3
+
+A chain is a run of commands joined by **written** connectors. A newline is not
+one: two statements on separate lines are two commands, and inventing a chain
+there would put a whole script into one group and stop `position = "only"` from
+ever matching.
+
+Two shapes needed the graph to say more before it could answer:
+
+- **`[ -f x ] && cat y`.** The grammar calls the test a `test_command`, not a
+  `command`, and without a node for it the chain looked one member short. It is
+  a command — `/usr/bin/[` — so it gets one, named for its opening bracket.
+- **`sudo pnpm build | head`.** A payload command is a *view* of its stage, not
+  another stage, so it shares that stage's group rather than joining the chain.
+  Appending it would push `head` from position 1 to position 2, and
+  `piped_into` reads the next position.
+
+What has **not** moved: words, variants (wrapper-stripped, flag-normalized),
+synthetic re-parses (`bash -c`), and the non-structural analyses — obfuscation,
+dangerous env, device writes, function names. Those are still `bash.rs`'s, and
+migrate one consumer at a time.
+
 ## What is still deferred
 
-- **No `Extraction`/`Command` view over the graph** — sub-task 4. Every existing
-  module still uses `bash::extract` untouched, and `jail.rs` re-parses the source
-  to ask the graph anything.
 - **Nothing consumes a remote reference.** The graph models them; no rule surface
   matches on them yet. Deliberate: a fact the graph cannot express is a rule that
   can never be written, while a fact nothing reads yet costs a struct field.

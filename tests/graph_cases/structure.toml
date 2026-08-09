@@ -96,10 +96,17 @@ expect  = { commands = ["diff", "sort", "sort"] }
 # stage tractable without pretending to more coverage than it has.
 
 [[case]]
-# `[ -f x ]` is a `test_command` in the grammar, not a `command`, so the test
-# builtin is not a node here
+# `[ -f x ]` is a `test_command` in the grammar, not a `command`, but it IS one
+# — and it is a stage of its chain, so the graph gives it a node
 command = "if [ -f x ]; then cat x; fi"
-expect  = { commands = ["cat"] }
+expect  = { commands = ["[", "cat"] }
+
+[[case]]
+name    = "a test is a member of its chain"
+command = "[ -f x ] && cat y"
+expect  = { commands = ["[", "cat"], flow = ["[ --and--> cat"], local = [
+  "reads y",
+] }
 
 [[case]]
 command = "for f in *.rs; do rustfmt $f; done"
@@ -108,3 +115,29 @@ expect  = { commands = ["rustfmt"] }
 [[case]]
 command = "while read l; do echo $l; done"
 expect  = { commands = ["read", "echo"] }
+
+# ── chains ──
+#
+# `Graph::groups` is what `piped_into`, `with` and `position` read. A chain is a
+# run of commands joined by WRITTEN connectors: a top-level `;` counts, a
+# newline does not.
+
+[[case]]
+name    = "a top-level `;` is a chain"
+command = "ls; git stash"
+expect  = { flow = ["ls --seq--> git"] }
+
+[[case]]
+name    = "a newline is not"
+command = "ls\ngit stash"
+expect  = { flow = [], commands = ["ls", "git"] }
+
+[[case]]
+name    = "nested binary lists flatten into one chain"
+command = "curl -s x && grep a b && git commit"
+expect  = { flow = ["curl --and--> grep", "grep --and--> git"] }
+
+[[case]]
+name    = "a pipeline and a chain on one line"
+command = "cargo test | tail -5 ; echo done"
+expect  = { flow = ["cargo --pipe--> tail", "tail --seq--> echo"] }

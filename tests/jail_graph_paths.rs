@@ -109,6 +109,29 @@ fn a_transfer_is_judged_on_its_local_side_only() {
 }
 
 #[test]
+fn the_extraction_carries_the_graph_it_was_parsed_from() {
+    // Sub-task 4. The jail used to re-parse the source to ask the graph
+    // anything, so the two views of one command were two views of two parses.
+    // Now `extract` lowers the tree it already has.
+    let extraction = bash::extract("cat /etc/passwd | grep root");
+    assert_eq!(
+        extraction.graph.commands().count(),
+        2,
+        "the extraction must carry a lowered graph"
+    );
+    assert_eq!(
+        extraction.graph.referenced_paths(),
+        ["/etc/passwd"],
+        "and the recipes must have been applied to it"
+    );
+    assert_eq!(
+        extraction.graph.emit(),
+        extraction.source,
+        "P1 holds for the graph the extraction carries"
+    );
+}
+
+#[test]
 fn a_redirect_target_is_a_path_the_graph_can_see() {
     // Issue #29. A redirect target is not one of the command's WORDS, so the
     // walk the jail does never looked at it: `echo x >> /etc/hosts` writes
