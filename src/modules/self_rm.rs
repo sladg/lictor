@@ -35,6 +35,8 @@ fn load(path: &PathBuf) -> Vec<String> {
         .unwrap_or_default()
 }
 
+// cwd and session are already unwrapped by both callers.
+#[allow(clippy::too_many_arguments)]
 fn remember(config: &Config, cwd: &str, session: &str, path: String) {
     let Some(state) = state_file(config, Some(cwd), session) else {
         return;

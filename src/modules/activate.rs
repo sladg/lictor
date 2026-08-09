@@ -20,6 +20,8 @@ fn looks_like_not_found(text: &str) -> bool {
 
 // returns a guidance string when a managed program failed to resolve and its
 // toolchain marker file is present in cwd
+// four unrelated inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn guidance(
     extraction: &Extraction,
     rules: &[ActivateRule],

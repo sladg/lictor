@@ -121,6 +121,9 @@ pub fn relative_hints(ctx: &ModuleCtx, out: &mut Plan) {
     relative_hints_at(ctx.extraction, setting, &cwd, &root, &home, out);
 }
 
+// six. `cwd`/`root`/`home` are three anchors the caller already resolved;
+// bundling them would move the unpacking, not remove it.
+#[allow(clippy::too_many_arguments)]
 fn relative_hints_at(
     extraction: &Extraction,
     setting: ModuleSetting,
@@ -218,6 +221,8 @@ fn classify_in_project(resolved: &str, root: &str) -> Option<String> {
 // word like a `bash -c 'D=/tmp/x cmd'` string as a flag=value pair.
 // relative_hints wants a much more conservative split (only genuine
 // `--flag=value` words).
+// five. A visitor: the callback is the point, the rest configure one traversal.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_words(
     extraction: &Extraction,
     cwd: &str,

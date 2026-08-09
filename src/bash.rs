@@ -586,6 +586,9 @@ fn group_info(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) -> GroupInfo
     }
 }
 
+// 5, already down from 7. `out`, `words`, `synthetic`, `variant` and `group`
+// are unrelated inputs; there is no further cluster to extract.
+#[allow(clippy::too_many_arguments)]
 fn push_variant(
     out: &mut Extraction,
     words: Vec<Word>,

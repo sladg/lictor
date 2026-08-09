@@ -1,3 +1,8 @@
+// The harness drivers below mirror a hook call's shape — policy, event, tool,
+// input, response, cwd, session — so their arity is the shape of the thing under
+// test, not a signature that grew by accident.
+#![allow(clippy::too_many_arguments)]
+
 use lictor::config::Config;
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
@@ -166,7 +171,6 @@ fn run_with(
     };
     output.map(|o| serde_json::to_value(o).unwrap()["hookSpecificOutput"].take())
 }
-
 fn run(event: &str, tool: &str, tool_input: Value, tool_response: Option<Value>) -> Option<Value> {
     run_with(POLICY, event, tool, tool_input, tool_response)
 }

@@ -24,6 +24,8 @@ pub fn plan(ctx: &ModuleCtx, out: &mut Plan) {
     );
 }
 
+// six unrelated inputs to one traversal.
+#[allow(clippy::too_many_arguments)]
 fn check(
     extraction: &Extraction,
     rules: &[ActivateRule],

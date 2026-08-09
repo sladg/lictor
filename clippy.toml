@@ -1,13 +1,15 @@
-# Warn above 6 arguments. `clippy::all` is denied, so this is a hard gate.
+# Warn above 3 arguments. `clippy::all` is denied, so this is a hard gate.
 #
-# Set to catch the growth that actually happened rather than to hit a round
-# number: `push_variant` reached 7 by gaining one field at a time (rewritable,
-# then group), and each step meant editing every signature in the parse chain.
-# 7 now fails.
+# Deliberately aggressive: the default of 7 never fires until a signature is
+# already unpleasant, and `push_variant` reached exactly 7 one field at a time
+# without anything complaining. A low bar makes a fourth argument a decision
+# rather than a drift.
 #
-# Not 5. Four functions sit at 6 -- `engine::write_audit`,
-# `jail::relative_hints_at`, `path_check::check`, `rules::strip_program_paths`
-# -- and their parameters do not travel together as a unit, so wrapping them
-# would make every call site longer and buy nothing. Arity is not the signal;
-# cohesion is. Lower this if that stops being true.
-too-many-arguments-threshold = 6
+# Functions that genuinely need more carry a targeted allow attribute for this
+# lint, with a one-line reason at the site. That is the point: the exception is
+# visible and argued, instead of the threshold being quietly raised until
+# nothing is flagged at all.
+#
+# Note `self` counts toward the total, so a three-argument method trips this.
+# Two of the exceptions exist only for that reason.
+too-many-arguments-threshold = 3

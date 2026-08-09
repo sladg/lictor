@@ -167,6 +167,9 @@ fn apply_deny_retry(outcome: &mut rules::GateOutcome, config: &Config, input: &H
     }
 }
 
+// six fields of one audit record. They travel together nowhere else, so a
+// struct would exist only to satisfy the lint.
+#[allow(clippy::too_many_arguments)]
 fn write_audit(
     config: &Config,
     input: &HookInput,
