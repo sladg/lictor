@@ -98,3 +98,30 @@ expect  = { commands = ["bash"], local = ["reads script.sh"] }
 name    = "an rcfile is a path"
 command = "bash --rcfile /tmp/evil.rc -c 'true'"
 expect  = { local = ["execs true", "reads /tmp/evil.rc"] }
+
+# ── flags that consume the next word ──
+#
+# A flag the recipe does not declare stays a positional, which shifts every slot
+# after it. For a shell that means the script FILE moves out of slot 0 and the
+# flag's own argument moves into it — a false positive and a miss from one
+# mistake.
+
+[[case]]
+name    = "-o's argument is not a script file"
+command = "bash -o pipefail script.sh"
+expect  = { local = ["reads script.sh"] }
+
+[[case]]
+name    = "and neither is -O's"
+command = "bash -O extglob script.sh"
+expect  = { local = ["reads script.sh"] }
+
+[[case]]
+name    = "an rcfile is read as well as the script"
+command = "bash --rcfile rc.sh script.sh"
+expect  = { local = ["reads rc.sh", "reads script.sh"] }
+
+[[case]]
+name    = "flags with no argument do not shift anything"
+command = "sh -e -x script.sh"
+expect  = { local = ["reads script.sh"] }
