@@ -20,7 +20,9 @@ name = "find"
 "-size" = { takes = true }
 "-mtime" = { takes = true }
 "-perm" = { takes = true }
+# find always descends, so its root is a tree by definition
 [[cmd.args]]
 slots = "first"
-kind = "path"
+kind = "pathset"
+recursive = true
 effect = ["read"]
