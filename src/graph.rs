@@ -462,29 +462,41 @@ impl Lowering<'_> {
     }
 
     fn lower_redirected(&mut self, node: TsNode) {
-        let mut head = None;
-        let mut redirects = Vec::new();
-        for i in 0..node.child_count() {
-            let Some(child) = node.child(i) else { continue };
-            match child.kind() {
-                "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
-                    redirects.push(child)
+        let children: Vec<TsNode> = (0..node.child_count())
+            .filter_map(|i| node.child(i))
+            .collect();
+        let body: Vec<TsNode> = children
+            .iter()
+            .copied()
+            .filter(|c| !is_redirect(*c))
+            .collect();
+        // the body may be a single command or a whole pipeline
+        let mut members = self.lower_group(&body);
+        let head = members.first().copied();
+
+        for redirect in children.iter().copied().filter(|c| is_redirect(*c)) {
+            if redirect.kind() != "heredoc_redirect" {
+                let id = self.lower_stream(redirect);
+                if let Some(head) = head {
+                    self.graph.link(id, head, EdgeKind::On);
                 }
-                _ => {
-                    let found = self.walk_capturing_head(child);
-                    head = head.or(found);
-                }
+                continue;
             }
-        }
-        for redirect in redirects {
-            let id = if redirect.kind() == "heredoc_redirect" {
-                self.lower_heredoc(redirect)
-            } else {
-                self.lower_stream(redirect)
-            };
+            let (id, nested, connector) = self.lower_heredoc(redirect);
             if let Some(head) = head {
                 self.graph.link(id, head, EdgeKind::On);
             }
+            // Re-parenting (#12): the commands the grammar buried inside the
+            // redirect are logically siblings of the command that owns it, so
+            // the last body member flows into the first of them. Without this
+            // edge the two ends of `cat <<EOF | grep x` are unrelated in the
+            // graph, exactly as they were unrelated in the CST.
+            if let (Some(previous), Some(first)) =
+                (members.last().copied(), nested.first().copied())
+            {
+                self.graph.link(previous, first, EdgeKind::Flow(connector));
+            }
+            members.extend(nested);
         }
     }
 
@@ -495,7 +507,7 @@ impl Lowering<'_> {
     /// `cat`. Stage 1 lowers those commands so they exist in the graph, but
     /// does not yet re-parent them to their logical position — that is
     /// sub-task 2, and it is what closes #12 for every consumer at once.
-    fn lower_heredoc(&mut self, node: TsNode) -> NodeId {
+    fn lower_heredoc(&mut self, node: TsNode) -> (NodeId, Vec<NodeId>, Connector) {
         let mut spans = Vec::new();
         let mut delimiter = String::new();
         let mut quoted = false;
@@ -549,8 +561,9 @@ impl Lowering<'_> {
             spans.sort();
             h.spans = spans;
         }
-        self.lower_group(&interior);
-        id
+        let connector = interior_connector(&interior, self.source);
+        let nested = self.lower_group(&interior);
+        (id, nested, connector)
     }
 
     fn lower_command(&mut self, node: TsNode) -> NodeId {
@@ -768,6 +781,50 @@ enum WordKind {
 /// holding the command `1`. Treating that as a word would make the inner
 /// command invisible to every rule, which is precisely the class of blindness
 /// the graph exists to remove.
+fn is_redirect(node: TsNode) -> bool {
+    matches!(
+        node.kind(),
+        "file_redirect" | "herestring_redirect" | "heredoc_redirect"
+    )
+}
+
+/// The connector joining a heredoc's owner to the commands nested inside it.
+///
+/// A nested `pipeline`/`list` carries it (`<<EOF | grep x`); otherwise the
+/// operator sits as a bare token among the redirect's children, because
+/// `<<EOF && rm x` gets no `list` wrapper at all.
+fn interior_connector(interior: &[TsNode], source: &str) -> Connector {
+    for node in interior {
+        match node.kind() {
+            "pipeline" => return Connector::Pipe,
+            "list" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if let Some(c) = connector_token(child, source) {
+                        return c;
+                    }
+                }
+            }
+            _ => {
+                if let Some(c) = connector_token(*node, source) {
+                    return c;
+                }
+            }
+        }
+    }
+    Connector::Seq
+}
+
+fn connector_token(node: TsNode, source: &str) -> Option<Connector> {
+    match node.utf8_text(source.as_bytes()).unwrap_or("") {
+        "|" | "|&" => Some(Connector::Pipe),
+        "&&" => Some(Connector::And),
+        "||" => Some(Connector::Or),
+        ";" => Some(Connector::Seq),
+        _ => None,
+    }
+}
+
 fn is_nested_command_region(node: TsNode) -> bool {
     matches!(
         node.kind(),
@@ -934,6 +991,61 @@ mod tests {
         assert_eq!(connectors[0].kind, Connector::And);
         // own span: sub-task 10's `insert` splices relative to this
         assert_eq!(connectors[0].spans[0].text(&g.source), "&&");
+    }
+
+    #[test]
+    fn heredoc_nested_pipeline_is_reparented() {
+        // #12: the grammar buries `| grep secret` inside the heredoc redirect,
+        // so without re-parenting `cat` and `grep` are unrelated in the graph
+        let g = lower("cat <<EOF | grep secret\nline one\nEOF");
+        assert_eq!(names(&g), vec!["cat", "grep"]);
+        let flow: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::Flow(Connector::Pipe)))
+            .collect();
+        assert_eq!(flow.len(), 1, "cat must flow into grep across the heredoc");
+        let Node::Command(from) = g.node(flow[0].from) else {
+            unreachable!()
+        };
+        let Node::Command(to) = g.node(flow[0].to) else {
+            unreachable!()
+        };
+        assert_eq!(from.name.as_deref(), Some("cat"));
+        assert_eq!(to.name.as_deref(), Some("grep"));
+    }
+
+    #[test]
+    fn heredoc_nested_chain_carries_its_own_connector() {
+        // `<<EOF && rm x` gets no `list` wrapper — the `&&` is a bare token
+        // among the redirect's children
+        let g = lower("cat <<EOF && rm x\nbody\nEOF");
+        assert_eq!(names(&g), vec!["cat", "rm"]);
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| matches!(e.kind, EdgeKind::Flow(Connector::And))),
+            "expected an And flow edge, got {:?}",
+            g.edges.iter().map(|e| e.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reparenting_does_not_disturb_the_round_trip() {
+        for src in [
+            "cat <<EOF | grep secret\nline one\nEOF",
+            "cat <<-EOF | grep x\n\tbody\nEOF",
+            "cat <<'EOF' | grep x\nbody\nEOF",
+            "cat <<EOF && rm x\nbody\nEOF",
+            "echo a | cat <<EOF | grep x\nbody\nEOF",
+        ] {
+            let g = lower(src);
+            assert_eq!(g.emit(), src, "P1 violated for {src:?}");
+            assert!(
+                g.overlapping_segments().is_none(),
+                "overlapping segments for {src:?}"
+            );
+        }
     }
 
     #[test]
