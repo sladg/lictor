@@ -129,7 +129,28 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
             .collect::<Vec<String>>()
     };
 
-    let decide = |candidate_of: &dyn Fn(&str) -> Option<String>| {
+    // The program each command runs, when it is named by a pathname.
+    //
+    // `walk_words` skips word 0 (`.skip(1)` below) — bin paths were
+    // `strip_program_paths`' business, and that only ever emitted a *cosmetic*
+    // rewrite — so the jail has never looked at the program at all, under either
+    // source. `/tmp/exploit.sh` ran unremarked. The graph is the first thing
+    // able to say "this command executes that file", so this is a hole being
+    // closed rather than a source being swapped.
+    //
+    // Checked against the SAME roots as everything else, deliberately. Trusting
+    // `/usr/bin` and friends would let a jailed agent run anything on the system
+    // as long as it lived in a bin dir, and staying inside the project is the
+    // whole point of the jail. A program on `PATH` invoked by bare name — `npm`,
+    // `git` — names no file and never appears here; making a tool reachable that
+    // way, or extending `jail_allow`, is the user's call.
+    let graph_programs = if source == JailPaths::Heuristic {
+        Vec::new()
+    } else {
+        extraction.graph.executed_programs()
+    };
+
+    let decide = |candidate_of: &dyn Fn(&str) -> Option<String>, programs: &[String]| {
         let mut found: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
         for (candidate, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
@@ -143,20 +164,32 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
                 found.push(resolved);
             }
         }
+        // resolved against the base cwd for the same reason `unvisited` is: a
+        // bare list carries no position to cd-track against, and an absolute
+        // path — which is what running something out of the jail looks like — is
+        // unaffected either way
+        for program in programs {
+            let resolved = normalize(program, cwd, &home);
+            if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
+                found.push(resolved);
+            }
+        }
         found
     };
 
     match source {
         // the heuristic has no path list of its own, so `unvisited` finds
         // nothing for it and the default is untouched
-        JailPaths::Heuristic => decide(&heuristic),
-        JailPaths::Graph => decide(&from_graph),
+        JailPaths::Heuristic => decide(&heuristic, &[]),
+        JailPaths::Graph => decide(&from_graph, &graph_programs),
         // decide with the heuristic, but record what the graph would have said —
         // so the switch can be judged against real usage before it changes any
-        // decision
+        // decision. The program list is passed to the graph side only: it is not
+        // something the heuristic has an opinion about, and handing it to both
+        // would hide the difference this mode exists to record.
         JailPaths::Compare => {
-            let old = decide(&heuristic);
-            let new = decide(&from_graph);
+            let old = decide(&heuristic, &[]);
+            let new = decide(&from_graph, &graph_programs);
             report_disagreement(extraction, &old, &new);
             old
         }
