@@ -1,6 +1,6 @@
-use super::Plan;
-use crate::bash::{Command, Extraction, basename};
-use crate::config::{Config, ModuleSetting};
+use super::{ModuleCtx, Plan};
+use crate::bash::{Command, basename};
+use crate::config::ModuleSetting;
 use crate::rules::SpanEdit;
 
 // monorepo hygiene: `cd pkg && bun run lint` changes the shell cwd to run a
@@ -27,12 +27,12 @@ fn pm_flag(command: &Command) -> Option<(&'static str, &'static str)> {
     PMS.iter().find(|(pm, _)| *pm == basename(program)).copied()
 }
 
-pub fn plan(extraction: &Extraction, config: &Config, out: &mut Plan) {
-    let setting = match config.modules.get("pm-cwd") {
+pub fn plan(ctx: &ModuleCtx, out: &mut Plan) {
+    let setting = match ctx.config.modules.get("pm-cwd") {
         Some(s) if *s != ModuleSetting::Off => *s,
         _ => return,
     };
-    let commands = &extraction.commands;
+    let commands = &ctx.extraction.commands;
     let Some(cd_idx) = commands.iter().position(|c| !c.synthetic && is_cd(c)) else {
         return;
     };
@@ -82,13 +82,22 @@ pub fn plan(extraction: &Extraction, config: &Config, out: &mut Plan) {
 mod tests {
     use super::*;
     use crate::bash;
+    use crate::config::Config;
     use crate::rules::apply_edits;
 
     fn plan_for(command: &str, setting: &str) -> Plan {
         let config: Config = toml::from_str(&format!("[modules]\npm-cwd = \"{setting}\""))
             .expect("test config parses");
         let mut plan = Plan::default();
-        super::plan(&bash::extract(command), &config, &mut plan);
+        let extraction = bash::extract(command);
+        super::plan(
+            &ModuleCtx {
+                extraction: &extraction,
+                config: &config,
+                cwd: None,
+            },
+            &mut plan,
+        );
         plan
     }
 

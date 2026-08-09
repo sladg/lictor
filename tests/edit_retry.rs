@@ -1,3 +1,8 @@
+// The harness drivers below mirror a hook call's shape — policy, event, tool,
+// input, response, cwd, session — so their arity is the shape of the thing under
+// test, not a signature that grew by accident.
+#![allow(clippy::too_many_arguments)]
+
 // Integration tests for hint-retry on removed_pattern and required_pattern rules.
 // Uses real session state (temp dir) and engine::evaluate end-to-end.
 

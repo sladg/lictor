@@ -1,3 +1,8 @@
+// The harness drivers below mirror a hook call's shape — policy, event, tool,
+// input, response, cwd, session — so their arity is the shape of the thing under
+// test, not a signature that grew by accident.
+#![allow(clippy::too_many_arguments)]
+
 use lictor::config::Config;
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
@@ -166,7 +171,6 @@ fn run_with(
     };
     output.map(|o| serde_json::to_value(o).unwrap()["hookSpecificOutput"].take())
 }
-
 fn run(event: &str, tool: &str, tool_input: Value, tool_response: Option<Value>) -> Option<Value> {
     run_with(POLICY, event, tool, tool_input, tool_response)
 }
@@ -1730,8 +1734,7 @@ fn run_session(policy: &str, event: &str, command: &str, session: &str) -> Optio
 
 #[test]
 fn strikes_lock_shell_after_repeat_denies() {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("strikes-lock");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = fresh_dir("strikes-lock");
     let policy = strikes_policy(&dir);
     let session = "lock-session";
     assert_eq!(
@@ -1770,8 +1773,7 @@ fn strikes_lock_shell_after_repeat_denies() {
 
 #[test]
 fn strikes_isolated_per_session() {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("strikes-iso");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = fresh_dir("strikes-iso");
     let policy = strikes_policy(&dir);
     run_session(&policy, "PreToolUse", "git commit -m x", "session-a");
     run_session(&policy, "PreToolUse", "git commit -m y", "session-a");
@@ -1809,9 +1811,7 @@ fn run_retry(
 // N-denies-then-allow case, not just the degenerate N = 1 shortcut
 #[test]
 fn bash_retry_allow_denies_until_threshold_then_allows() {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("retry-bash");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = fresh_dir("retry-bash");
     let policy = format!(
         "[settings]\nlog_file = \"{}/audit.jsonl\"\n[[bash]]\nmatch = \"grep*\"\naction = \"deny\"\nreason = \"Use rg instead.\"\nretry_count = 3\nretry_window = 30\n",
         dir.display()
@@ -1839,9 +1839,7 @@ fn bash_retry_allow_denies_until_threshold_then_allows() {
 
 #[test]
 fn edit_retry_allow_flips_after_threshold() {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("retry-edit");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = fresh_dir("retry-edit");
     let policy = format!(
         "[settings]\nlog_file = \"{}/audit.jsonl\"\n[[edit]]\npaths = [\"**/*.sh\"]\naction = \"deny\"\nretry_count = 1\nretry_window = 30\n",
         dir.display()
@@ -2069,9 +2067,7 @@ fn jail_applies_to_notebookedit_tool() {
 // --- delete-recreate: rm + similar Write = rename done wrong ---
 
 fn recreate_setup(name: &str, setting: &str) -> (std::path::PathBuf, String, String) {
-    let dir =
-        std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("recreate-{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = fresh_dir(&format!("recreate-{name}"));
     let body: String = (1..=12)
         .map(|i| format!("unique line {i} of {name}\n"))
         .collect();
@@ -2200,10 +2196,21 @@ fn recreate_rejects_unsupported_setting() {
 
 // --- self-rm: rm of paths created earlier this session skips the ask ---
 
-fn self_rm_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("self-rm-{name}"));
+// Fixture directories live under CARGO_TARGET_TMPDIR, which persists between
+// runs — and CI restores it from the build cache. A test that assumes it starts
+// empty passes locally on a clean tree and fails on the *second* CI run, which
+// is exactly how `self_rm_allows_cleanup_of_a_session_created_dir` broke: a
+// cached `scratch/` meant `mkdir scratch` was no longer a creation, so nothing
+// was tracked and the later `rm` was not recognised as self-cleanup.
+fn fresh_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn self_rm_dir(name: &str) -> std::path::PathBuf {
+    fresh_dir(&format!("self-rm-{name}"))
 }
 
 fn self_rm_policy(dir: &std::path::Path) -> String {

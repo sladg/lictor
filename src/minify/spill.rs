@@ -12,6 +12,8 @@ pub struct SpillOutcome {
 // last-resort context guard: oversized output goes to the kv store, the model
 // gets the tail plus instructions to query the rest. Slow commands spill too,
 // so the model queries the cache instead of re-running them while debugging.
+// four unrelated inputs to one decision.
+#[allow(clippy::too_many_arguments)]
 pub fn spill(
     stdout: &str,
     command: &str,

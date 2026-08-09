@@ -124,6 +124,7 @@ fn resolve_config(
 // `check -- <cmd...>`: run one command through the same PreToolUse -> exec ->
 // PostToolUse pipeline the hooks use, narrating decisions on stderr. The
 // model-visible output (post minify/spill) lands on stdout; exit code propagates.
+#[allow(clippy::too_many_arguments)]
 fn check_command(
     args: Vec<String>,
     mode: Option<String>,

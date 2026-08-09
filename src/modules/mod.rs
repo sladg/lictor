@@ -28,6 +28,20 @@ use crate::config::{Config, ModuleSetting};
 use crate::rules::SpanEdit;
 use std::path::PathBuf;
 
+/// The per-event state every module needs: the policy, where the tool call is
+/// running, and which session it belongs to.
+///
+/// These three travel together through the whole module layer. Passed
+/// positionally they put two adjacent `Option<&str>` in eight signatures, and
+/// the compiler cannot catch a transposed `(cwd, session)` — both spellings
+/// compile, and the result is a module silently reading the wrong state file.
+#[derive(Clone, Copy)]
+pub struct HookCtx<'a> {
+    pub config: &'a Config,
+    pub cwd: Option<&'a str>,
+    pub session: Option<&'a str>,
+}
+
 // what the planning modules want done to the command before it is gated:
 // edits rewrite it, hints reach the model, asks/denies become the decision
 #[derive(Default)]
@@ -38,16 +52,21 @@ pub struct Plan {
     pub denies: Vec<String>,
 }
 
-pub fn plan(
-    extraction: &Extraction,
-    config: &Config,
-    cwd: Option<&str>,
-    tracked: &dyn Fn(&[String]) -> bool,
-) -> Plan {
-    let mut plan = git_wrap::plan(extraction, config, tracked);
-    pm_cwd::plan(extraction, config, &mut plan);
-    jail::relative_hints(extraction, config, cwd, &mut plan);
-    path_check::plan(extraction, config, cwd, &mut plan);
+/// What a planning module reads. Every one of them wanted the same three
+/// values, but took them in different orders and named the out-param
+/// differently, so the pipeline below could not be read as a pipeline.
+#[derive(Clone, Copy)]
+pub struct ModuleCtx<'a> {
+    pub extraction: &'a Extraction,
+    pub config: &'a Config,
+    pub cwd: Option<&'a str>,
+}
+
+pub fn plan(ctx: &ModuleCtx, tracked: &dyn Fn(&[String]) -> bool) -> Plan {
+    let mut plan = git_wrap::plan(ctx, tracked);
+    pm_cwd::plan(ctx, &mut plan);
+    jail::relative_hints(ctx, &mut plan);
+    path_check::plan(ctx, &mut plan);
     plan
 }
 

@@ -1,4 +1,4 @@
-use super::state_dir;
+use super::{HookCtx, state_dir};
 use crate::audit;
 use crate::bash::{Command, Extraction, basename};
 use crate::config::{Config, ModuleSetting};
@@ -130,14 +130,14 @@ pub(super) fn resolve(path: &str, cwd: &str) -> String {
     crate::modules::jail::normalize(path, cwd, &home)
 }
 
-pub fn record(extraction: &Extraction, config: &Config, cwd: Option<&str>, session: Option<&str>) {
-    if setting(config) == ModuleSetting::Off {
+pub fn record(extraction: &Extraction, ctx: &HookCtx) {
+    if setting(ctx.config) == ModuleSetting::Off {
         return;
     }
-    let (Some(cwd), Some(session)) = (cwd, session) else {
+    let (Some(cwd), Some(session)) = (ctx.cwd, ctx.session) else {
         return;
     };
-    let Some(state) = state_file(config, Some(cwd), session) else {
+    let Some(state) = state_file(ctx.config, Some(cwd), session) else {
         return;
     };
     let mut entries: Option<Vec<Entry>> = None;
@@ -181,24 +181,18 @@ pub fn record(extraction: &Extraction, config: &Config, cwd: Option<&str>, sessi
     }
 }
 
-pub fn check(
-    config: &Config,
-    cwd: Option<&str>,
-    session: Option<&str>,
-    path: &str,
-    contents: &[String],
-) -> Option<(ModuleSetting, Recreated)> {
-    let setting = setting(config);
+pub fn check(ctx: &HookCtx, path: &str, contents: &[String]) -> Option<(ModuleSetting, Recreated)> {
+    let setting = setting(ctx.config);
     if setting == ModuleSetting::Off {
         return None;
     }
-    let session = session?;
+    let session = ctx.session?;
     let hashes = fingerprint(&contents.join("\n"));
     if hashes.len() < MIN_LINES {
         return None;
     }
-    let state = state_file(config, cwd, session)?;
-    let new_path = resolve(path, cwd.unwrap_or(""));
+    let state = state_file(ctx.config, ctx.cwd, session)?;
+    let new_path = resolve(path, ctx.cwd.unwrap_or(""));
     load(&state)
         .into_iter()
         .filter(|e| e.path != new_path)
@@ -220,6 +214,15 @@ pub fn check(
 mod tests {
     use super::*;
     use crate::bash;
+
+    // the three values that used to be spelled out at every call site
+    fn ctx<'a>(config: &'a Config, dir: &'a std::path::Path, session: &'a str) -> HookCtx<'a> {
+        HookCtx {
+            config,
+            cwd: dir.to_str(),
+            session: Some(session),
+        }
+    }
 
     fn config(dir: &std::path::Path, setting: &str) -> Config {
         toml::from_str(&format!(
@@ -287,27 +290,18 @@ mod tests {
         let config = config(&dir, "ask");
         std::fs::write(dir.join("old.rs"), body("same")).unwrap();
         let extraction = bash::extract("rm old.rs");
-        record(&extraction, &config, dir.to_str(), Some("s1"));
+        record(&extraction, &ctx(&config, &dir, "s1"));
 
-        let hit = check(&config, dir.to_str(), Some("s1"), "new.rs", &[body("same")]);
+        let hit = check(&ctx(&config, &dir, "s1"), "new.rs", &[body("same")]);
         let (setting, hit) = hit.expect("similar write flagged");
         assert_eq!(setting, ModuleSetting::Ask);
         assert!(hit.old_path.ends_with("old.rs"));
         assert_eq!(hit.percent, 100);
 
         // dissimilar content passes
-        assert!(
-            check(
-                &config,
-                dir.to_str(),
-                Some("s1"),
-                "new.rs",
-                &[body("other")]
-            )
-            .is_none()
-        );
+        assert!(check(&ctx(&config, &dir, "s1"), "new.rs", &[body("other")]).is_none());
         // other sessions see nothing
-        assert!(check(&config, dir.to_str(), Some("s2"), "new.rs", &[body("same")]).is_none());
+        assert!(check(&ctx(&config, &dir, "s2"), "new.rs", &[body("same")]).is_none());
     }
 
     #[test]
@@ -315,22 +309,8 @@ mod tests {
         let dir = temp("samepath");
         let config = config(&dir, "ask");
         std::fs::write(dir.join("keep.rs"), body("keep")).unwrap();
-        record(
-            &bash::extract("rm keep.rs"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
-        assert!(
-            check(
-                &config,
-                dir.to_str(),
-                Some("s1"),
-                "keep.rs",
-                &[body("keep")]
-            )
-            .is_none()
-        );
+        record(&bash::extract("rm keep.rs"), &ctx(&config, &dir, "s1"));
+        assert!(check(&ctx(&config, &dir, "s1"), "keep.rs", &[body("keep")]).is_none());
     }
 
     #[test]
@@ -338,17 +318,10 @@ mod tests {
         let dir = temp("tiny");
         let config = config(&dir, "ask");
         std::fs::write(dir.join("tiny.rs"), "one\ntwo\n").unwrap();
-        record(
-            &bash::extract("rm tiny.rs"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
+        record(&bash::extract("rm tiny.rs"), &ctx(&config, &dir, "s1"));
         assert!(
             check(
-                &config,
-                dir.to_str(),
-                Some("s1"),
+                &ctx(&config, &dir, "s1"),
                 "new.rs",
                 &["one\ntwo\n".to_string()]
             )
@@ -360,13 +333,9 @@ mod tests {
     fn off_records_nothing() {
         let dir = temp("off");
         std::fs::write(dir.join("old.rs"), body("x")).unwrap();
-        record(
-            &bash::extract("rm old.rs"),
-            &config(&dir, "off"),
-            dir.to_str(),
-            Some("s1"),
-        );
+        let off = config(&dir, "off");
+        record(&bash::extract("rm old.rs"), &ctx(&off, &dir, "s1"));
         let ask = config(&dir, "ask");
-        assert!(check(&ask, dir.to_str(), Some("s1"), "new.rs", &[body("x")]).is_none());
+        assert!(check(&ctx(&ask, &dir, "s1"), "new.rs", &[body("x")]).is_none());
     }
 }

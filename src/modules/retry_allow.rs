@@ -47,6 +47,10 @@ fn save(path: &PathBuf, entries: &[Entry]) {
 
 // prior denies recorded for `rule_key` within `window` seconds; stale or
 // missing reads as 0 — an idle window means the resubmission isn't a retry
+// `(config, cwd, session)` is HookCtx's shape, but `session` is already
+// resolved by the caller. Taking a HookCtx would swap a guaranteed `&str` for
+// an `Option` this function has to unwrap again.
+#[allow(clippy::too_many_arguments)]
 pub fn count(
     config: &Config,
     cwd: Option<&str>,
@@ -65,6 +69,8 @@ pub fn count(
         .unwrap_or(0)
 }
 
+// see `count`: session is already resolved here.
+#[allow(clippy::too_many_arguments)]
 pub fn bump(config: &Config, cwd: Option<&str>, session: &str, rule_key: &str) {
     let Some(path) = state_file(config, cwd, session) else {
         return;
@@ -92,6 +98,8 @@ pub fn bump(config: &Config, cwd: Option<&str>, session: &str, rule_key: &str) {
     save(&path, &entries);
 }
 
+// see `count`: session is already resolved here.
+#[allow(clippy::too_many_arguments)]
 pub fn reset(config: &Config, cwd: Option<&str>, session: &str, rule_key: &str) {
     let Some(path) = state_file(config, cwd, session) else {
         return;

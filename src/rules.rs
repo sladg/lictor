@@ -329,6 +329,8 @@ pub fn site_coverage(extraction: &Extraction, vetted: &[usize]) -> bool {
     true
 }
 
+// five rule sets plus where to evaluate them; no two travel together.
+#[allow(clippy::too_many_arguments)]
 pub fn gate(
     extraction: &Extraction,
     rules: &[CompiledBashRule],
@@ -627,6 +629,8 @@ fn push_hint(hints: &mut Vec<String>, hint: String) {
     }
 }
 
+// six, three of them `&mut` out-params the caller owns.
+#[allow(clippy::too_many_arguments)]
 fn strip_program_paths(
     extraction: &Extraction,
     action: Action,

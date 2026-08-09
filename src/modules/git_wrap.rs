@@ -1,5 +1,5 @@
-use crate::bash::{Command, Extraction, basename};
-use crate::config::{Config, ModuleSetting};
+use crate::bash::{Command, basename};
+use crate::config::ModuleSetting;
 use crate::rules::SpanEdit;
 
 pub struct Spec {
@@ -55,16 +55,16 @@ impl Spec {
     }
 }
 
-use super::Plan;
+use super::{ModuleCtx, Plan};
 
-pub fn plan(extraction: &Extraction, config: &Config, tracked: &dyn Fn(&[String]) -> bool) -> Plan {
+pub fn plan(ctx: &ModuleCtx, tracked: &dyn Fn(&[String]) -> bool) -> Plan {
     let mut plan = Plan::default();
-    for command in &extraction.commands {
+    for command in &ctx.extraction.commands {
         if command.synthetic {
             continue;
         }
         for spec in SPECS {
-            let setting = match config.modules.get(spec.name) {
+            let setting = match ctx.config.modules.get(spec.name) {
                 Some(s) if *s != ModuleSetting::Off => *s,
                 _ => continue,
             };
@@ -97,7 +97,7 @@ pub fn plan(extraction: &Extraction, config: &Config, tracked: &dyn Fn(&[String]
                     "lictor: `{display}` targets git-tracked paths; use `{}` ({})",
                     spec.rewrite_to, spec.hint
                 )),
-                // off is filtered above; ask/deny are rejected at config load
+                // off is filtered above; ask/deny are rejected at ctx.config load
                 _ => unreachable!(),
             }
         }
@@ -125,13 +125,23 @@ pub fn git_tracked(cwd: Option<&str>, paths: &[String]) -> bool {
 mod tests {
     use super::*;
     use crate::bash;
+    use crate::config::Config;
 
     fn config(toml: &str) -> Config {
         toml::from_str(toml).expect("test config parses")
     }
 
     fn plan_for(command: &str, toml: &str, tracked: bool) -> Plan {
-        plan(&bash::extract(command), &config(toml), &|_| tracked)
+        let extraction = bash::extract(command);
+        let config = config(toml);
+        plan(
+            &ModuleCtx {
+                extraction: &extraction,
+                config: &config,
+                cwd: None,
+            },
+            &|_| tracked,
+        )
     }
 
     const REWRITE: &str = "[modules]\ngit-mv = \"rewrite\"\ngit-rm = \"rewrite\"";
