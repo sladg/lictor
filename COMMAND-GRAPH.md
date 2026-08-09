@@ -3,11 +3,15 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-tasks 1, 2, 3, 5 and 6 complete.** The graph IR and emitter exist and are
-still internal — nothing in `src/graph.rs` is wired into the engine. Sub-task 2
-(heredoc re-parenting) is the one behaviour change so far, and it landed in
-`bash.rs` as well as the graph because that is where today's rules read
-structure; it closes #12.
+Status: **sub-tasks 1, 2, 3, 5 and 6 complete.** The graph IR and emitter are
+still mostly internal: `settings.jail_paths` is the one opt-in consumer, and the
+default is unchanged. Sub-task 2 (heredoc re-parenting) is the one behaviour
+change so far, and it landed in `bash.rs` as well as the graph because that is
+where today's rules read structure; it closes #12.
+
+Behaviour of the graph is pinned by `tests/graph_cases/*.toml` — a command and
+what the graph should claim about it, as data. Read those first; they are the
+executable half of this document.
 
 ## Why
 
@@ -186,8 +190,8 @@ effect = ["write", "create"]
 
 | field | values |
 |---|---|
-| `slots` | `all` · `first` · `last` · `except-last` · `rest` · a number — counted **after** flag arguments are removed |
-| `kind` | `none` · `path` · `cmd` (produce edges today) · `pathset` `glob` `regex` `code` `url` `host` `container` (accepted, consumed later) |
+| `slots` | `all` · `first` · `last` · `except-last` · `rest` · `N+` (from slot N onward) · a number — counted **after** flag arguments are removed |
+| `kind` | `none` · `path` · `pathset` · `cmd` · `host` / `container` (name the machine a payload runs on) · `glob` `regex` `code` `url` (accepted, consumed later) |
 | `effect` | `read` · `write` · `delete` · `create` · `exec` — a set |
 | `when` | `{ with = [...], without = [...] }` — guards an entry on the flags present |
 
@@ -233,19 +237,95 @@ positional list**:
 The same slot is local in one spelling and remote in the other, so a recipe
 field could not express it — which is why `graph::locality_of` reads it off the
 argument instead. A location prefix is a `:` in a word that does not begin at a
-filesystem root, and a word carrying one produces **no reference edges**, because
-a reference edge is a claim about this machine's filesystem.
+filesystem root, and `RemoteRef::parse` splits it into scheme, authority and
+path: `s3://prod-bucket/key` is a *key* in a *named bucket*.
 
-That gives one entry per slot covering both directions, and it is what makes
-`aws s3 rm s3://bucket/key` silent *by decision* rather than by omission: the
-recipe does say the slot is what the command deletes.
+**The reference edge still exists.** A reference edge says what the command does
+to what it names; locality says where that thing is. The first version of this
+dropped the edge, which said `aws s3 rm s3://bucket/key` deletes nothing — and
+that is false. It deletes a key. Callers that mean *this* filesystem ask
+`Graph::referenced_paths`, which is `Graph::references` filtered to local; the
+full list is there for anything that grows to care about the other end.
+
+Nothing configures remote references today. There is no `[[remote]]` rule
+surface and this stage does not add one. Modelling them anyway is the difference
+between a graph that cannot yet act on a fact and a graph that cannot ever
+express it.
 
 The `/`, `~` and `.` exemption is load-bearing in the other direction. A colon is
 legal in a filename, and `/var/log/build:2024.log` has to stay local — losing it
 would be a jail escape, which is the direction this codebase treats as dangerous.
 Every word that can name something outside the current directory starts with one
 of those three characters, so the exemption costs only the case in *Accepted
-gaps* below.
+gaps* below. A remote word is also neither `absolute` nor `relative`: those facts
+describe a path on this machine, and `s3://bucket/path` resolved against the cwd
+is nonsense.
+
+### A command runs somewhere too
+
+`ssh host cat /etc/hosts` reads a file. Not here — but it reads one, and the
+first answer to #4 was to say nothing at all, because there was nowhere to hang
+the difference. There is now: a wrapper's payload is lowered as **its own
+command node**.
+
+    cmd[0] ssh          local
+      reads ~/.ssh/id   local        (ssh's own flag)
+      spawns cmd[1]
+    cmd[1] cat          remote:host
+      reads /etc/hosts  remote
+
+Which makes three facts sayable that were not:
+
+| | before | now |
+|---|---|---|
+| what runs | `sudo` deletes the file | `rm` deletes it, `sudo` execs `rm` |
+| as whom | the `sudo` node was elevated | **`rm`** is elevated |
+| where | nothing | `remote:host`, inherited by anything it spawns |
+
+A recipe says a command runs elsewhere by naming a machine and a payload — an
+arg with `kind = "host"` or `"container"`, and one with `kind = "cmd"`. Those two
+statements together already mean the payload runs there, so there is no third
+field, and no way to write a recipe where they disagree. `ssh`'s payload starts
+at slot 1, which is what `slots = "1+"` is for: `rest` would take the hostname
+itself as the program to run.
+
+A reference is remote if **either** end says so. The two are independent:
+`ssh host cat ./notes` is a local-looking word on a remote command, and
+`aws s3 rm s3://b/k` is a remote word on a local one.
+
+The minted node owns **no bytes**. The program word is already owned by the
+`Value` it was lowered as, and two owners for one stretch of source is the
+span-surgery bug (#7) by construction — an edit still addresses the `Value`,
+which is how `tests/graph_cases/edits.toml` rewrites the inner program of
+`sudo grep foo /var/log/x`. That was the "a rewrite cannot target the inner
+program" gap this file used to list under *deferred*.
+
+### A redirect is a reference
+
+`echo hi > /etc/passwd` produced nothing (#29). The redirect was one opaque node
+covering `> /etc/passwd`, so the file the shell truncates was not a node at all.
+Now the destination is lowered as its own `Value`, bound to the stream with a
+`Takes` edge, and `apply_redirects` turns it into `writes` + `creates`.
+
+**This one needs no recipe**, which is not a hole in the inverted default. That
+default exists because "what does this word mean to *this program*" is unknowable
+without a map. `> file` is not a program's argument — it is shell syntax, and it
+truncates that file whatever the program is. So an unmapped program can no longer
+hide a write behind a redirect.
+
+A here-string's word is data (`cmd <<< /etc/passwd` reads no such file) and a
+descriptor dup names no file at all. Telling `2>&1` from `&>file` is done by
+reading the **grammar** — a dup's destination is a `number`, not a word — because
+both spell their operator `>&`.
+
+Modelling it was only half of #29. The jail walks the *words* of each command and
+asks the graph "is this one a path?", and a redirect target is not a word — so a
+graph that knew about the write still could not surface it. Under
+`jail_paths = graph` the paths now come from the graph itself, with the walk
+supplying only its resolution machinery (cd tracking, `~` expansion). The
+heuristic source has no path list of its own, so the default is untouched, and
+`compare` will record the difference against real usage the way sub-task 8
+intended.
 
 ### Nested subcommands
 
@@ -277,13 +357,10 @@ first for its flags, and subcommand entries inherit them.
 
 The issue's format also lists `[cmd.kv]` (`dd if=/of=`) and richer slot binding.
 Those are not implemented. `glob`, `regex`, `code`, `url`, `host` and `container`
-parse and validate but produce no edges. `container` is the one that would carry
-weight: it needs a command's payload lowered as its own command before
-`kubectl exec … -- cat /etc/config` can be modelled as anything but silence.
-
-Nothing about a wrapper's payload creates a `Command` node yet, so a rewrite
-still cannot target the inner program. That needs the payload lowered as its own
-command.
+parse and validate but produce no edges of their own. `host` and `container` do
+have a job: naming the machine a payload command runs on. What `container` still
+cannot reach is `kubectl exec pod -- cat /etc/config`, where the `--` separator
+occupies a positional slot and shifts every number after it — see #24.
 
 ## PathSet and the glob∩glob matcher (sub-task 6)
 
@@ -421,15 +498,12 @@ edge in sub-task 5 rather than a second phantom command.
 
 ## What is still deferred
 
-- **No argument maps**, so no reference edges and no `PathSet` population —
-  sub-tasks 5 and 6. The node and edge kinds exist so callers can match
-  exhaustively.
-- **`Locality` on a `Command` is always `Local`** — a whole command that runs
-  elsewhere (`kubectl exec`, `ssh host …`) needs its payload lowered as its own
-  command first, which nothing does yet. `ValueFacts::locality` *is* populated;
-  see below.
 - **No `Extraction`/`Command` view over the graph** — sub-task 4. Every existing
-  module still uses `bash::extract` untouched.
+  module still uses `bash::extract` untouched, and `jail.rs` re-parses the source
+  to ask the graph anything.
+- **Nothing consumes a remote reference.** The graph models them; no rule surface
+  matches on them yet. Deliberate: a fact the graph cannot express is a rule that
+  can never be written, while a fact nothing reads yet costs a struct field.
 - **Compound constructs are not modelled semantically.** `if`, `for`, `while`,
   `case` and function bodies parse, and the commands inside them are lowered;
   the surrounding keywords fall through as unowned gaps. P1 holds regardless.

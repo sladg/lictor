@@ -138,11 +138,24 @@ pub enum Slots {
     Last,
     /// every positional but the final one (`cp src... dst`'s sources)
     ExceptLast,
-    /// from the first positional onward, taken together as a nested command
-    /// (`sudo`, `xargs`, `env`)
-    Rest,
+    /// from slot `n` onward, taken together as a nested command. `rest` is
+    /// `From(0)` — `sudo`, `xargs`, `env`. `1+` is `From(1)`, which is what
+    /// `ssh HOST command…` needs: slot 0 names the machine, and the payload
+    /// starts after it.
+    From(usize),
     /// one specific slot
     At(usize),
+}
+
+impl Slots {
+    /// Where a nested command's program word sits, if this is a `rest`-shaped
+    /// entry.
+    pub fn payload_start(self) -> Option<usize> {
+        match self {
+            Slots::From(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<String> for Slots {
@@ -154,13 +167,18 @@ impl TryFrom<String> for Slots {
             "first" => Ok(Slots::First),
             "last" => Ok(Slots::Last),
             "except-last" => Ok(Slots::ExceptLast),
-            "rest" => Ok(Slots::Rest),
-            other => other.parse::<usize>().map(Slots::At).map_err(|_| {
-                format!(
-                    "unknown slots value `{other}` — expected all, first, last, \
-                     except-last, rest, or a slot number"
-                )
-            }),
+            "rest" => Ok(Slots::From(0)),
+            other => match other.strip_suffix('+') {
+                Some(n) => n.parse::<usize>().map(Slots::From).map_err(|_| {
+                    format!("unknown slots value `{other}` — `N+` needs a slot number before the +")
+                }),
+                None => other.parse::<usize>().map(Slots::At).map_err(|_| {
+                    format!(
+                        "unknown slots value `{other}` — expected all, first, last, \
+                         except-last, rest, `N+`, or a slot number"
+                    )
+                }),
+            },
         }
     }
 }
@@ -289,10 +307,10 @@ impl Maps {
                         arg.kind
                     ));
                 }
-                if arg.kind == Kind::Cmd && arg.slots != Slots::Rest {
+                if arg.kind == Kind::Cmd && arg.slots.payload_start().is_none() {
                     return Err(format!(
                         "command map: `{label}` binds a `cmd` argument to `{:?}` — a nested \
-                         command runs to the end of the line, so it must use `rest`",
+                         command runs to the end of the line, so it must use `rest` or `N+`",
                         arg.slots
                     ));
                 }
@@ -354,7 +372,7 @@ impl Program {
                     Slots::First => slot == 0,
                     Slots::Last => total > 0 && slot == total - 1,
                     Slots::ExceptLast => total > 0 && slot < total - 1,
-                    Slots::Rest => slot == 0,
+                    Slots::From(n) => slot == n,
                     Slots::At(n) => slot == n,
                 }
         })
@@ -390,7 +408,22 @@ impl Program {
     pub fn nested_command(&self) -> Option<&Arg> {
         self.args
             .iter()
-            .find(|a| a.kind == Kind::Cmd && a.slots == Slots::Rest)
+            .find(|a| a.kind == Kind::Cmd && a.slots.payload_start().is_some())
+    }
+
+    /// The slot naming the machine a nested command runs on, if this program has
+    /// one.
+    ///
+    /// A recipe that says "slot 0 is a machine" **and** "the rest is a command"
+    /// has already said the command runs on that machine — those two statements
+    /// together mean nothing else. So there is no third field to set and no way
+    /// to write a recipe where they disagree.
+    pub fn machine_slot(&self) -> Option<usize> {
+        self.args.iter().find_map(|a| match (a.kind, a.slots) {
+            (Kind::Host | Kind::Container, Slots::At(n)) => Some(n),
+            (Kind::Host | Kind::Container, Slots::First) => Some(0),
+            _ => None,
+        })
     }
 }
 

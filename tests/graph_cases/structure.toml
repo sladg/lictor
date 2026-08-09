@@ -1,0 +1,110 @@
+name  = "the shape the lowering finds"
+issue = 13
+
+# Connectors, nesting and substitutions — the structural claims, as opposed to
+# the reference claims the other files cover. Every case here also asserts P1,
+# which is what makes this file the shape list `graph_p1.rs` used to keep by
+# hand.
+
+[[case]]
+name    = "a flag and a positional are different things"
+command = "grep -n TODO src/main.rs"
+expect  = { commands = ["grep"], local = ["reads src/main.rs"], binds = [] }
+
+[[case]]
+# the one case the lowering can bind without a map: the syntax settles it
+name    = "an inline flag argument is bound by the `=`"
+command = "ls --color=auto"
+expect  = { binds = ["--color=auto"] }
+
+[[case]]
+name    = "a pipeline joins its members"
+command = "cat notes.txt | grep secret"
+expect  = { commands = ["cat", "grep"], flow = ["cat --pipe--> grep"] }
+
+[[case]]
+name    = "a chain carries the connector it was written with"
+command = "make build && make test"
+expect  = { flow = ["make --and--> make"] }
+
+[[case]]
+name    = "and the other two"
+command = "a || b ; c"
+expect  = { flow = ["a --or--> b", "b --seq--> c"] }
+
+# ── heredocs (#12) ──
+#
+# tree-sitter nests the rest of the pipeline INSIDE the heredoc redirect, so
+# without re-parenting the two ends of `cat <<EOF | grep x` are unrelated in the
+# graph — exactly as they were unrelated in the CST, which is how every
+# `piped_into` deny rule became evadable by adding a heredoc.
+
+[[case]]
+name    = "the pipeline continues across a heredoc"
+command = "cat <<EOF | grep secret\nline one\nEOF"
+expect  = { commands = ["cat", "grep"], flow = ["cat --pipe--> grep"] }
+
+[[case]]
+name    = "a chain nested in a heredoc carries its own connector"
+command = "cat <<EOF && rm x\nbody\nEOF"
+expect  = { commands = ["cat", "rm"], flow = ["cat --and--> rm"] }
+
+[[case]]
+name    = "tab-stripping variant"
+command = "cat <<-EOF | grep x\n\tbody\nEOF"
+expect  = { flow = ["cat --pipe--> grep"] }
+
+[[case]]
+name    = "quoted delimiter suppresses expansion but not the pipe"
+command = "cat <<'EOF' | grep x\nbody\nEOF"
+expect  = { flow = ["cat --pipe--> grep"] }
+
+[[case]]
+name    = "the heredoc owner is itself mid-pipeline"
+command = "echo a | cat <<EOF | grep x\nbody\nEOF"
+expect  = { commands = ["echo", "cat", "grep"], flow = [
+  "echo --pipe--> cat",
+  "cat --pipe--> grep",
+] }
+
+# ── substitutions ──
+
+[[case]]
+name    = "a command substitution's payload runs"
+command = "grep pattern $(cat list.txt)"
+expect  = { commands = ["grep", "cat"], spawns = ["grep spawns cat"], local = [
+  "reads list.txt",
+] }
+
+[[case]]
+# `echo "pre $(id) post"` is one string word whose text is NOT contiguous: the
+# middle belongs to another command. Without carving it out, both claim those
+# bytes and rewriting either corrupts the other — the #7 shape.
+name    = "a substitution inside a string is carved out of the word"
+command = "echo \"pre $(id) post\""
+expect  = { commands = ["echo", "id"], spawns = ["<dynamic> spawns id"] }
+
+[[case]]
+name    = "process substitution"
+command = "diff <(sort a.txt) <(sort b.txt)"
+expect  = { commands = ["diff", "sort", "sort"] }
+
+# ── constructs the graph does not model semantically ──
+#
+# `if`, `for` and `while` parse, their commands are lowered, and the keywords
+# fall through as unowned gaps. P1 holds regardless, which is what keeps the
+# stage tractable without pretending to more coverage than it has.
+
+[[case]]
+# `[ -f x ]` is a `test_command` in the grammar, not a `command`, so the test
+# builtin is not a node here
+command = "if [ -f x ]; then cat x; fi"
+expect  = { commands = ["cat"] }
+
+[[case]]
+command = "for f in *.rs; do rustfmt $f; done"
+expect  = { commands = ["rustfmt"] }
+
+[[case]]
+command = "while read l; do echo $l; done"
+expect  = { commands = ["read", "echo"] }

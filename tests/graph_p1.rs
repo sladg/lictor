@@ -9,6 +9,11 @@
 //! On its own it is satisfiable by a lowering that models nothing at all, so
 //! `coverage_is_not_vacuous` pins the other half: the words of a command must
 //! actually be owned by nodes.
+//!
+//! What is left here is **properties over a corpus**, which is why it is code.
+//! The one-shape-per-bug list this file used to carry lives in
+//! `tests/graph_cases/shapes.toml`, where every case asserts P1 anyway and
+//! states a claim as well.
 
 use lictor::graph::{self, EdgeKind, Node};
 
@@ -50,43 +55,6 @@ fn p1_round_trip_over_the_whole_corpus() {
         "expected the corpus to yield a substantial number of literals, got {checked}"
     );
     println!("P1 verified over {checked} corpus literals");
-}
-
-#[test]
-fn p1_holds_for_the_shapes_that_broke_earlier_consumers() {
-    // one row per bug that re-derived structure from the CST and got it wrong
-    for src in [
-        // #7 — rewrite ate the flag
-        "grep -n TODO src/main.rs",
-        // #12 — heredoc swallows the rest of the pipeline
-        "cat <<EOF | grep secret\nline one\nEOF",
-        "cat <<-EOF | grep x\n\tbody\nEOF",
-        "cat <<'EOF' | grep x\nbody\nEOF",
-        "cat <<EOF && rm x\nbody\nEOF",
-        "cat <<EOF\nbody\nEOF",
-        // #4 — words that look like paths but are not
-        "sed -n '/needle/p' README.md",
-        "awk '/error/ {print $2}' log.txt",
-        "kubectl -n ns exec pod -c c -- grep -c x /etc/config/config.yaml",
-        "rg '/api/v1/users' src/",
-        // #8 — pipelines and chains
-        "a | b | c",
-        "a && b || c ; d",
-        "cmd 2>&1 | tee log.txt",
-        // substitution, quoting, expansion
-        "grep pattern $(cat list.txt)",
-        "echo \"a $VAR b\" 'raw' $'ansi\\x20c'",
-        "D=/tmp/x cmd --flag=value -- trailing",
-        // degenerate input still has to round-trip
-        "",
-        "   ",
-        "#!/bin/sh",
-        "( cd /tmp && ls )",
-        "{ echo a; echo b; }",
-    ] {
-        let emitted = graph::lower(src).emit();
-        assert_eq!(emitted, src, "P1 violated for {src:?}");
-    }
 }
 
 #[test]

@@ -1,0 +1,72 @@
+name  = "a redirect references the file it opens"
+issue = 29
+
+# `echo hi > /etc/passwd` produced NOTHING: the redirect was one opaque node
+# covering `> /etc/passwd`, so the file the shell truncates was not a node at
+# all and the jail saw a command that references no paths.
+#
+# This is the one reference that needs no recipe, and that is not a hole in the
+# inverted default. The default exists because "what does this word mean to
+# *this program*" is unknowable without a map — but `> file` is not a program's
+# argument, it is shell syntax, and it truncates that file whatever the program
+# is.
+
+[[case]]
+name    = "a write redirect writes and creates"
+command = "echo hi > /etc/passwd"
+expect  = { local = [
+  "writes /etc/passwd",
+  "creates /etc/passwd",
+], binds = ["Out=/etc/passwd"] }
+
+[[case]]
+name    = "an append too — it also creates the file if it is missing"
+command = "echo hi >> /var/log/x"
+expect  = { local = ["writes /var/log/x", "creates /var/log/x"] }
+
+[[case]]
+name    = "a read redirect reads"
+command = "cat < /etc/shadow"
+expect  = { local = ["reads /etc/shadow"] }
+
+[[case]]
+name    = "both streams at once"
+command = "cmd &> /tmp/both"
+expect  = { local = ["writes /tmp/both", "creates /tmp/both"] }
+
+[[case]]
+# THE case that makes reading the grammar the right oracle: `2>&1`'s operator is
+# `>&` and so is `&>file`'s, so the operator text cannot tell them apart. The
+# destination can — a dup's is a number, not a word.
+name    = "a descriptor dup names no file"
+command = "cmd 2>&1 | tee log.txt"
+expect  = { local = [], binds = [] }
+
+[[case]]
+name    = "nor the other way round"
+command = "cmd >&2"
+expect  = { local = [], binds = [] }
+
+[[case]]
+name    = "a here-string's word is data, not a file"
+command = "cmd <<< /etc/passwd"
+expect  = { local = [], binds = [] }
+
+[[case]]
+name    = "a dynamic destination is a path nobody can know"
+command = "cmd > $OUT"
+expect  = { local = [] }
+
+[[case]]
+name    = "an unmapped program still cannot hide a redirect"
+command = "frobnicate --whatever > /etc/passwd"
+expect  = { local = ["writes /etc/passwd", "creates /etc/passwd"] }
+
+[[case]]
+name    = "the program's own arguments and its redirect both land"
+command = "grep TODO src/main.rs > /tmp/out"
+expect  = { local = [
+  "reads src/main.rs",
+  "writes /tmp/out",
+  "creates /tmp/out",
+] }

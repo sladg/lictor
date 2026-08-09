@@ -1,0 +1,70 @@
+name  = "a subcommand selects its own map, at any depth"
+issue = 13
+
+[[case]]
+name    = "git rm deletes"
+command = "git rm src/a.rs"
+expect  = { local = ["deletes src/a.rs"] }
+
+[[case]]
+name    = "git mv reads, deletes and writes"
+command = "git mv old.rs new.rs"
+expect  = { local = [
+  "reads old.rs",
+  "deletes old.rs",
+  "writes new.rs",
+  "creates new.rs",
+] }
+
+[[case]]
+name    = "a subcommand with no map claims nothing, rather than falling back"
+command = "git log --oneline"
+expect  = { local = [] }
+
+[[case]]
+# Found in real audit data: `git core.pager='!id'` appears as one of the most
+# frequent "subcommands" across 123k invocations, and is not a subcommand at all
+# — it is `-c`'s argument. Resolving the subcommand before binding the global
+# flags picks the wrong map and silently drops every claim.
+name    = "a global flag cannot hide the subcommand behind it"
+command = "git -c core.pager=cat rm src/a.rs"
+expect  = { local = ["deletes src/a.rs"] }
+
+[[case]]
+name    = "and a global flag that carries a path keeps its own edge"
+command = "git -C /repo rm src/a.rs"
+expect  = { local = ["reads /repo", "deletes src/a.rs"] }
+
+# ── two levels deep ──
+#
+# `aws s3 cp SRC DST` and `aws s3 rm KEY` share `s3` and agree about nothing
+# after it. One level of subcommand cannot tell them apart, and picking a slot
+# number that suits one points an effect at the wrong word in the other.
+
+[[case]]
+name    = "aws s3 cp"
+command = "aws s3 cp ./a.txt ./b.txt"
+expect  = { local = ["reads ./a.txt", "writes ./b.txt", "creates ./b.txt"] }
+
+[[case]]
+name    = "aws s3 rm, same prefix, different shape"
+command = "aws s3 rm ./a.txt"
+expect  = { local = ["deletes ./a.txt"] }
+
+[[case]]
+name    = "two global flags cannot hide a two-word subcommand either"
+command = "aws --profile prod --region us-east-1 s3 cp ./a.txt s3://b/k"
+expect  = { local = ["reads ./a.txt"], remote = [
+  "writes s3://b/k",
+  "creates s3://b/k",
+] }
+
+[[case]]
+name    = "a subcommand tree nobody mapped claims nothing"
+command = "aws ec2 describe-instances --output json"
+expect  = { local = [], remote = [] }
+
+[[case]]
+name    = "and neither does an s3 subcommand with no entry"
+command = "aws s3 ls s3://bucket"
+expect  = { local = [], remote = [] }

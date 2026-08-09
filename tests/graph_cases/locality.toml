@@ -1,0 +1,98 @@
+name  = "one positional list, two machines"
+issue = 25
+
+# `aws s3 cp`, `kubectl cp` and `scp` mix local and remote references in ONE
+# positional list, and the same slot flips between spellings. No recipe entry
+# can say which side is which, so the WORD carries it: a location prefix is a
+# `:` in a word that does not begin at a filesystem root.
+#
+# The reference edge still exists either way. "Somewhere else" and "does not
+# happen" are different claims, and only the first is true of
+# `aws s3 rm s3://bucket/key`.
+
+[[case]]
+name    = "local source, remote destination"
+command = "aws s3 cp ./build s3://bucket/path"
+expect  = { local = ["reads ./build"], remote = [
+  "writes s3://bucket/path",
+  "creates s3://bucket/path",
+] }
+
+[[case]]
+name    = "the reverse spelling resolves the other way round"
+command = "aws s3 cp s3://bucket/path ./build"
+expect  = { local = [
+  "writes ./build",
+  "creates ./build",
+], remote = ["reads s3://bucket/path"] }
+
+[[case]]
+name    = "a move reads and deletes its source, wherever that is"
+command = "aws s3 mv ./a.txt s3://bucket/a.txt"
+expect  = { local = ["reads ./a.txt", "deletes ./a.txt"], remote = [
+  "writes s3://bucket/a.txt",
+  "creates s3://bucket/a.txt",
+] }
+
+[[case]]
+# the slot IS mapped as a delete — the silence about this machine is a decision,
+# not an omission
+name    = "a bucket key is deleted, and not here"
+command = "aws s3 rm s3://bucket/key"
+expect  = { local = [], remote = ["deletes s3://bucket/key"] }
+
+[[case]]
+name    = "the same shape over ssh, with no scheme"
+command = "scp a.txt host:/tmp/"
+expect  = { local = ["reads a.txt"], remote = [
+  "writes host:/tmp/",
+  "creates host:/tmp/",
+] }
+
+[[case]]
+name    = "pulling from the far side writes here"
+command = "scp host:/etc/hosts ."
+expect  = { local = ["writes .", "creates ."], remote = ["reads host:/etc/hosts"] }
+
+[[case]]
+name    = "a user@host prefix is a machine too"
+command = "scp user@host:/etc/shadow /tmp/x"
+expect  = { local = [
+  "writes /tmp/x",
+  "creates /tmp/x",
+], remote = ["reads user@host:/etc/shadow"] }
+
+# ── the other direction, which is the dangerous one ──
+#
+# A colon is legal in a filename. `/var/log/build:2024.log` has to stay local:
+# losing it would be a jail escape, while mistaking a bucket key for a local
+# file is only a false positive.
+
+[[case]]
+name    = "a colon after a separator is still a local path"
+command = "cp ./a:b.txt /tmp/out"
+expect  = { local = ["reads ./a:b.txt", "writes /tmp/out", "creates /tmp/out"] }
+
+[[case]]
+name    = "an absolute path containing a colon"
+command = "rm /var/log/a:b"
+expect  = { local = ["deletes /var/log/a:b"] }
+
+[[case]]
+name    = "a home-relative path containing a colon"
+command = "rm ~/a:b"
+expect  = { local = ["deletes ~/a:b"] }
+
+[[case]]
+name    = "locality is a fact the value node carries"
+command = "aws s3 cp ./build s3://bucket/path"
+# a remote word is neither absolute nor relative — those describe a path on
+# this machine, and resolving one against the cwd would produce nonsense
+expect  = { facts = [
+  "s3 literal",
+  "cp literal",
+  "./build relative",
+  "./build literal",
+  "s3://bucket/path literal",
+  "s3://bucket/path remote",
+] }

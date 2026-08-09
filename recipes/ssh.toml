@@ -1,7 +1,13 @@
-# ssh's remote command runs on ANOTHER machine, so `ssh host cat /etc/hosts` must
-# not be read as touching this one — issue #4 listed it explicitly. Only the
-# local files ssh itself opens are mapped; the positionals stay silent until the
-# `host` kind carries locality.
+# `ssh host cat /etc/hosts` reads a file — on ANOTHER machine. Issue #4 listed
+# it as a false positive, and the fix used to be silence: leave the positionals
+# unmapped and claim nothing.
+#
+# Silence was the right answer to the wrong question. The command really does
+# read `/etc/hosts`; what it does not do is read one *here*. So slot 0 is the
+# machine and the rest is a command, and those two statements together are what
+# make the payload a remote command: `cat`'s own recipe applies, its read edge
+# exists, and the edge is marked remote. The jail asks for local paths and gets
+# nothing — by decision now, not by omission.
 [[cmd]]
 name = "ssh"
 [cmd.flags]
@@ -12,3 +18,14 @@ name = "ssh"
 "-l" = { takes = true }
 "-L" = { takes = true }
 "-R" = { takes = true }
+"-J" = { takes = true }
+"-c" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "host"
+# the payload starts after the host, which is what `1+` says. `rest` would take
+# the hostname itself as the program to run.
+[[cmd.args]]
+slots = "1+"
+kind = "cmd"
+effect = ["exec"]

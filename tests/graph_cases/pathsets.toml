@@ -1,0 +1,69 @@
+name  = "one path or everything beneath it"
+issue = 13
+
+# `rm build` names a file; `rm -r build` names a tree, and a rule about
+# `build/**/*.o` has to be able to tell them apart. A set renders here with
+# `/**` when it reaches beneath its root.
+
+[[case]]
+name    = "no flag, no descent"
+command = "rm build"
+expect  = { local = ["deletes build"] }
+
+[[case]]
+name    = "the flag makes it a tree"
+command = "rm -rf build"
+expect  = { local = ["deletes build/**"] }
+
+[[case]]
+name    = "only the source of a copy descends"
+command = "cp -r src dst"
+expect  = { local = ["reads src/**", "writes dst", "creates dst"] }
+
+[[case]]
+name    = "find descends by definition, with no flag to look for"
+command = "find . -name '*.rs'"
+expect  = { local = ["reads ./**"] }
+
+[[case]]
+name    = "the local side of a recursive transfer is a tree"
+command = "aws s3 cp ./build s3://bucket --recursive"
+expect  = { local = ["reads ./build/**"], remote = [
+  "writes s3://bucket/**",
+  "creates s3://bucket/**",
+] }
+
+[[case]]
+name    = "and without the flag it is one path"
+command = "aws s3 cp ./build s3://bucket"
+expect  = { local = ["reads ./build"], remote = [
+  "writes s3://bucket",
+  "creates s3://bucket",
+] }
+
+[[case]]
+name    = "sync always descends"
+command = "aws s3 sync ./dist s3://bucket"
+expect  = { local = ["reads ./dist/**"], remote = [
+  "writes s3://bucket/**",
+  "creates s3://bucket/**",
+] }
+
+[[case]]
+# `--delete` removes what the destination has and the source does not, so a sync
+# DOWN can remove local files
+name    = "sync --delete deletes at the destination"
+command = "aws s3 sync s3://bucket ./dist --delete"
+expect  = { local = [
+  "writes ./dist/**",
+  "creates ./dist/**",
+  "deletes ./dist/**",
+], remote = ["reads s3://bucket/**"] }
+
+[[case]]
+name    = "scp -r"
+command = "scp -r ./dir user@host:/srv"
+expect  = { local = ["reads ./dir/**"], remote = [
+  "writes user@host:/srv/**",
+  "creates user@host:/srv/**",
+] }

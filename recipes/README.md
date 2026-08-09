@@ -43,8 +43,8 @@ effect = ["write", "create"]
 |---|---|
 | `name` | the program, matched on its basename (`/usr/bin/rm` matches `rm`) |
 | `subcommand` | only apply when the leading positionals match — `git rm` and `git log` share a binary and nothing else. Space-separated for a tree: `"s3 cp"` matches `aws s3 cp`, and the deepest matching entry wins |
-| `slots` | `all` · `first` · `last` · `except-last` · `rest` · a number |
-| `kind` | `none` · `path` · `cmd` — plus `pathset` `glob` `regex` `code` `url` `host` `container`, which validate but produce no edges yet |
+| `slots` | `all` · `first` · `last` · `except-last` · `rest` · `N+` · a number |
+| `kind` | `none` · `path` · `pathset` · `cmd` · `host` / `container` — plus `glob` `regex` `code` `url`, which validate but produce no edges yet |
 | `effect` | `read` · `write` · `delete` · `create` · `exec` — a set |
 | `when` | `{ with = [...], without = [...] }` — guards an entry on the flags present |
 | `[cmd.flags]` | per flag: `takes`, `kind`, `effect` |
@@ -65,14 +65,41 @@ scp host:/etc/hosts .                 the same shape, no scheme
 ```
 
 So no entry can declare it. Locality is a fact of the **word** — a `:` in a word
-that does not start at a filesystem root (`graph::locality_of`) — and a word that
-carries one produces no reference edges, because a reference edge is a claim
-about *this* machine. Map the slot for what the program does to it and let the
-argument say where it lives.
+that does not start at a filesystem root (`graph::locality_of`). Map the slot for
+what the program does to it and let the argument say where it lives.
+
+The reference edge exists either way: `aws s3 rm s3://bucket/key` really does
+delete a key, and the graph says so with the reference marked remote. Consumers
+that mean *this* machine ask for local references only. So an entry for a slot
+that is always remote in practice is still worth writing — it is what makes the
+silence a decision rather than an omission.
 
 The exemption for words starting with `/`, `~` or `.` is what keeps
 `/var/log/build:2024.log` a local path. The cost is silence on a relative name
 below the cwd that contains a colon and no leading `./`.
+
+## Saying that a program runs somewhere else
+
+`ssh host cat /etc/hosts` reads a file on another machine. A recipe says so by
+naming **a machine and a payload**:
+
+```toml
+[[cmd.args]]
+slots = "first"
+kind  = "host"      # or "container"
+[[cmd.args]]
+slots = "1+"        # the payload starts AFTER the host
+kind  = "cmd"
+effect = ["exec"]
+```
+
+Those two entries together already say the payload runs on that machine, so
+there is no third field to set and no way to write a recipe where they disagree.
+The payload is lowered as its own command, `cat`'s recipe applies to it, and
+every path it names is marked remote.
+
+`slots = "1+"` means "from slot 1 onward". `rest` is slot 0 onward, which is what
+`sudo` and `xargs` want and what would make ssh run the *hostname*.
 
 ## Two fields that look optional and are not
 

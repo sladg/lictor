@@ -107,9 +107,38 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
             .then(|| candidate.to_string())
     };
 
+    // Paths the graph knows about that `walk_words` never visits.
+    //
+    // The walk iterates the WORDS of each command, and a redirect target is not
+    // one: `echo x >> /etc/hosts` has no argument naming that file, so the jail
+    // never looked at it (#29). The graph does model it — a redirect is shell
+    // syntax that writes a file whatever the program is — and letting the old
+    // extractor's word list bound what the graph may say would keep the bug.
+    //
+    // These resolve against the base cwd rather than the cd-tracked one: a bare
+    // path list carries no position, so there is nothing to track it against.
+    // Absolute targets, which is what a jail escape looks like, are unaffected.
+    let unvisited = |seen: &[String], candidate_of: &dyn Fn(&str) -> Option<String>| {
+        let Some(known) = graph_paths.as_ref() else {
+            return Vec::new();
+        };
+        known
+            .iter()
+            .filter(|path| candidate_of(path).is_some() && !seen.iter().any(|s| s == *path))
+            .map(|path| normalize(path, cwd, &home))
+            .collect::<Vec<String>>()
+    };
+
     let decide = |candidate_of: &dyn Fn(&str) -> Option<String>| {
         let mut found: Vec<String> = Vec::new();
-        for (_, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
+        let mut seen: Vec<String> = Vec::new();
+        for (candidate, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
+            seen.push(candidate);
+            if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
+                found.push(resolved);
+            }
+        }
+        for resolved in unvisited(&seen, candidate_of) {
             if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
                 found.push(resolved);
             }
@@ -118,6 +147,8 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     };
 
     match source {
+        // the heuristic has no path list of its own, so `unvisited` finds
+        // nothing for it and the default is untouched
         JailPaths::Heuristic => decide(&heuristic),
         JailPaths::Graph => decide(&from_graph),
         // decide with the heuristic, but record what the graph would have said —
