@@ -18,6 +18,12 @@ it.** That is deliberate. Silence on an unmapped program is the honest failure
 direction, and it is the whole reason this directory exists instead of another
 heuristic. Adding a recipe is cheap; guessing is not.
 
+Full coverage is **not** the goal. Local and project-specific scripts are
+expected to stay unmapped: their interfaces change without notice and are known
+only to their author, so a recipe for one is a guess with a longer shelf life
+than the script. Map the tools many people run and whose interfaces are
+documented.
+
 ## Format
 
 ```toml
