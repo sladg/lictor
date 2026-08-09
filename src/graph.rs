@@ -70,14 +70,15 @@ pub enum Privilege {
     Elevated,
 }
 
-/// Whether a command's arguments name things on *this* filesystem.
+/// Whether something names a filesystem on *this* machine.
 ///
-/// Populated by the locality map in sub-task 5. Stage 1 has no map, so
-/// everything is `Local` — the field exists to fix the shape, not to be trusted
-/// yet. Note this is the fact `walk_words` needs in order to stop flagging
-/// `kubectl exec … -- cat /etc/config` as a local path escape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// On a [`ValueNode`] this is decided lexically, by [`locality_of`]. On a
+/// [`CommandNode`] it is still always `Local`: a command that runs elsewhere
+/// (`kubectl exec`, `ssh host …`) needs its payload lowered as its own command
+/// first, which nothing does yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Locality {
+    #[default]
     Local,
     Remote,
 }
@@ -118,6 +119,9 @@ pub struct ValueFacts {
     pub literal: bool,
     /// contains an expansion or substitution, so the value is not knowable
     pub dynamic: bool,
+    /// which machine's filesystem the word names, from its prefix alone —
+    /// `s3://bucket/key` and `host:/tmp` are somewhere else
+    pub locality: Locality,
 }
 
 #[derive(Debug, Clone)]
@@ -1022,6 +1026,44 @@ fn facts_for(raw: &str, text: Option<&str>) -> ValueFacts {
         glob: text.is_some_and(|t| t.contains(['*', '?'])) || raw.contains('['),
         literal: !dynamic,
         dynamic,
+        locality: locality_of(value),
+    }
+}
+
+/// Which machine a word names a path on, from its prefix alone.
+///
+/// `aws s3 cp`, `kubectl cp` and `scp` all mix local and remote references in
+/// **one positional list**, distinguished only by a prefix:
+///
+/// ```text
+/// aws s3 cp ./build s3://bucket/path   slot 0 here, slot 1 elsewhere
+/// aws s3 cp s3://bucket/path ./build   the reverse
+/// scp host:/etc/hosts .                the same shape, no scheme
+/// ```
+///
+/// So the discriminator is syntactic and shared: a location prefix is a `:` in a
+/// word that does not begin at a filesystem root. `s3://bucket/key`,
+/// `user@host:/tmp`, `pod:/etc` and kubectl's `ns/pod:/etc` all have one.
+///
+/// The `/`, `~` and `.` exemption is what keeps this from eating real paths: a
+/// colon is legal in a filename, and `/var/log/build:2024.log` must stay local —
+/// losing it would be a jail escape, the one direction this codebase treats as
+/// dangerous. Every word that can name something *outside* the current directory
+/// starts with one of those three characters, so the exemption costs nothing
+/// that matters.
+///
+/// The residue is a relative name below the cwd carrying a colon and no leading
+/// `./` (`notes:2024.txt`, `logs/build:1`), read here as remote. That direction
+/// costs **silence** on a file inside the working directory. The loud direction
+/// would be claiming `s3://bucket/key` is a path on this disk — the #4 shape
+/// this design exists to remove.
+pub fn locality_of(word: &str) -> Locality {
+    if word.starts_with(['/', '~', '.']) {
+        return Locality::Local;
+    }
+    match word.contains(':') {
+        true => Locality::Remote,
+        false => Locality::Local,
     }
 }
 
@@ -1126,9 +1168,9 @@ fn apply_program(
     //
     // So: resolve the bare entry first for its flags, use those to skip flag
     // arguments, and only then decide which map applies.
-    let global = maps.lookup(name, None);
-    let first_positional = first_positional_after_flags(graph, words, global);
-    let Some(program) = maps.lookup(name, first_positional.as_deref()) else {
+    let global = maps.lookup(name, &[]);
+    let leading = leading_positionals(graph, words, global);
+    let Some(program) = maps.lookup(name, &leading) else {
         // no map, no claims — the inverted default
         return;
     };
@@ -1168,8 +1210,9 @@ fn apply_program(
         positionals.push(*id);
     }
 
-    // 2. a subcommand occupies slot 0 without being an argument to anything
-    let offset = usize::from(program.subcommand.is_some());
+    // 2. the subcommand occupies the leading slots without being an argument to
+    //    anything — two of them for `aws s3 cp`
+    let offset = program.subcommand_depth();
     let slotted: Vec<NodeId> = positionals.iter().skip(offset).copied().collect();
 
     // 3. the payload of a wrapper is another program, mapped by its own rules
@@ -1225,15 +1268,19 @@ fn apply_program(
     }
 }
 
-/// The first positional that is not some flag's argument.
+/// The leading positionals that are not some flag's argument — the words a
+/// subcommand path is matched against.
 ///
 /// Uses the program's global flags, which is the only way to tell a subcommand
-/// from a value the shell put in the same position.
-fn first_positional_after_flags(
+/// from a value the shell put in the same position. Returns a run rather than a
+/// single word because a subcommand can be a tree: `aws s3 cp` needs two words
+/// resolved before the right entry can be chosen, and `git rm` needs one.
+fn leading_positionals(
     graph: &Graph,
     words: &[(NodeId, bool)],
     global: Option<&crate::cmdmap::Program>,
-) -> Option<String> {
+) -> Vec<String> {
+    let mut out = Vec::new();
     let mut skip_next = false;
     for (id, is_flag) in words {
         if skip_next {
@@ -1246,11 +1293,15 @@ fn first_positional_after_flags(
                 .is_some_and(|f| f.takes);
             continue;
         }
-        if let Node::Value(v) = &graph.nodes[*id] {
-            return v.text.clone();
-        }
+        // a dynamic word is a subcommand nobody can name, and every word after
+        // it sits at an unknown depth — stop rather than match the wrong entry
+        let Node::Value(v) = &graph.nodes[*id] else {
+            break;
+        };
+        let Some(text) = v.text.clone() else { break };
+        out.push(text);
     }
-    None
+    out
 }
 
 /// A `PathSet` node for the path `value` names, sharing its spans so an edit
@@ -1259,6 +1310,11 @@ fn path_set_node(graph: &mut Graph, value: NodeId, recursive: bool) -> Option<No
     let Node::Value(node) = &graph.nodes[value] else {
         return None;
     };
+    // a set rooted somewhere else is not a set of paths on this disk —
+    // `aws s3 cp ./build s3://bucket --recursive` has one of each
+    if node.facts.locality == Locality::Remote {
+        return None;
+    }
     // a dynamic word names a set nobody can enumerate, so there is nothing to
     // build a root from — the existing abstain-rather-than-guess convention
     let root = node.text.clone()?;
@@ -1305,6 +1361,16 @@ fn emit_effects(
     // only kinds that name something the graph can point at produce edges; the
     // rest are recorded in the map for later stages
     if !kind.is_path() {
+        return;
+    }
+    // A reference edge is a claim about *this* filesystem, so a word carrying a
+    // location prefix gets none. This is what lets one recipe cover a positional
+    // list that mixes both sides — `aws s3 cp ./build s3://bucket` reads the
+    // local tree and says nothing about the bucket, and the reverse spelling
+    // resolves the other way round without a second entry.
+    if let Node::Value(node) = &graph.nodes[value]
+        && node.facts.locality == Locality::Remote
+    {
         return;
     }
     for effect in effects {
@@ -1510,6 +1576,48 @@ mod tests {
         assert_eq!(facts.len(), 2);
         assert!(facts.iter().any(|f| f.absolute));
         assert!(facts.iter().any(|f| f.relative));
+    }
+
+    #[test]
+    fn a_location_prefix_makes_a_word_remote() {
+        // the discriminator shared by `aws s3 cp`, `kubectl cp` and `scp`: a
+        // `:` in a word that does not begin at a filesystem root
+        for word in [
+            "s3://bucket/key",
+            "host:/tmp/x",
+            "user@host:notes.txt",
+            "pod:/etc/config",
+            "ns/pod:/etc/config",
+        ] {
+            assert_eq!(locality_of(word), Locality::Remote, "{word}");
+        }
+        // ...and everything that could name something outside this directory
+        // starts with a separator or a dot, so it cannot be mistaken for one
+        for word in [
+            "/var/log/a:b",
+            "./a:b",
+            "../a:b",
+            "~/a:b",
+            "src/main.rs",
+            "README.md",
+            "-",
+        ] {
+            assert_eq!(locality_of(word), Locality::Local, "{word}");
+        }
+    }
+
+    #[test]
+    fn locality_is_a_fact_the_value_node_carries() {
+        let g = lower("aws s3 cp ./build s3://bucket/path");
+        let remote: Vec<_> = g
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Value(v) if v.facts.locality == Locality::Remote => v.text.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remote, ["s3://bucket/path"]);
     }
 
     #[test]

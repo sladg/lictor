@@ -49,8 +49,13 @@ pub struct Maps {
 #[serde(deny_unknown_fields)]
 pub struct Program {
     pub name: String,
-    /// when set, this map only applies if the first positional matches
-    /// (`git rm` behaves nothing like `git log`)
+    /// when set, this map only applies if the leading positionals match
+    /// (`git rm` behaves nothing like `git log`).
+    ///
+    /// Space-separated for a nested tree: `subcommand = "s3 cp"` matches
+    /// `aws s3 cp`. Depth matters because the alternative is guessing a slot
+    /// number — `aws s3 cp SRC DST` and `aws s3 rm KEY` share `s3` and agree
+    /// about nothing after it.
     #[serde(default)]
     pub subcommand: Option<String>,
     #[serde(default)]
@@ -255,6 +260,18 @@ impl Maps {
             if program.name.is_empty() {
                 return Err("command map: an entry has an empty `name`".to_string());
             }
+            // a subcommand path is compared word for word and, as a string, for
+            // duplicates — so `"s3  cp"` and `"s3 cp"` would be two entries for
+            // one subcommand that never compare equal
+            if let Some(sub) = &program.subcommand
+                && (sub.is_empty() || *sub != sub.split_whitespace().collect::<Vec<_>>().join(" "))
+            {
+                return Err(format!(
+                    "command map: `{}` has the subcommand path `{sub}` — write it as single \
+                     space-separated words (`s3 cp`)",
+                    program.name
+                ));
+            }
             // an `exec` effect on anything but a nested command is a map bug:
             // the graph would have nothing to point the edge at
             for arg in &program.args {
@@ -292,15 +309,20 @@ impl Maps {
         Ok(())
     }
 
-    /// The map for a program, preferring a subcommand-specific entry.
+    /// The map for a program, preferring the most specific subcommand entry.
     ///
     /// `git rm` and `git log` share a binary and share nothing else, so a
-    /// subcommand entry always wins over the bare one.
-    pub fn lookup(&self, program: &str, first_positional: Option<&str>) -> Option<&Program> {
+    /// subcommand entry always wins over the bare one. `leading` is the
+    /// program's first few positionals, flag arguments already removed; the
+    /// entry whose subcommand path is the **longest** prefix of them wins, so
+    /// `aws s3 cp` beats a hypothetical `aws s3`.
+    pub fn lookup(&self, program: &str, leading: &[String]) -> Option<&Program> {
         let name = basename(program);
-        let specific = self.programs.iter().find(|p| {
-            p.name == name && p.subcommand.is_some() && p.subcommand.as_deref() == first_positional
-        });
+        let specific = self
+            .programs
+            .iter()
+            .filter(|p| p.name == name && p.matches_subcommand(leading))
+            .max_by_key(|p| p.subcommand_depth());
         specific.or_else(|| {
             self.programs
                 .iter()
@@ -338,6 +360,32 @@ impl Program {
         })
     }
 
+    /// The words of this entry's subcommand path — `["s3", "cp"]` for
+    /// `subcommand = "s3 cp"`, empty for the bare entry.
+    pub fn subcommand_words(&self) -> Vec<&str> {
+        self.subcommand
+            .as_deref()
+            .map(|s| s.split(' ').collect())
+            .unwrap_or_default()
+    }
+
+    /// How many positionals the subcommand itself occupies. They are not
+    /// arguments to anything, so every slot number is counted after them.
+    pub fn subcommand_depth(&self) -> usize {
+        self.subcommand_words().len()
+    }
+
+    /// Whether this entry's subcommand path is a prefix of `leading`.
+    ///
+    /// The bare entry (no subcommand) matches nothing here — it is the fallback
+    /// `lookup` reaches for only when no specific entry applies.
+    pub fn matches_subcommand(&self, leading: &[String]) -> bool {
+        let words = self.subcommand_words();
+        !words.is_empty()
+            && words.len() <= leading.len()
+            && words.iter().zip(leading).all(|(w, got)| *w == got)
+    }
+
     /// The entry that swallows the rest of the line as a nested command, if any.
     pub fn nested_command(&self) -> Option<&Arg> {
         self.args
@@ -353,6 +401,10 @@ fn basename(program: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words<const N: usize>(raw: [&str; N]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
 
     #[test]
     fn every_shipped_recipe_parses_and_validates() {
@@ -419,22 +471,66 @@ effect = ["delete"]
 "#,
         )
         .expect("parses");
-        let bare = maps.lookup("git", Some("log")).expect("bare git");
+        let bare = maps.lookup("git", &words(["log"])).expect("bare git");
         assert!(bare.subcommand.is_none());
-        let specific = maps.lookup("git", Some("rm")).expect("git rm");
+        let specific = maps.lookup("git", &words(["rm"])).expect("git rm");
         assert_eq!(specific.subcommand.as_deref(), Some("rm"));
+    }
+
+    #[test]
+    fn a_nested_subcommand_beats_a_shallower_one() {
+        // `aws s3 cp SRC DST` and `aws s3 rm KEY` share `s3` and agree about
+        // nothing after it, so the deepest matching entry has to win
+        let maps = Maps::parse(
+            r#"
+[[cmd]]
+name = "aws"
+
+[[cmd]]
+name = "aws"
+subcommand = "s3"
+
+[[cmd]]
+name = "aws"
+subcommand = "s3 cp"
+"#,
+        )
+        .expect("parses");
+        let deep = maps.lookup("aws", &words(["s3", "cp"])).expect("aws s3 cp");
+        assert_eq!(deep.subcommand.as_deref(), Some("s3 cp"));
+        assert_eq!(deep.subcommand_depth(), 2);
+        // a sibling with no entry of its own falls back to the shallower map,
+        // not to the bare one
+        let shallow = maps.lookup("aws", &words(["s3", "ls"])).expect("aws s3");
+        assert_eq!(shallow.subcommand.as_deref(), Some("s3"));
+        // and a subcommand tree nobody mapped falls all the way back
+        assert!(
+            maps.lookup("aws", &words(["ec2", "describe-instances"]))
+                .expect("bare aws")
+                .subcommand
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_subcommand_path_must_be_written_in_single_spaces() {
+        // it is compared word for word AND as a string for duplicates, so
+        // `"s3  cp"` would be a second entry for one subcommand
+        let err = Maps::parse("[[cmd]]\nname = \"aws\"\nsubcommand = \"s3  cp\"\n")
+            .expect_err("must reject");
+        assert!(err.contains("space-separated"), "{err}");
     }
 
     #[test]
     fn lookup_uses_the_basename() {
         let maps = Maps::parse("[[cmd]]\nname = \"rm\"\n").expect("parses");
-        assert!(maps.lookup("/usr/bin/rm", None).is_some());
+        assert!(maps.lookup("/usr/bin/rm", &[]).is_some());
     }
 
     #[test]
     fn an_unmapped_program_has_no_map() {
         let maps = Maps::builtin().unwrap();
-        assert!(maps.lookup("some-tool-nobody-mapped", None).is_none());
+        assert!(maps.lookup("some-tool-nobody-mapped", &[]).is_none());
     }
 
     #[test]

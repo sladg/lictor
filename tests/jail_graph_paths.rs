@@ -86,6 +86,29 @@ fn an_unmapped_program_is_invisible_to_the_graph_source() {
 }
 
 #[test]
+fn a_transfer_is_judged_on_its_local_side_only() {
+    // Issue #25, through the consumer that acts on it. `aws s3 cp` and `scp`
+    // name both machines in one positional list, and the jail is a claim about
+    // this one: the local side is a real escape, the bucket key and the far end
+    // of the ssh connection are not paths here at all.
+    for (command, expected) in [
+        ("scp /etc/shadow host:/tmp/x", "/etc/shadow"),
+        ("scp host:/etc/shadow /tmp/x", "/tmp/x"),
+        ("aws s3 cp /etc/shadow s3://bucket/k", "/etc/shadow"),
+        ("aws s3 sync s3://bucket /etc/cron.d", "/etc/cron.d"),
+    ] {
+        assert_eq!(
+            violations("graph", command),
+            [expected],
+            "{command:?} must be judged on its local side alone"
+        );
+    }
+    // and a transfer with no local side at all is silent, rather than claiming
+    // a bucket key is a file here
+    assert!(violations("graph", "aws s3 rm s3://bucket/key").is_empty());
+}
+
+#[test]
 fn an_in_project_path_is_flagged_by_neither() {
     for mode in ["heuristic", "graph", "compare"] {
         assert!(violations(mode, "cat README.md").is_empty());

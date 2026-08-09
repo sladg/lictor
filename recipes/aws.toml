@@ -1,0 +1,179 @@
+# `aws s3 cp/sync/mv/rm` is the case worth having: local and remote references
+# share ONE positional list, told apart only by the `s3://` prefix.
+#
+#   aws s3 cp ./build s3://bucket/path --recursive   slot 0 here, slot 1 elsewhere
+#   aws s3 cp s3://bucket/path ./build               the reverse
+#   aws s3 rm s3://bucket/key                        deletes nothing local
+#
+# No entry below says which side is which, and none can: the same slot is local
+# in one spelling and remote in the other. Locality is a fact of the *word*
+# (`graph::locality_of`), so one entry covers both directions and a bucket URI
+# never becomes a claim about this disk.
+#
+# Every value-taking flag is listed even where it carries nothing interesting,
+# because `takes` decides the slot numbers everything else is keyed to. Where a
+# flag's argument is OPTIONAL (`--sse`, `--request-payer`) the format cannot say
+# so; those are written `takes = true`, which loses an edge on the spelling that
+# omits the value and never invents one. Guessing the other way turns
+# `--sse AES256` into a positional and claims a read on a file called `AES256`.
+
+# The bare entry carries the GLOBAL flags. They have to be known before the
+# subcommand can be found at all: in `aws --profile prod s3 cp a b` the first
+# word is `prod`, not `s3`.
+[[cmd]]
+name = "aws"
+[cmd.flags]
+"--profile" = { takes = true }
+"--region" = { takes = true }
+"--output" = { takes = true }
+"--query" = { takes = true }
+"--endpoint-url" = { takes = true }
+"--color" = { takes = true }
+"--page-size" = { takes = true }
+"--max-items" = { takes = true }
+"--starting-token" = { takes = true }
+"--cli-read-timeout" = { takes = true }
+"--cli-connect-timeout" = { takes = true }
+"--cli-binary-format" = { takes = true }
+# `file://…` and `fileb://…` name a local file, but the value may also be JSON
+# text inline. The word is not a path on its own, so it is bound and left at
+# that rather than read as one.
+"--cli-input-json" = { takes = true }
+"--cli-input-yaml" = { takes = true }
+"--ca-bundle" = { takes = true, kind = "path", effect = ["read"] }
+"--debug" = { takes = false }
+"--no-verify-ssl" = { takes = false }
+"--no-paginate" = { takes = false }
+"--no-cli-pager" = { takes = false }
+"--no-sign-request" = { takes = false }
+
+# `aws s3 cp SRC DST` — exactly two positionals, either of which may be remote.
+[[cmd]]
+name = "aws"
+subcommand = "s3 cp"
+[cmd.flags]
+"--recursive" = { takes = false }
+"--dryrun" = { takes = false }
+"--quiet" = { takes = false }
+"--follow-symlinks" = { takes = false }
+"--no-follow-symlinks" = { takes = false }
+"--only-show-errors" = { takes = false }
+"--no-progress" = { takes = false }
+"--exclude" = { takes = true, kind = "glob" }
+"--include" = { takes = true, kind = "glob" }
+"--acl" = { takes = true }
+"--storage-class" = { takes = true }
+"--content-type" = { takes = true }
+"--cache-control" = { takes = true }
+"--content-disposition" = { takes = true }
+"--content-encoding" = { takes = true }
+"--content-language" = { takes = true }
+"--expires" = { takes = true }
+"--metadata" = { takes = true }
+"--metadata-directive" = { takes = true }
+"--expected-size" = { takes = true }
+"--website-redirect" = { takes = true }
+"--grants" = { takes = true }
+"--sse" = { takes = true }
+"--sse-c" = { takes = true }
+"--sse-c-key" = { takes = true }
+"--sse-kms-key-id" = { takes = true }
+"--request-payer" = { takes = true }
+# `--recursive` makes the argument a TREE rather than one file, which is the
+# difference between "reads build" and "reads build/**"
+[[cmd.args]]
+slots = "first"
+kind = "pathset"
+effect = ["read"]
+recursive_with = ["--recursive"]
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+effect = ["write", "create"]
+recursive_with = ["--recursive"]
+
+# `aws s3 mv SRC DST` — a move reads AND deletes its source, same as `mv`.
+[[cmd]]
+name = "aws"
+subcommand = "s3 mv"
+[cmd.flags]
+"--recursive" = { takes = false }
+"--dryrun" = { takes = false }
+"--quiet" = { takes = false }
+"--only-show-errors" = { takes = false }
+"--exclude" = { takes = true, kind = "glob" }
+"--include" = { takes = true, kind = "glob" }
+"--acl" = { takes = true }
+"--storage-class" = { takes = true }
+"--metadata" = { takes = true }
+"--metadata-directive" = { takes = true }
+"--sse" = { takes = true }
+"--request-payer" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "pathset"
+effect = ["read", "delete"]
+recursive_with = ["--recursive"]
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+effect = ["write", "create"]
+recursive_with = ["--recursive"]
+
+# `aws s3 sync SRC DST` — always a tree, with no flag needed.
+[[cmd]]
+name = "aws"
+subcommand = "s3 sync"
+[cmd.flags]
+"--delete" = { takes = false }
+"--dryrun" = { takes = false }
+"--quiet" = { takes = false }
+"--size-only" = { takes = false }
+"--exact-timestamps" = { takes = false }
+"--only-show-errors" = { takes = false }
+"--exclude" = { takes = true, kind = "glob" }
+"--include" = { takes = true, kind = "glob" }
+"--acl" = { takes = true }
+"--storage-class" = { takes = true }
+"--metadata" = { takes = true }
+"--sse" = { takes = true }
+"--request-payer" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "pathset"
+recursive = true
+effect = ["read"]
+# `--delete` removes what the destination has and the source does not, so a sync
+# down onto a local tree is a delete over that whole tree
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+recursive = true
+effect = ["write", "create"]
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+recursive = true
+effect = ["write", "create", "delete"]
+when = { with = ["--delete"] }
+
+# `aws s3 rm KEY` — a bucket key in every real spelling, so the prefix makes this
+# silent. It is mapped anyway because the entry is what makes the silence a
+# *decision*: the slot is what this deletes, and locality is what says the
+# deletion is not here.
+[[cmd]]
+name = "aws"
+subcommand = "s3 rm"
+[cmd.flags]
+"--recursive" = { takes = false }
+"--dryrun" = { takes = false }
+"--quiet" = { takes = false }
+"--only-show-errors" = { takes = false }
+"--exclude" = { takes = true, kind = "glob" }
+"--include" = { takes = true, kind = "glob" }
+"--request-payer" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "pathset"
+effect = ["delete"]
+recursive_with = ["--recursive"]

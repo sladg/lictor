@@ -1,7 +1,11 @@
 # scp mixes local and remote paths in the same positional list (`scp a.txt
-# host:/tmp/`), and nothing here can tell them apart yet. Only ssh's own local
-# files are mapped; the transfer arguments stay silent rather than claiming a
-# remote path is local.
+# host:/tmp/`), which is the same shape as `aws s3 cp` and `kubectl cp`. The
+# discriminator is the word itself: `host:/tmp` and `user@host:x` carry a
+# location prefix, `./a.txt` and `/etc/hosts` cannot. So one pair of entries
+# covers both directions, and the remote side simply produces no edges.
+#
+#   scp a.txt host:/tmp/       reads a.txt, says nothing about /tmp
+#   scp host:/etc/hosts .      writes ., says nothing about /etc/hosts
 [[cmd]]
 name = "scp"
 [cmd.flags]
@@ -9,3 +13,18 @@ name = "scp"
 "-F" = { takes = true, kind = "path", effect = ["read"] }
 "-o" = { takes = true }
 "-P" = { takes = true }
+"-c" = { takes = true }
+"-J" = { takes = true }
+"-S" = { takes = true }
+"-l" = { takes = true }
+"-r" = { takes = false }
+[[cmd.args]]
+slots = "except-last"
+kind = "pathset"
+effect = ["read"]
+recursive_with = ["-r"]
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+effect = ["write", "create"]
+recursive_with = ["-r"]

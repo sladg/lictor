@@ -251,6 +251,94 @@ fn a_subcommand_selects_its_own_map() {
 }
 
 #[test]
+fn a_nested_subcommand_selects_its_own_map() {
+    // `aws s3 cp SRC DST` and `aws s3 rm KEY` share `s3` and agree about nothing
+    // after it. One level of subcommand cannot tell them apart, and picking a
+    // slot number that suits one is wrong for the other.
+    assert_eq!(
+        refs("aws s3 cp ./a.txt ./b.txt"),
+        ["reads ./a.txt", "writes ./b.txt", "creates ./b.txt"]
+    );
+    assert_eq!(refs("aws s3 rm ./a.txt"), ["deletes ./a.txt"]);
+    // a global flag still cannot hide the subcommand behind it — now for two
+    // words rather than one
+    assert_eq!(
+        refs("aws --profile prod --region us-east-1 s3 cp ./a.txt s3://b/k"),
+        ["reads ./a.txt"]
+    );
+    // a subcommand tree nobody mapped claims nothing
+    assert!(refs("aws ec2 describe-instances --output json").is_empty());
+    assert!(refs("aws s3 ls s3://bucket").is_empty());
+}
+
+#[test]
+fn locality_resolves_each_side_of_one_positional_list() {
+    // Issue #25. `aws s3 cp`, `kubectl cp` and `scp` all mix local and remote
+    // references in ONE positional list, told apart only by a prefix. The same
+    // slot is local in one spelling and remote in the other, so no map entry can
+    // say which — the word has to carry it.
+    assert_eq!(
+        refs("aws s3 cp ./build s3://bucket/path"),
+        ["reads ./build"]
+    );
+    assert_eq!(
+        refs("aws s3 cp s3://bucket/path ./build"),
+        ["writes ./build", "creates ./build"]
+    );
+    assert_eq!(
+        refs("aws s3 mv ./a.txt s3://bucket/a.txt"),
+        ["reads ./a.txt", "deletes ./a.txt"]
+    );
+    // `aws s3 rm s3://bucket/key` deletes nothing here, and the recipe maps the
+    // slot as a delete — so the silence is locality's doing, not an absent entry
+    assert!(refs("aws s3 rm s3://bucket/key").is_empty());
+
+    // the same shape without a scheme, over ssh
+    assert_eq!(refs("scp a.txt host:/tmp/"), ["reads a.txt"]);
+    assert_eq!(refs("scp host:/etc/hosts ."), ["writes .", "creates ."]);
+    assert_eq!(
+        refs("scp user@host:/etc/shadow /tmp/x"),
+        ["writes /tmp/x", "creates /tmp/x"]
+    );
+}
+
+#[test]
+fn a_colon_after_a_separator_is_still_a_local_path() {
+    // the discriminator is a `:` BEFORE the first `/`. A path that merely
+    // contains one is on this disk, and losing it would be a jail escape rather
+    // than a false positive.
+    assert_eq!(
+        refs("cp ./a:b.txt /tmp/out"),
+        ["reads ./a:b.txt", "writes /tmp/out", "creates /tmp/out"]
+    );
+    assert_eq!(refs("rm /var/log/a:b"), ["deletes /var/log/a:b"]);
+    assert_eq!(refs("rm ~/a:b"), ["deletes ~/a:b"]);
+}
+
+#[test]
+fn recursive_makes_the_local_side_a_path_set() {
+    // #25's second requirement: `--recursive` names a tree, and a rule about
+    // `build/**` has to be able to see the difference
+    assert_eq!(
+        refs("aws s3 cp ./build s3://bucket --recursive"),
+        ["reads ./build/**"]
+    );
+    assert_eq!(refs("aws s3 cp ./build s3://bucket"), ["reads ./build"]);
+    // sync always descends, with no flag to look for
+    assert_eq!(refs("aws s3 sync ./dist s3://bucket"), ["reads ./dist/**"]);
+    // and `--delete` on a sync DOWN removes local files the bucket does not have
+    assert_eq!(
+        refs("aws s3 sync s3://bucket ./dist --delete"),
+        ["writes ./dist/**", "creates ./dist/**", "deletes ./dist/**"]
+    );
+    assert_eq!(
+        refs("aws s3 sync s3://bucket ./dist"),
+        ["writes ./dist/**", "creates ./dist/**"]
+    );
+    assert_eq!(refs("scp -r ./dir user@host:/srv"), ["reads ./dir/**"]);
+}
+
+#[test]
 fn a_key_value_tool_claims_no_paths() {
     // kv's arguments are KEYS, and a key is free-form — `kv get
     // config/db/password` and `kv set /etc/thing v` name nothing on disk. It is
@@ -321,6 +409,8 @@ fn applying_maps_does_not_disturb_the_round_trip() {
         "sudo rm -rf /etc/x",
         "cp a b c/",
         "git rm x.rs",
+        "aws s3 cp ./build s3://bucket/path --recursive",
+        "scp -r host:/etc/ssh ./backup",
         "cat <<EOF | grep secret\nbody\nEOF",
     ] {
         let g = graph::lower_with_maps(src, &maps);

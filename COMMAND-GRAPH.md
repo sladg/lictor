@@ -221,12 +221,50 @@ true` is for arguments that always descend.
 `PathSetNode` wraps `globs::PathSet` rather than restating its four fields — the
 same values declared twice is how the two drift.
 
-### Known format gaps
+### Locality is a fact of the word, not of the slot
 
-**Nested subcommands.** `subcommand` matches one level, so `kv db set directory
-<name> <path>` cannot be targeted — the entry would have to guess a slot number
-that is right for that form and wrong for `db ls`, `db rm`, `db backup` and `db
-restore`. The recipe claims nothing there rather than claim the wrong thing.
+`aws s3 cp`, `kubectl cp` and `scp` all put local and remote references in **one
+positional list**:
+
+    aws s3 cp ./build s3://bucket/path    slot 0 here, slot 1 elsewhere
+    aws s3 cp s3://bucket/path ./build    the reverse
+    scp host:/etc/hosts .                 the same shape, no scheme
+
+The same slot is local in one spelling and remote in the other, so a recipe
+field could not express it — which is why `graph::locality_of` reads it off the
+argument instead. A location prefix is a `:` in a word that does not begin at a
+filesystem root, and a word carrying one produces **no reference edges**, because
+a reference edge is a claim about this machine's filesystem.
+
+That gives one entry per slot covering both directions, and it is what makes
+`aws s3 rm s3://bucket/key` silent *by decision* rather than by omission: the
+recipe does say the slot is what the command deletes.
+
+The `/`, `~` and `.` exemption is load-bearing in the other direction. A colon is
+legal in a filename, and `/var/log/build:2024.log` has to stay local — losing it
+would be a jail escape, which is the direction this codebase treats as dangerous.
+Every word that can name something outside the current directory starts with one
+of those three characters, so the exemption costs only the case in *Accepted
+gaps* below.
+
+### Nested subcommands
+
+`subcommand` is a **path**, written space-separated: `subcommand = "s3 cp"`
+matches `aws s3 cp`, and the deepest entry whose path prefixes the leading
+positionals wins. It occupies that many slots, so every slot number is counted
+after it.
+
+The alternative was guessing a slot number. `aws s3 cp SRC DST` and `aws s3 rm
+KEY` share `s3` and agree about nothing after it, so a single-level `s3` entry is
+right for one form and wrong for the other — and being wrong here does not mean
+saying nothing, it means pointing an effect at the wrong word.
+
+Resolving a path rather than a word needs the leading positionals *before* the
+map is chosen, which is why `leading_positionals` returns a run and stops at the
+first dynamic word: a subcommand nobody can name puts every word after it at an
+unknown depth.
+
+### Known format gaps
 
 **Global flags are resolved in two passes.** Finding the subcommand needs to know
 which flags consume the next word, because `git -c core.pager=x rm f` puts the
@@ -238,9 +276,10 @@ first for its flags, and subcommand entries inherit them.
 ### What is deferred
 
 The issue's format also lists `[cmd.kv]` (`dd if=/of=`) and richer slot binding.
-Those are not implemented. `pathset`, `glob`, `regex`, `code`, `url`, `host` and
-`container` parse and validate but produce no edges — `pathset` needs sub-task 6's
-`selects()` and the glob∩glob matcher.
+Those are not implemented. `glob`, `regex`, `code`, `url`, `host` and `container`
+parse and validate but produce no edges. `container` is the one that would carry
+weight: it needs a command's payload lowered as its own command before
+`kubectl exec … -- cat /etc/config` can be modelled as anything but silence.
 
 Nothing about a wrapper's payload creates a `Command` node yet, so a rewrite
 still cannot target the inner program. That needs the payload lowered as its own
@@ -385,9 +424,10 @@ edge in sub-task 5 rather than a second phantom command.
 - **No argument maps**, so no reference edges and no `PathSet` population —
   sub-tasks 5 and 6. The node and edge kinds exist so callers can match
   exhaustively.
-- **`Locality` is always `Local`** — the field fixes the shape; the locality map
-  that makes `kubectl exec … -- cat /etc/config` a non-local reference is
-  sub-task 5.
+- **`Locality` on a `Command` is always `Local`** — a whole command that runs
+  elsewhere (`kubectl exec`, `ssh host …`) needs its payload lowered as its own
+  command first, which nothing does yet. `ValueFacts::locality` *is* populated;
+  see below.
 - **No `Extraction`/`Command` view over the graph** — sub-task 4. Every existing
   module still uses `bash::extract` untouched.
 - **Compound constructs are not modelled semantically.** `if`, `for`, `while`,
@@ -404,6 +444,10 @@ defects to be fixed later:
 - **Pattern-vs-pattern silence.** A rule glob against a command glob with no
   concrete side yields no witness, so no deny. Accepted and expected.
 - **Dynamic paths.** `cat $TARGET` has no knowable value; it asks.
+- **A relative name carrying a colon.** `cat notes:2024.txt` and `cat
+  logs/build:1` are read as remote and produce nothing. The path is below the
+  working directory, so it is inside the jail anyway; the alternative was
+  claiming `s3://bucket/key` is a file on this disk.
 - **Unenumerated secrets.** A rule can only protect paths someone named.
 
 ## Prior art
