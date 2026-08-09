@@ -417,6 +417,35 @@ impl Graph {
             .map(|(_, id)| *id)
     }
 
+    /// Every path this command line references, according to the recipes.
+    ///
+    /// The inverted default made concrete: a word is a path because a reviewed
+    /// recipe said so, not because it starts with `/`. A program with no recipe
+    /// contributes nothing, which is why an unmapped command cannot produce a
+    /// false positive here.
+    ///
+    /// Returns the text as written. Resolution — `~`, `..`, the cd-tracked base
+    /// — stays with the caller, which already does it.
+    pub fn referenced_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for edge in &self.edges {
+            if !matches!(
+                edge.kind,
+                EdgeKind::Reads | EdgeKind::Writes | EdgeKind::Deletes | EdgeKind::Creates
+            ) {
+                continue;
+            }
+            match self.node(edge.to) {
+                Node::Value(value) => out.extend(value.text.clone()),
+                Node::PathSet(set) => out.extend(set.set.roots.iter().cloned()),
+                _ => {}
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Byte count covered by owned segments — the completeness half of P1.
     /// `emit` alone only proves the segments are ordered and non-overlapping;
     /// a lowering that dropped every word would still round-trip.

@@ -182,6 +182,18 @@ pub struct MinifyRule {
     pub allow: bool,
 }
 
+/// Where the jail's notion of "this word is a path" comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JailPaths {
+    /// the shape of the word — what lictor has always done, and what #4 keeps
+    /// being filed against
+    Heuristic,
+    /// only what a reviewed recipe says is a path
+    Graph,
+    /// both, deciding with the heuristic and recording the difference
+    Compare,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -204,6 +216,15 @@ pub struct Settings {
     pub strip_program_paths: Option<Action>,
     #[serde(default)]
     pub bin_dirs: Option<Vec<String>>,
+    // where the jail gets its idea of "this word is a path":
+    //   heuristic (default) — the shape of the word, as always
+    //   graph               — only what a reviewed recipe says is a path
+    //   compare             — run both, decide with the heuristic, record the
+    //                         disagreements in the audit log
+    // `compare` exists so the switch can be judged against real usage before it
+    // changes anything. See docs/features/jail.md.
+    #[serde(default)]
+    pub jail_paths: Option<String>,
     // catalog bundles to activate at built-in defaults: recommended | read-only | paranoid
     #[serde(default)]
     pub catalogs: Vec<String>,
@@ -383,6 +404,9 @@ impl Config {
         if other.settings.strip_program_paths.is_some() {
             self.settings.strip_program_paths = other.settings.strip_program_paths;
         }
+        if other.settings.jail_paths.is_some() {
+            self.settings.jail_paths = other.settings.jail_paths.clone();
+        }
         if other.settings.bin_dirs.is_some() {
             self.settings.bin_dirs = other.settings.bin_dirs;
         }
@@ -527,6 +551,14 @@ impl Config {
 
     pub fn jail(&self) -> Option<Action> {
         self.settings.jail
+    }
+
+    pub fn jail_paths(&self) -> JailPaths {
+        match self.settings.jail_paths.as_deref() {
+            Some("graph") => JailPaths::Graph,
+            Some("compare") => JailPaths::Compare,
+            _ => JailPaths::Heuristic,
+        }
     }
 
     pub fn jail_allow(&self) -> &[String] {
@@ -805,6 +837,55 @@ mod merge_tests {
     // — silently, and invisibly to any test that deserializes straight into
     // `Config`. That is exactly how `[[delete]]` shipped broken.
     //
+    // `merge` copies each settings field by hand, so adding one and forgetting a
+    // line here means the parser accepts it and the binary ignores it. That
+    // happened to `[[delete]]` (PR #20) and again to `jail_paths` in this very
+    // change — the rule-block guard below did not cover settings.
+    //
+    // Rather than a row per field, which is the thing people forget, read the
+    // source: every `pub x:` in `struct Settings` must appear in an
+    // `other.settings.x` expression somewhere in `merge`. No maintenance, and it
+    // cannot be satisfied by accident.
+    #[test]
+    fn merge_carries_every_settings_field() {
+        let source = include_str!("config.rs");
+        let body = source
+            .split_once("pub struct Settings {")
+            .expect("Settings struct")
+            .1
+            .split_once("\n}")
+            .expect("end of Settings")
+            .0;
+        let fields: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|rest| rest.split(':').next())
+            .collect();
+        assert!(
+            fields.len() > 15,
+            "expected many settings, found {fields:?}"
+        );
+
+        let missing: Vec<&&str> = fields
+            .iter()
+            // Something that CONSUMES the incoming value, not a mere mention:
+            // an empty `if other.settings.x.is_some() {}` names the field while
+            // carrying nothing, and the first version of this guard was fooled
+            // by exactly that. Two idioms are legitimate — assignment for the
+            // `Option` fields, `.extend` for the collections.
+            .filter(|field| {
+                let assigned = format!("self.settings.{field} = other.settings.{field}");
+                let extended = format!(".extend(other.settings.{field})");
+                !source.contains(&assigned) && !source.contains(&extended)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these settings are parsed but never carried by `merge`, so the \
+             binary ignores them: {missing:?}"
+        );
+    }
+
     // Add a row when you add a block.
     #[test]
     fn merge_carries_every_rule_block() {
