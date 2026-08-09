@@ -1,0 +1,73 @@
+name  = "the false positives #4 reported produce no path claims"
+issue = 4
+
+# Each of these was denied because a leading `/` was taken as proof of a
+# filesystem path. The recipe says the word is a regex, a program, or a path on
+# another machine, so there is no local read edge to deny.
+#
+# Silence here is not "the recipe does nothing": every case that also names a
+# real local file asserts that file is still claimed.
+
+[[case]]
+name    = "a sed script is not a path"
+command = "sed -n '/needle/p' README.md"
+expect  = { local = ["reads README.md"] }
+
+[[case]]
+name    = "an awk program is not a path"
+command = "awk '/error/ {print $2}' log.txt"
+expect  = { local = ["reads log.txt"] }
+
+[[case]]
+name    = "a grep pattern is bound to its flag, not floating free"
+command = "grep -e '/api/v1/users' src/main.rs"
+expect  = { local = ["reads src/main.rs"], binds = ["-e=/api/v1/users"] }
+
+[[case]]
+name    = "a jq filter is not a path"
+command = "jq '.items[] | .name' out.json"
+expect  = { local = ["reads out.json"] }
+
+[[case]]
+name    = "a find pattern is a glob, not a reference"
+command = "find . -name '/etc/*'"
+expect  = { local = ["reads ./**"] }
+
+[[case]]
+name    = "a shell script is code"
+command = "sh -c 'rm -rf /tmp/x'"
+expect  = { local = [] }
+
+[[case]]
+name    = "chmod's slot 0 is a mode, not a file called 0644"
+command = "chmod 0644 src/main.rs"
+expect  = { local = ["writes src/main.rs"] }
+
+[[case]]
+# the opening report of #4, verbatim. The path is inside a container, and
+# kubectl's positionals are deliberately unmapped — see recipes/kubectl.toml
+name    = "a path inside a container is claimed by nobody"
+command = "kubectl -n ns exec pod -c c -- grep -c img /etc/config/config.yaml"
+expect  = { local = [], remote = [] }
+
+[[case]]
+name    = "the local file kubectl really does open is still claimed"
+command = "kubectl apply -f deploy.yaml"
+expect  = { local = ["reads deploy.yaml"] }
+
+[[case]]
+# ssh is the case where silence was the right answer to the WRONG question. The
+# command does read /etc/hosts — just not here. Now the graph says exactly that.
+name    = "a command over ssh reads a file on the far side"
+command = "ssh host cat /etc/hosts"
+expect  = { local = [], remote = ["execs cat", "reads /etc/hosts"], commands = [
+  "ssh",
+  "cat @host",
+] }
+
+[[case]]
+name    = "ssh's own key file is local"
+command = "ssh -i /home/u/.ssh/id_ed25519 host uptime"
+expect  = { local = [
+  "reads /home/u/.ssh/id_ed25519",
+], remote = ["execs uptime"] }

@@ -1,0 +1,89 @@
+name  = "what a recipe claims, and what it refuses to claim"
+issue = 13
+
+# The inverted default in one table: a word is a path because a reviewed recipe
+# said so, and for no other reason.
+
+[[case]]
+name    = "effects are a set — mv's source is read AND deleted"
+command = "mv old.rs new.rs"
+expect  = { local = [
+  "reads old.rs",
+  "deletes old.rs",
+  "writes new.rs",
+  "creates new.rs",
+] }
+
+[[case]]
+name    = "trailing slot binding splits sources from the destination"
+command = "cp a.txt b.txt dest/"
+expect  = { local = [
+  "reads a.txt",
+  "reads b.txt",
+  "writes dest/",
+  "creates dest/",
+] }
+
+[[case]]
+name    = "one source, one destination — `except-last` must not swallow both"
+command = "cp only.txt dest.txt"
+expect  = { local = ["reads only.txt", "writes dest.txt", "creates dest.txt"] }
+
+[[case]]
+# the slot shift is the whole reason `takes` is a map fact and not a guess about
+# leading dashes: with `-e` consuming the pattern, the file is slot 0
+name    = "a flag argument stops being a positional"
+command = "grep -e pat file.rs"
+expect  = { local = ["reads file.rs"], binds = ["-e=pat"] }
+
+[[case]]
+name    = "without the flag, the same file is slot 1"
+command = "grep pat file.rs"
+expect  = { local = ["reads file.rs"], binds = [] }
+
+[[case]]
+# `grep PATTERN file` and `grep -e PATTERN file` disagree about what slot 0 IS.
+# Without the guard one of them is wrong: either the pattern is read as a path,
+# or the file loses its read edge.
+name    = "a when guard decides what slot zero is"
+command = "grep needle notes.txt"
+expect  = { local = ["reads notes.txt"] }
+
+[[case]]
+name    = "and the guarded form agrees"
+command = "grep -e needle notes.txt"
+expect  = { local = ["reads notes.txt"] }
+
+[[case]]
+name    = "an unmapped program claims nothing"
+command = "some-tool-nobody-mapped /etc/passwd"
+expect  = { local = [], remote = [] }
+
+[[case]]
+name    = "not even through a flag that looks like an output"
+command = "frobnicate --output /etc/shadow"
+expect  = { local = [], remote = [] }
+
+[[case]]
+# the value is unknowable, so there is nothing to point an edge at with any
+# confidence — the existing ask-rather-than-guess convention
+name    = "a dynamic argument makes no claim about a path it cannot know"
+command = "rm $TARGET"
+expect  = { local = [], facts = ["$TARGET dynamic"] }
+
+[[case]]
+# kv's arguments are KEYS, and a key is free-form. It is the third most-used
+# command in the audit corpus, so getting this wrong would be #4 at scale.
+name    = "a key-value tool claims no paths"
+command = "kv get config/db/password"
+expect  = { local = [] }
+
+[[case]]
+name    = "a key that looks like an absolute path is still a key"
+command = "kv set /etc/thing somevalue"
+expect  = { local = [] }
+
+[[case]]
+name    = "`--db` consumes its value, so `mydb` is not the subcommand"
+command = "kv --db mydb get somekey"
+expect  = { local = [] }

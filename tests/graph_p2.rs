@@ -18,6 +18,17 @@
 //! comparing either would make the property trivially false while saying
 //! nothing about soundness.
 //!
+//! ## What lives here, and what lives in `tests/graph_cases/edits.toml`
+//!
+//! This file sweeps the **whole corpus** for the structural half: rename any
+//! command or argument in any command anyone has ever tested, and the emitted
+//! text must re-parse to the same shape. It runs on the bare lowering, with no
+//! recipes, because that is the layer an edit actually touches.
+//!
+//! What a sweep cannot state is whether the *claims* survived. `edits.toml`
+//! covers that, one row per edit, with the intended graph written down by a
+//! person rather than derived from the graph under test.
+//!
 //! ## The trap this gate is built against
 //!
 //! P1 was satisfiable by a lowering that modelled nothing, so it needed a
@@ -114,43 +125,6 @@ fn p2_rewriting_an_argument_is_sound() {
         "expected many editable values, got {checked}"
     );
     println!("P2 verified over {checked} argument rewrites");
-}
-
-#[test]
-fn p2_holds_for_the_shapes_that_broke_earlier_consumers() {
-    // one row per bug where an edit or a structural read went wrong
-    for (src, want) in [
-        // #7: the flag must survive a program-name rewrite
-        ("grep -n TODO src/main.rs", "zqx -n TODO src/main.rs"),
-        // `sudo` IS command[0] here: the graph has no wrapper map yet, so `grep`
-        // is one of sudo's arguments rather than a command of its own. Targeting
-        // the inner program needs the `Execs` edge from sub-task 5 — worth
-        // knowing before `rewrite` is moved onto the graph.
-        ("sudo grep foo /var/log/x", "zqx grep foo /var/log/x"),
-        // #12: a heredoc must not swallow the edit or the rest of the pipeline
-        (
-            "cat <<EOF | grep secret\nline one\nEOF",
-            "zqx <<EOF | grep secret\nline one\nEOF",
-        ),
-        // the discontiguous-span case: only the string's own bytes move
-        ("echo \"pre $(id) post\"", "zqx \"pre $(id) post\""),
-        ("a | b | c", "zqx | b | c"),
-        ("a && b || c", "zqx && b || c"),
-        ("cmd 2>&1 | tee log.txt", "zqx 2>&1 | tee log.txt"),
-    ] {
-        let g = graph::lower(src);
-        let (id, _) = g.commands().next().expect("a first command");
-        let edits: HashMap<_, _> = std::iter::once((id, TOKEN.to_string())).collect();
-        assert_eq!(g.emit_with(&edits), want, "emit differs for {src:?}");
-
-        // and the emitted text must re-parse to the same claims
-        let after = graph::lower(&g.emit_with(&edits)).fingerprint();
-        assert_eq!(
-            after,
-            expect_renamed(&g, 0, TOKEN),
-            "P2 violated for {src:?}"
-        );
-    }
 }
 
 #[test]
@@ -262,8 +236,10 @@ fn expect_renamed(g: &Graph, ordinal: usize, to: &str) -> Vec<String> {
         .map(|line| match line.strip_prefix(&prefix) {
             // privilege is DERIVED from the name, so renaming recomputes it —
             // `sudo x` renamed to a plain token is no longer elevated, and
-            // carrying the old value over would assert the wrong graph
-            Some(_) => format!("{prefix}{to} priv=Normal"),
+            // carrying the old value over would assert the wrong graph.
+            // Locality is not: with no recipes applied here, every command is
+            // local whatever it is called.
+            Some(_) => format!("{prefix}{to} priv=Normal at=local"),
             None => line.clone(),
         })
         .collect();

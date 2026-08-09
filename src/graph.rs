@@ -70,16 +70,87 @@ pub enum Privilege {
     Elevated,
 }
 
-/// Whether a command's arguments name things on *this* filesystem.
+/// Whether something is on *this* machine.
 ///
-/// Populated by the locality map in sub-task 5. Stage 1 has no map, so
-/// everything is `Local` — the field exists to fix the shape, not to be trusted
-/// yet. Note this is the fact `walk_words` needs in order to stop flagging
-/// `kubectl exec … -- cat /etc/config` as a local path escape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// On a [`ValueNode`] this is decided lexically, by [`locality_of`]: the word
+/// carries a location prefix or it does not. On a [`CommandNode`] it comes from
+/// the recipe — a program that names a machine and runs a nested command runs it
+/// **there**, so `ssh host cat /etc/hosts` lowers `cat` as a remote command and
+/// its `/etc/hosts` is a remote read.
+///
+/// A reference is remote if *either* end says so, which is what
+/// [`Graph::references`] computes. The two are genuinely independent:
+/// `ssh host cat ./notes` has a local-looking word on a remote command, and
+/// `aws s3 rm s3://b/k` has a remote word on a local one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Locality {
+    #[default]
     Local,
     Remote,
+}
+
+impl Locality {
+    /// The stronger of the two — anything touched by a remote end is remote.
+    pub fn or(self, other: Locality) -> Locality {
+        match (self, other) {
+            (Locality::Local, Locality::Local) => Locality::Local,
+            _ => Locality::Remote,
+        }
+    }
+
+    pub fn is_remote(self) -> bool {
+        self == Locality::Remote
+    }
+}
+
+/// A reference to something that is not on this machine, split into the parts a
+/// rule would want to match on.
+///
+/// Nothing configures these yet — there is no `[[remote]]` rule surface and this
+/// PR does not add one. The graph models them anyway, because the alternative is
+/// what it did before: drop the edge, and conflate *"this is somewhere else"*
+/// with *"this does not happen"*. Only the first is true, and a graph that
+/// cannot say `aws s3 rm s3://prod-bucket/key` deletes a key in `prod-bucket`
+/// cannot ever grow a rule that cares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRef {
+    /// `s3` for `s3://bucket/key`; `None` for `host:/tmp`, which has no scheme
+    pub scheme: Option<String>,
+    /// the machine, bucket or pod: `bucket`, `user@host`, `ns/pod`
+    pub authority: String,
+    /// the path within it — `/key`, `/tmp`. Empty when the word named none
+    /// (`scp file host:`)
+    pub path: String,
+}
+
+impl RemoteRef {
+    /// Split a word carrying a location prefix. `None` when it carries none, so
+    /// this doubles as the locality test — one rule, not two that can drift.
+    pub fn parse(word: &str) -> Option<RemoteRef> {
+        // every word that can name something outside the working directory
+        // starts with one of these, and a colon is legal in a filename
+        if word.starts_with(['/', '~', '.']) {
+            return None;
+        }
+        if let Some((scheme, rest)) = word.split_once("://") {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            return Some(RemoteRef {
+                scheme: Some(scheme.to_string()),
+                authority: authority.to_string(),
+                // the `/` belongs to the path, not to the separator
+                path: match path {
+                    "" => String::new(),
+                    p => format!("/{p}"),
+                },
+            });
+        }
+        let (authority, path) = word.split_once(':')?;
+        Some(RemoteRef {
+            scheme: None,
+            authority: authority.to_string(),
+            path: path.to_string(),
+        })
+    }
 }
 
 /// Redirection direction. `Heredoc` is modelled separately — it carries a body.
@@ -108,9 +179,10 @@ pub enum FilterKind {
 /// Lexical facts about a word, decided without touching the filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ValueFacts {
-    /// begins with `/`
+    /// begins with `/`, and names a path on this machine
     pub absolute: bool,
-    /// a path-shaped word that is not absolute (`src/x`, `../y`, `~/z`)
+    /// a path-shaped word on this machine that is not absolute (`src/x`,
+    /// `../y`, `~/z`)
     pub relative: bool,
     /// contains an unquoted glob metacharacter
     pub glob: bool,
@@ -118,6 +190,9 @@ pub struct ValueFacts {
     pub literal: bool,
     /// contains an expansion or substitution, so the value is not knowable
     pub dynamic: bool,
+    /// which machine's filesystem the word names, from its prefix alone —
+    /// `s3://bucket/key` and `host:/tmp` are somewhere else
+    pub locality: Locality,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +204,12 @@ pub struct CommandNode {
     pub spans: Vec<Span>,
     /// resolved program name; `None` when the name itself is dynamic
     pub name: Option<String>,
+    /// where this command runs. `Remote` only ever comes from a recipe — see
+    /// [`Locality`]
     pub locality: Locality,
+    /// the machine it runs on, when it is not this one: the host word from
+    /// `ssh HOST …`, the pod from `kubectl exec POD …`
+    pub host: Option<String>,
     pub privilege: Privilege,
 }
 
@@ -148,6 +228,10 @@ pub struct ValueNode {
     /// source as written — deny globs match against syntax, not just value
     pub raw: String,
     pub facts: ValueFacts,
+    /// the word split into machine and path, when it carries a location prefix.
+    /// `Some` exactly when `facts.locality` is `Remote` — both come from
+    /// [`RemoteRef::parse`], so they cannot disagree
+    pub remote: Option<RemoteRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +270,11 @@ pub struct ConnectorNode {
 pub struct PathSetNode {
     pub spans: Vec<Span>,
     pub set: crate::globs::PathSet,
+    /// carried from the word the set was built from, so a recursive transfer
+    /// models both ends — `aws s3 cp s3://b/prefix ./x --recursive` is a remote
+    /// tree read into a local tree
+    pub locality: Locality,
+    pub remote: Option<RemoteRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +335,33 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
+/// One reference edge, flattened into the facts a caller asks about: what is
+/// touched, how, and **where it is**.
+#[derive(Debug, Clone)]
+pub struct Reference {
+    pub command: NodeId,
+    pub target: NodeId,
+    pub effect: crate::cmdmap::Effect,
+    /// remote if *either* the command or the word says so
+    pub locality: Locality,
+    /// the path as written — the whole word, `s3://bucket/key` included
+    pub path: String,
+    /// the split form, when this names something on another machine
+    pub remote: Option<RemoteRef>,
+}
+
+fn effect_of(kind: EdgeKind) -> Option<crate::cmdmap::Effect> {
+    use crate::cmdmap::Effect;
+    match kind {
+        EdgeKind::Reads => Some(Effect::Read),
+        EdgeKind::Writes => Some(Effect::Write),
+        EdgeKind::Deletes => Some(Effect::Delete),
+        EdgeKind::Creates => Some(Effect::Create),
+        EdgeKind::Execs => Some(Effect::Exec),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Graph {
     pub source: String,
@@ -262,11 +378,25 @@ impl Graph {
         &self.nodes[id]
     }
 
+    /// Every command, **in source order**.
+    ///
+    /// Node ids alone would not give that: a wrapper's payload is minted while
+    /// the maps are applied, so `sudo rm x | grep y` allocates `grep` before
+    /// `rm`. Ordering by position keeps `cmd[1]` meaning the second command on
+    /// the line, which is what the fingerprint's ordinals and every failure
+    /// message assume.
     pub fn commands(&self) -> impl Iterator<Item = (NodeId, &CommandNode)> {
-        self.nodes.iter().enumerate().filter_map(|(i, n)| match n {
-            Node::Command(c) => Some((i, c)),
-            _ => None,
-        })
+        let mut out: Vec<(NodeId, &CommandNode)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| match n {
+                Node::Command(c) => Some((i, c)),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|(id, c)| (c.spans.first().map_or(usize::MAX, |s| s.start), *id));
+        out.into_iter()
     }
 
     pub fn edges_from(&self, id: NodeId) -> impl Iterator<Item = &Edge> {
@@ -326,14 +456,22 @@ impl Graph {
             Node::Heredoc(h) => format!("<<{}{}", if h.quoted { "'" } else { "" }, h.delimiter),
             Node::Stream(s) => format!("{:?}", s.kind),
             Node::Connector(c) => format!("{:?}", c.kind),
-            Node::PathSet(_) => "<pathset>".into(),
+            Node::PathSet(p) => match p.set.recursive {
+                true => format!("{}/**", p.set.roots.join(",")),
+                false => p.set.roots.join(","),
+            },
         };
         let mut out = Vec::new();
         for (i, (id, cmd)) in self.commands().enumerate() {
             out.push(format!(
-                "cmd[{i}] name={} priv={:?}",
+                "cmd[{i}] name={} priv={:?} at={}",
                 cmd.name.as_deref().unwrap_or("<dynamic>"),
-                cmd.privilege
+                cmd.privilege,
+                match (&cmd.locality, &cmd.host) {
+                    (Locality::Local, _) => "local".to_string(),
+                    (Locality::Remote, Some(host)) => format!("remote:{host}"),
+                    (Locality::Remote, None) => "remote".to_string(),
+                }
             ));
             for edge in self.edges_from(id) {
                 match edge.kind {
@@ -370,6 +508,29 @@ impl Graph {
                     _ => {}
                 }
             }
+        }
+        // Reference edges, with the locality that decides whether they are about
+        // this machine. Included because P2 is the gate on EDITS, and an edit
+        // that quietly moved a delete from one path to another — or from the
+        // local side of a transfer to the remote one — would otherwise round-
+        // trip clean.
+        for reference in self.references() {
+            let Some(i) = ordinal.get(&reference.command) else {
+                continue;
+            };
+            out.push(format!(
+                "cmd[{i}] {:?}={} {}",
+                reference.effect,
+                match self.node(reference.target) {
+                    // a set is not the word it was built from
+                    Node::PathSet(_) => name_of(reference.target),
+                    _ => reference.path.clone(),
+                },
+                match reference.locality {
+                    Locality::Local => "local",
+                    Locality::Remote => "remote",
+                }
+            ));
         }
         // streams and heredocs point AT their command, so they are walked from
         // the other end
@@ -417,30 +578,70 @@ impl Graph {
             .map(|(_, id)| *id)
     }
 
-    /// Every path this command line references, according to the recipes.
+    /// Every reference this command line makes, according to the recipes.
     ///
     /// The inverted default made concrete: a word is a path because a reviewed
     /// recipe said so, not because it starts with `/`. A program with no recipe
     /// contributes nothing, which is why an unmapped command cannot produce a
     /// false positive here.
     ///
-    /// Returns the text as written. Resolution — `~`, `..`, the cd-tracked base
+    /// **Remote references are included.** A reference edge says what the
+    /// command does to what it names; [`Reference::locality`] says where that
+    /// thing is. Dropping the edge instead would conflate "elsewhere" with
+    /// "does not happen", and only the first is true — `aws s3 rm s3://b/key`
+    /// really does delete a key. Callers that mean *this* filesystem ask
+    /// [`Graph::referenced_paths`].
+    ///
+    /// Paths come back as written. Resolution — `~`, `..`, the cd-tracked base
     /// — stays with the caller, which already does it.
-    pub fn referenced_paths(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
+    pub fn references(&self) -> Vec<Reference> {
+        let mut out: Vec<Reference> = Vec::new();
         for edge in &self.edges {
-            if !matches!(
-                edge.kind,
-                EdgeKind::Reads | EdgeKind::Writes | EdgeKind::Deletes | EdgeKind::Creates
-            ) {
+            let Some(effect) = effect_of(edge.kind) else {
                 continue;
-            }
-            match self.node(edge.to) {
-                Node::Value(value) => out.extend(value.text.clone()),
-                Node::PathSet(set) => out.extend(set.set.roots.iter().cloned()),
-                _ => {}
-            }
+            };
+            let here = match self.node(edge.from) {
+                Node::Command(cmd) => cmd.locality,
+                _ => Locality::Local,
+            };
+            let (path, locality, remote) = match self.node(edge.to) {
+                Node::Value(value) => (
+                    value.text.clone(),
+                    value.facts.locality,
+                    value.remote.clone(),
+                ),
+                Node::PathSet(set) => (
+                    set.set.roots.first().cloned(),
+                    set.locality,
+                    set.remote.clone(),
+                ),
+                // an `Execs` edge points at a command, which is a reference to a
+                // program rather than to a path
+                Node::Command(cmd) => (cmd.name.clone(), cmd.locality, None),
+                _ => (None, Locality::Local, None),
+            };
+            let Some(path) = path else { continue };
+            out.push(Reference {
+                command: edge.from,
+                target: edge.to,
+                effect,
+                locality: here.or(locality),
+                path,
+                remote,
+            });
         }
+        out
+    }
+
+    /// The paths this command line references **on this machine** — the
+    /// question the jail and `[[path]]` rules ask.
+    pub fn referenced_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .references()
+            .into_iter()
+            .filter(|r| r.locality == Locality::Local && r.effect != crate::cmdmap::Effect::Exec)
+            .map(|r| r.path)
+            .collect();
         out.sort();
         out.dedup();
         out
@@ -532,7 +733,11 @@ impl Lowering<'_> {
                 }
                 return;
             }
-            "pipeline" | "list" => {
+            // `program` is a group too: tree-sitter puts a top-level `a ; c`
+            // straight under it rather than in a `list`, so without this the
+            // `;` is not a node and the two commands are unrelated — the same
+            // blindness #12 was about, one level up.
+            "program" | "pipeline" | "list" => {
                 let children: Vec<_> = (0..node.child_count())
                     .filter_map(|i| node.child(i))
                     .collect();
@@ -561,12 +766,16 @@ impl Lowering<'_> {
     /// not always the children of one `pipeline`/`list`: in `cat <<EOF && rm x`
     /// the `&&` and `rm x` are direct children of the *heredoc redirect*.
     fn lower_group(&mut self, children: &[TsNode]) -> Vec<NodeId> {
-        let mut members: Vec<NodeId> = Vec::new();
+        // Each member is (head, tail): a connector joins the END of the group on
+        // its left to the START of the group on its right. Linking heads alone
+        // gets `a || b ; c` wrong — the command before the `;` is `b`, while the
+        // member's head is `a`.
+        let mut members: Vec<(NodeId, NodeId)> = Vec::new();
         let mut connectors: Vec<Connector> = Vec::new();
         for child in children {
             if child.is_named() {
-                if let Some(head) = self.walk_capturing_head(*child) {
-                    members.push(head);
+                if let Some(ends) = self.walk_capturing_ends(*child) {
+                    members.push(ends);
                 }
                 continue;
             }
@@ -587,17 +796,23 @@ impl Lowering<'_> {
         }
         for (i, pair) in members.windows(2).enumerate() {
             let kind = connectors.get(i).copied().unwrap_or(Connector::Seq);
-            self.graph.link(pair[0], pair[1], EdgeKind::Flow(kind));
+            self.graph.link(pair[0].1, pair[1].0, EdgeKind::Flow(kind));
         }
-        members
+        members.into_iter().map(|(head, _)| head).collect()
     }
 
-    /// Walk a subtree and report the first `Command` it minted — the member's
-    /// "head", which is what connector edges attach to.
-    fn walk_capturing_head(&mut self, node: TsNode) -> Option<NodeId> {
+    /// Walk a subtree and report the first and last `Command` it minted.
+    ///
+    /// A member of a group is not always one command: in `a || b ; c` the first
+    /// member is a whole `list`. Its *head* is what a connector on its left
+    /// points at, and its *tail* is what a connector on its right comes from.
+    fn walk_capturing_ends(&mut self, node: TsNode) -> Option<(NodeId, NodeId)> {
         let before = self.graph.nodes.len();
         self.walk(node, None);
-        (before..self.graph.nodes.len()).find(|&i| matches!(self.graph.nodes[i], Node::Command(_)))
+        let mut commands = (before..self.graph.nodes.len())
+            .filter(|&i| matches!(self.graph.nodes[i], Node::Command(_)));
+        let head = commands.next()?;
+        Some((head, commands.next_back().unwrap_or(head)))
     }
 
     fn lower_redirected(&mut self, node: TsNode) {
@@ -610,8 +825,16 @@ impl Lowering<'_> {
             .filter(|c| !is_redirect(*c))
             .collect();
         // the body may be a single command or a whole pipeline
+        let before = self.graph.nodes.len();
         let mut members = self.lower_group(&body);
         let head = members.first().copied();
+        // The command a nested pipeline flows OUT of is the last one the body
+        // lowered, not the head of its last member: in
+        // `echo a | cat <<EOF | grep x` the body is one `pipeline` member whose
+        // head is `echo`, while the stage feeding `grep` is `cat`.
+        let tail = (before..self.graph.nodes.len())
+            .filter(|i| matches!(self.graph.nodes[*i], Node::Command(_)))
+            .next_back();
 
         for redirect in children.iter().copied().filter(|c| is_redirect(*c)) {
             if redirect.kind() != "heredoc_redirect" {
@@ -630,9 +853,7 @@ impl Lowering<'_> {
             // the last body member flows into the first of them. Without this
             // edge the two ends of `cat <<EOF | grep x` are unrelated in the
             // graph, exactly as they were unrelated in the CST.
-            if let (Some(previous), Some(first)) =
-                (members.last().copied(), nested.first().copied())
-            {
+            if let (Some(previous), Some(first)) = (tail.or(head), nested.first().copied()) {
                 self.graph.link(previous, first, EdgeKind::Flow(connector));
             }
             members.extend(nested);
@@ -710,6 +931,7 @@ impl Lowering<'_> {
             spans: Vec::new(),
             name: None,
             locality: Locality::Local,
+            host: None,
             privilege: Privilege::Normal,
         }));
         let mut spans = Vec::new();
@@ -760,9 +982,9 @@ impl Lowering<'_> {
         }
 
         if let Node::Command(cmd) = &mut self.graph.nodes[id] {
-            cmd.privilege = match name.as_deref().map(basename) {
-                Some("sudo") | Some("doas") | Some("pkexec") => Privilege::Elevated,
-                _ => Privilege::Normal,
+            cmd.privilege = match name.as_deref().is_some_and(elevates) {
+                true => Privilege::Elevated,
+                false => Privilege::Normal,
             };
             cmd.name = name;
             cmd.spans = spans;
@@ -811,6 +1033,7 @@ impl Lowering<'_> {
             text: Some(value_text.to_string()),
             raw: value_text.to_string(),
             facts: facts_for(value_text, Some(value_text)),
+            remote: RemoteRef::parse(value_text),
         }));
         self.graph.own(value_span, value);
         self.graph.link(flag, value, EdgeKind::Takes);
@@ -824,6 +1047,7 @@ impl Lowering<'_> {
         let id = self.graph.push(Node::Value(ValueNode {
             spans: Vec::new(),
             facts: facts_for(&raw, text.as_deref()),
+            remote: RemoteRef::parse(text.as_deref().unwrap_or(&raw)),
             text,
             raw,
         }));
@@ -885,28 +1109,63 @@ impl Lowering<'_> {
         }
     }
 
+    /// `> file`, `>> file`, `< file`, `2>&1`, `<<< word`.
+    ///
+    /// The **destination is lowered as its own `Value`**, and the stream owns
+    /// only the operator. `echo hi > /etc/passwd` used to be one opaque node
+    /// covering `> /etc/passwd`, so the file the shell truncates was not a node
+    /// at all and no rule could see it (#29). Splitting it also keeps an edit
+    /// surgical: rewriting the destination must not touch the `>`.
+    ///
+    /// A descriptor dup (`2>&1`, `>&2`) names no file — the grammar says so by
+    /// giving it a `number` destination rather than a word, which is a better
+    /// oracle than reading the operator, since `2>&1`'s operator is `>&` and
+    /// `&>file`'s is too.
     fn lower_stream(&mut self, node: TsNode) -> NodeId {
         let span = Span::of(node);
         let raw = span.text(self.source);
         let operator = raw.trim_start_matches(|c: char| c.is_ascii_digit());
+        let target = redirect_target(node);
+        let dup = target.is_some_and(|t| t.kind() == "number");
         let kind = if node.kind() == "herestring_redirect" || operator.starts_with("<<<") {
             StreamKind::HereString
+        } else if dup {
+            StreamKind::Dup
         } else if operator.starts_with(">>") {
             StreamKind::Append
         } else if operator.starts_with("&>") || operator.starts_with(">&") {
             StreamKind::Both
-        } else if raw.contains(">&") || raw.contains("<&") {
-            StreamKind::Dup
         } else if operator.starts_with('>') {
             StreamKind::Out
         } else {
             StreamKind::In
         };
+        // the operator, and any leading descriptor: everything up to the
+        // destination word
+        let operator_span = Span {
+            start: span.start,
+            end: target.map_or(span.end, |t| Span::of(t).start),
+        };
         let id = self.graph.push(Node::Stream(StreamNode {
-            spans: vec![span],
+            spans: vec![operator_span],
             kind,
         }));
-        self.graph.own(span, id);
+        self.graph.own(operator_span, id);
+        if let Some(target) = target {
+            let value = self.lower_value(target);
+            let spans = self.graph.nodes[value].spans().to_vec();
+            if let Node::Stream(stream) = &mut self.graph.nodes[id] {
+                stream.spans.extend(spans);
+            }
+            // `Takes` means "this is the file the stream is bound to". A
+            // here-string's word is DATA and a dup's operand is a descriptor, so
+            // neither gets one — `cmd <<< /etc/passwd` must not look like a read
+            // of that file. The value node still exists and still owns its
+            // bytes, so P1 holds either way.
+            if kind != StreamKind::HereString && !dup {
+                self.graph.link(id, value, EdgeKind::Takes);
+            }
+        }
         id
     }
 }
@@ -967,6 +1226,16 @@ fn connector_token(node: TsNode, source: &str) -> Option<Connector> {
     }
 }
 
+/// The destination of a redirect: its last named child.
+///
+/// `2>&1` names `file_descriptor 2` first and `number 1` last; `> out.txt` names
+/// only the word. Reading the grammar beats reading the operator text, which
+/// cannot tell `2>&1` from `&>file` — both spell `>&`.
+fn redirect_target(node: TsNode) -> Option<TsNode> {
+    let last = node.named_child(node.named_child_count().checked_sub(1)?)?;
+    (last.kind() != "file_descriptor").then_some(last)
+}
+
 fn is_nested_command_region(node: TsNode) -> bool {
     matches!(
         node.kind(),
@@ -1015,18 +1284,66 @@ fn node_at(node: TsNode, span: Span) -> Option<TsNode> {
 fn facts_for(raw: &str, text: Option<&str>) -> ValueFacts {
     let dynamic = text.is_none();
     let value = text.unwrap_or(raw);
+    let locality = locality_of(value);
     ValueFacts {
-        absolute: value.starts_with('/'),
-        relative: !value.starts_with('/') && (value.contains('/') || value == "." || value == ".."),
+        // `absolute` and `relative` describe a path on THIS machine, so a word
+        // naming another one is neither. Without that, `s3://bucket/path` reads
+        // as a relative path — it contains a `/` and does not start with one —
+        // and any consumer resolving relative words against the cwd would
+        // happily turn a bucket key into `$PWD/s3:/bucket/path`.
+        absolute: !locality.is_remote() && value.starts_with('/'),
+        relative: !locality.is_remote()
+            && !value.starts_with('/')
+            && (value.contains('/') || value == "." || value == ".."),
         // metacharacters in the *resolved* text: `'*'` is a literal asterisk
         glob: text.is_some_and(|t| t.contains(['*', '?'])) || raw.contains('['),
         literal: !dynamic,
         dynamic,
+        locality,
+    }
+}
+
+/// Which machine a word names a path on, from its prefix alone.
+///
+/// `aws s3 cp`, `kubectl cp` and `scp` all mix local and remote references in
+/// **one positional list**, distinguished only by a prefix:
+///
+/// ```text
+/// aws s3 cp ./build s3://bucket/path   slot 0 here, slot 1 elsewhere
+/// aws s3 cp s3://bucket/path ./build   the reverse
+/// scp host:/etc/hosts .                the same shape, no scheme
+/// ```
+///
+/// So the discriminator is syntactic and shared: a location prefix is a `:` in a
+/// word that does not begin at a filesystem root. `s3://bucket/key`,
+/// `user@host:/tmp`, `pod:/etc` and kubectl's `ns/pod:/etc` all have one.
+///
+/// The `/`, `~` and `.` exemption is what keeps this from eating real paths: a
+/// colon is legal in a filename, and `/var/log/build:2024.log` must stay local —
+/// losing it would be a jail escape, the one direction this codebase treats as
+/// dangerous. Every word that can name something *outside* the current directory
+/// starts with one of those three characters, so the exemption costs nothing
+/// that matters.
+///
+/// The residue is a relative name below the cwd carrying a colon and no leading
+/// `./` (`notes:2024.txt`, `logs/build:1`), read here as remote. That direction
+/// costs **silence** on a file inside the working directory. The loud direction
+/// would be claiming `s3://bucket/key` is a path on this disk — the #4 shape
+/// this design exists to remove.
+pub fn locality_of(word: &str) -> Locality {
+    match RemoteRef::parse(word) {
+        Some(_) => Locality::Remote,
+        None => Locality::Local,
     }
 }
 
 fn basename(program: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
+}
+
+/// Whether running this program raises privilege.
+fn elevates(program: &str) -> bool {
+    matches!(basename(program), "sudo" | "doas" | "pkexec")
 }
 
 /// Mirrors `bash::resolve_text` — quoting removed, `None` when any part of the
@@ -1084,6 +1401,59 @@ pub fn apply_maps(graph: &mut Graph, maps: &crate::cmdmap::Maps) {
         let words = ordered_words(graph, id);
         apply_program(graph, id, &name, &words, maps);
     }
+    apply_redirects(graph);
+}
+
+/// Turn every redirect into a reference edge on the command it attaches to.
+///
+/// **This one needs no recipe**, and that is not a hole in the inverted default.
+/// The default exists because "what does this word mean to *this program*" is
+/// unknowable without a map — but `> file` is not a program's argument, it is
+/// shell syntax, and it truncates that file whatever the program is. `echo hi >
+/// /etc/passwd` produced nothing at all before (#29): the jail saw a command
+/// that references no paths, so a write outside the project was invisible.
+///
+/// It still runs in `apply_maps` rather than in `lower`, because `lower` stays
+/// opinion-free — every claim the graph makes enters through one door.
+fn apply_redirects(graph: &mut Graph) {
+    let streams: Vec<(NodeId, StreamKind)> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| match node {
+            Node::Stream(stream) => Some((id, stream.kind)),
+            _ => None,
+        })
+        .collect();
+    for (stream, kind) in streams {
+        let Some(command) = graph
+            .edges_from(stream)
+            .find(|e| e.kind == EdgeKind::On)
+            .map(|e| e.to)
+        else {
+            continue;
+        };
+        let Some(target) = graph
+            .edges_from(stream)
+            .find(|e| e.kind == EdgeKind::Takes)
+            .map(|e| e.to)
+        else {
+            continue;
+        };
+        // `>` and `>>` both create the file if it is missing; `>` additionally
+        // destroys what was there, which `Writes` covers for now — the graph has
+        // no truncate/append distinction and `StreamKind` already carries it
+        let effects: &[EdgeKind] = match kind {
+            StreamKind::In => &[EdgeKind::Reads],
+            StreamKind::Out | StreamKind::Append | StreamKind::Both => {
+                &[EdgeKind::Writes, EdgeKind::Creates]
+            }
+            StreamKind::Dup | StreamKind::HereString => continue,
+        };
+        for effect in effects {
+            graph.link(command, target, *effect);
+        }
+    }
 }
 
 /// A command's flags and values in source order — the sequence a map is written
@@ -1126,20 +1496,21 @@ fn apply_program(
     //
     // So: resolve the bare entry first for its flags, use those to skip flag
     // arguments, and only then decide which map applies.
-    let global = maps.lookup(name, None);
-    let first_positional = first_positional_after_flags(graph, words, global);
-    let Some(program) = maps.lookup(name, first_positional.as_deref()) else {
+    let global = maps.lookup(name, &[]);
+    let leading = leading_positionals(graph, words, global);
+    let Some(program) = maps.lookup(name, &leading) else {
         // no map, no claims — the inverted default
         return;
     };
 
     // 1. bind flag arguments, which is what makes the slot numbers below mean
     //    anything
-    let mut positionals: Vec<NodeId> = Vec::new();
-    // where the first positional sits in `words`, so a wrapper's payload can be
-    // taken as the REST OF THE LINE rather than as the positionals alone —
-    // `sudo grep -e pat file` must hand grep its `-e`, not just `pat` and `file`
-    let mut payload_start: Option<usize> = None;
+    //
+    // Each positional is kept with WHERE IT SITS in `words`, so a wrapper's
+    // payload can be taken as the rest of the line rather than as the
+    // positionals alone — `sudo grep -e pat file` must hand grep its `-e`, not
+    // just `pat` and `file`.
+    let mut positionals: Vec<(NodeId, usize)> = Vec::new();
     let mut pending_flag: Option<NodeId> = None;
     for (index, (id, is_flag)) in words.iter().enumerate() {
         if let Some(flag) = pending_flag.take() {
@@ -1162,36 +1533,50 @@ fn apply_program(
             }
             continue;
         }
-        if payload_start.is_none() {
-            payload_start = Some(index);
-        }
-        positionals.push(*id);
+        positionals.push((*id, index));
     }
 
-    // 2. a subcommand occupies slot 0 without being an argument to anything
-    let offset = usize::from(program.subcommand.is_some());
-    let slotted: Vec<NodeId> = positionals.iter().skip(offset).copied().collect();
+    // 2. the subcommand occupies the leading slots without being an argument to
+    //    anything — two of them for `aws s3 cp`
+    let offset = program.subcommand_depth();
+    let slotted: Vec<(NodeId, usize)> = positionals.iter().skip(offset).copied().collect();
 
-    // 3. the payload of a wrapper is another program, mapped by its own rules
+    // 3. the payload of a wrapper is another program, running under its own map
+    //    and — for `ssh` and friends — on another machine
     if let Some(nested) = program.nested_command()
-        && let Some(start) = payload_start
-        && let Some((payload_name, _)) = payload(graph, &slotted)
+        && let Some(at) = nested.slots.payload_start()
+        && let Some(&(program_word, index)) = slotted.get(at)
+        && let Some(payload_name) = value_text(graph, program_word)
     {
+        // the machine, when the recipe names one. `ssh HOST cmd` says slot 0 is
+        // a host and the rest is a command, and those two statements together
+        // already say the command runs there.
+        let machine = program
+            .machine_slot()
+            .and_then(|n| slotted.get(n))
+            .and_then(|(id, _)| value_text(graph, *id));
+        let payload = spawn_payload(
+            graph,
+            command,
+            Payload {
+                program_word,
+                name: payload_name.clone(),
+                machine,
+            },
+        );
+        graph.link(command, payload, EdgeKind::Spawns);
         if nested.effect.contains(&crate::cmdmap::Effect::Exec) {
-            graph.link(command, slotted[0], EdgeKind::Execs);
+            graph.link(command, payload, EdgeKind::Execs);
         }
         // The payload is everything after the program word, IN SOURCE ORDER and
         // including flags. Taking only the positionals dropped them: `sudo rm -rf
         // x` lost the `-rf`, and `sudo grep -e pat file` never bound `-e` at all,
         // so a flag carrying a path (`grep -f list`) lost its read edge too.
-        //
-        // Reference edges still land on the OUTER command node: there is no node
-        // for the payload yet, and "what does this command line delete?" is the
-        // question rules actually ask.
-        let inner: Vec<(NodeId, bool)> = words[start + 1..].to_vec();
-        apply_program(graph, command, &payload_name, &inner, maps);
+        let inner: Vec<(NodeId, bool)> = words[index + 1..].to_vec();
+        apply_program(graph, payload, &payload_name, &inner, maps);
         return;
     }
+    let slotted: Vec<NodeId> = slotted.into_iter().map(|(id, _)| id).collect();
 
     // the flags actually present, which is what a `when` guard is checked
     // against
@@ -1225,15 +1610,19 @@ fn apply_program(
     }
 }
 
-/// The first positional that is not some flag's argument.
+/// The leading positionals that are not some flag's argument — the words a
+/// subcommand path is matched against.
 ///
 /// Uses the program's global flags, which is the only way to tell a subcommand
-/// from a value the shell put in the same position.
-fn first_positional_after_flags(
+/// from a value the shell put in the same position. Returns a run rather than a
+/// single word because a subcommand can be a tree: `aws s3 cp` needs two words
+/// resolved before the right entry can be chosen, and `git rm` needs one.
+fn leading_positionals(
     graph: &Graph,
     words: &[(NodeId, bool)],
     global: Option<&crate::cmdmap::Program>,
-) -> Option<String> {
+) -> Vec<String> {
+    let mut out = Vec::new();
     let mut skip_next = false;
     for (id, is_flag) in words {
         if skip_next {
@@ -1246,15 +1635,22 @@ fn first_positional_after_flags(
                 .is_some_and(|f| f.takes);
             continue;
         }
-        if let Node::Value(v) = &graph.nodes[*id] {
-            return v.text.clone();
-        }
+        // a dynamic word is a subcommand nobody can name, and every word after
+        // it sits at an unknown depth — stop rather than match the wrong entry
+        let Node::Value(v) = &graph.nodes[*id] else {
+            break;
+        };
+        let Some(text) = v.text.clone() else { break };
+        out.push(text);
     }
-    None
+    out
 }
 
 /// A `PathSet` node for the path `value` names, sharing its spans so an edit
 /// still knows which bytes to touch.
+///
+/// Built for a remote root too — `aws s3 cp s3://b/prefix ./x --recursive` names
+/// a tree at each end, and the set carries which end it is.
 fn path_set_node(graph: &mut Graph, value: NodeId, recursive: bool) -> Option<NodeId> {
     let Node::Value(node) = &graph.nodes[value] else {
         return None;
@@ -1263,22 +1659,87 @@ fn path_set_node(graph: &mut Graph, value: NodeId, recursive: bool) -> Option<No
     // build a root from — the existing abstain-rather-than-guess convention
     let root = node.text.clone()?;
     let spans = node.spans.clone();
+    let locality = node.facts.locality;
+    let remote = node.remote.clone();
     let set = crate::globs::PathSet {
         roots: vec![root],
         recursive,
         ..Default::default()
     };
-    Some(graph.push(Node::PathSet(PathSetNode { spans, set })))
+    Some(graph.push(Node::PathSet(PathSetNode {
+        spans,
+        set,
+        locality,
+        remote,
+    })))
 }
 
-/// The payload of a wrapper: its program name, and the words that follow.
-fn payload(graph: &Graph, slotted: &[NodeId]) -> Option<(String, Vec<NodeId>)> {
-    let first = *slotted.first()?;
-    let Node::Value(value) = &graph.nodes[first] else {
-        return None;
+fn value_text(graph: &Graph, id: NodeId) -> Option<String> {
+    match &graph.nodes[id] {
+        Node::Value(value) => value.text.clone(),
+        _ => None,
+    }
+}
+
+/// Mint a `Command` node for a wrapper's payload.
+///
+/// `sudo rm -rf x` used to be one command called `sudo` with rm's delete edge
+/// hanging off it — the graph literally claimed *sudo* deletes the file, and a
+/// rewrite could not target the inner program at all (COMMAND-GRAPH's "nothing
+/// about a wrapper's payload creates a `Command` node yet").
+///
+/// Three facts travel down into the payload, and each is the answer to a
+/// question somebody asks:
+///
+/// - **locality** — `ssh host cat /etc/hosts` reads a file, on another machine.
+///   Without a command to hang that on there is no way to say it, which is why
+///   ssh's positionals were left unmapped and #4 was "fixed" by silence.
+/// - **privilege** — `sudo rm x` runs *rm* as root. The elevation belonged to
+///   the `sudo` node, where nothing that cares could reach it.
+/// - **host** — which machine, not just "not this one".
+///
+/// The node owns **no segments**: the program word is already owned by the
+/// `Value` it was lowered as, and two owners for one stretch of source is the
+/// span-surgery bug (#7) by construction. It borrows that word's spans as its
+/// own for reporting, and an edit still addresses the `Value`.
+/// The three things that describe a wrapper's payload, which travel together
+/// and mean nothing apart — the context-struct convention from #19.
+struct Payload {
+    /// the `Value` the program name was lowered as
+    program_word: NodeId,
+    name: String,
+    /// the machine the recipe named, if it named one
+    machine: Option<String>,
+}
+
+fn spawn_payload(graph: &mut Graph, outer: NodeId, payload: Payload) -> NodeId {
+    let Payload {
+        program_word,
+        name,
+        machine,
+    } = payload;
+    let (locality, host, privilege) = match &graph.nodes[outer] {
+        Node::Command(cmd) => (cmd.locality, cmd.host.clone(), cmd.privilege),
+        _ => (Locality::Local, None, Privilege::Normal),
     };
-    let name = value.text.clone()?;
-    Some((name, slotted[1..].to_vec()))
+    let spans = graph.nodes[program_word].spans().to_vec();
+    graph.push(Node::Command(CommandNode {
+        spans,
+        name: Some(name.clone()),
+        // a machine named here wins; otherwise a remote wrapper keeps its
+        // payload remote, so `ssh host sudo rm x` is remote all the way down
+        locality: match machine.is_some() {
+            true => Locality::Remote,
+            false => locality,
+        },
+        host: machine.or(host),
+        // elevation is inherited (`sudo rm` runs rm as root) but can also start
+        // here — `ssh host sudo rm x` elevates on the far side
+        privilege: match elevates(&name) {
+            true => Privilege::Elevated,
+            false => privilege,
+        },
+    }))
 }
 
 fn flag_spec<'a>(
@@ -1307,6 +1768,11 @@ fn emit_effects(
     if !kind.is_path() {
         return;
     }
+    // Locality is NOT checked here. An edge says what the command does to what
+    // it names; where that thing lives is a fact of the target node, and
+    // `Graph::references` combines the two. Dropping the edge instead would say
+    // `aws s3 rm s3://b/key` deletes nothing, which is false — it deletes a key
+    // in a bucket. Callers that mean this filesystem ask `referenced_paths`.
     for effect in effects {
         let edge = match effect {
             Effect::Read => EdgeKind::Reads,
@@ -1322,208 +1788,78 @@ fn emit_effects(
 
 #[cfg(test)]
 mod tests {
+    //! What examples of graph behaviour look like lives in
+    //! `tests/graph_cases/*.toml` — a command and what the graph should claim
+    //! about it, as data. What stays here is what a case file has no way to
+    //! say: pure functions, and the span bookkeeping that is expressed in node
+    //! ids rather than in text.
+
     use super::*;
 
-    fn names(graph: &Graph) -> Vec<String> {
-        graph
-            .commands()
-            .map(|(_, c)| c.name.clone().unwrap_or_else(|| "<dynamic>".into()))
-            .collect()
-    }
-
     #[test]
-    fn round_trips_a_simple_command() {
-        let g = lower("grep -n TODO src/main.rs");
-        assert_eq!(g.emit(), "grep -n TODO src/main.rs");
-        assert_eq!(names(&g), vec!["grep"]);
-    }
-
-    #[test]
-    fn flag_and_positional_are_distinguished() {
-        let g = lower("grep -n TODO src/main.rs");
-        let (cmd, _) = g.commands().next().unwrap();
-        let flags: Vec<_> = g
-            .edges_from(cmd)
-            .filter(|e| e.kind == EdgeKind::Has)
-            .collect();
-        let args: Vec<_> = g
-            .edges_from(cmd)
-            .filter(|e| matches!(e.kind, EdgeKind::Arg(_)))
-            .collect();
-        assert_eq!(flags.len(), 1);
-        assert_eq!(args.len(), 2);
-    }
-
-    #[test]
-    fn inline_flag_argument_is_bound_by_takes() {
-        let g = lower("ls --color=auto");
-        let takes: Vec<_> = g
-            .edges
-            .iter()
-            .filter(|e| e.kind == EdgeKind::Takes)
-            .collect();
-        assert_eq!(takes.len(), 1, "--color=auto should bind its own argument");
-        let Node::Value(v) = g.node(takes[0].to) else {
-            panic!("Takes target must be a Value")
-        };
-        assert_eq!(v.text.as_deref(), Some("auto"));
-        assert_eq!(g.emit(), "ls --color=auto");
-    }
-
-    #[test]
-    fn separated_flag_argument_is_left_unbound() {
-        // whether `-e` consumes the next word is a map question (sub-task 5);
-        // guessing here is exactly the class of bug #4 kept re-patching
-        let g = lower("grep -e foo bar");
-        assert!(!g.edges.iter().any(|e| e.kind == EdgeKind::Takes));
-    }
-
-    #[test]
-    fn pipeline_members_are_joined_by_a_flow_edge() {
-        let g = lower("cat notes.txt | grep secret");
-        assert_eq!(names(&g), vec!["cat", "grep"]);
-        let flow: Vec<_> = g
-            .edges
-            .iter()
-            .filter(|e| matches!(e.kind, EdgeKind::Flow(Connector::Pipe)))
-            .collect();
-        assert_eq!(flow.len(), 1);
-        assert_eq!(g.emit(), "cat notes.txt | grep secret");
-    }
-
-    #[test]
-    fn chain_connectors_are_typed_and_addressable() {
-        let g = lower("make build && make test");
-        let connectors: Vec<_> = g
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Node::Connector(c) => Some(c),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(connectors.len(), 1);
-        assert_eq!(connectors[0].kind, Connector::And);
-        // own span: sub-task 10's `insert` splices relative to this
-        assert_eq!(connectors[0].spans[0].text(&g.source), "&&");
-    }
-
-    #[test]
-    fn heredoc_nested_pipeline_is_reparented() {
-        // #12: the grammar buries `| grep secret` inside the heredoc redirect,
-        // so without re-parenting `cat` and `grep` are unrelated in the graph
-        let g = lower("cat <<EOF | grep secret\nline one\nEOF");
-        assert_eq!(names(&g), vec!["cat", "grep"]);
-        let flow: Vec<_> = g
-            .edges
-            .iter()
-            .filter(|e| matches!(e.kind, EdgeKind::Flow(Connector::Pipe)))
-            .collect();
-        assert_eq!(flow.len(), 1, "cat must flow into grep across the heredoc");
-        let Node::Command(from) = g.node(flow[0].from) else {
-            unreachable!()
-        };
-        let Node::Command(to) = g.node(flow[0].to) else {
-            unreachable!()
-        };
-        assert_eq!(from.name.as_deref(), Some("cat"));
-        assert_eq!(to.name.as_deref(), Some("grep"));
-    }
-
-    #[test]
-    fn heredoc_nested_chain_carries_its_own_connector() {
-        // `<<EOF && rm x` gets no `list` wrapper — the `&&` is a bare token
-        // among the redirect's children
-        let g = lower("cat <<EOF && rm x\nbody\nEOF");
-        assert_eq!(names(&g), vec!["cat", "rm"]);
-        assert!(
-            g.edges
-                .iter()
-                .any(|e| matches!(e.kind, EdgeKind::Flow(Connector::And))),
-            "expected an And flow edge, got {:?}",
-            g.edges.iter().map(|e| e.kind).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn reparenting_does_not_disturb_the_round_trip() {
-        for src in [
-            "cat <<EOF | grep secret\nline one\nEOF",
-            "cat <<-EOF | grep x\n\tbody\nEOF",
-            "cat <<'EOF' | grep x\nbody\nEOF",
-            "cat <<EOF && rm x\nbody\nEOF",
-            "echo a | cat <<EOF | grep x\nbody\nEOF",
+    fn a_location_prefix_makes_a_word_remote() {
+        // the discriminator shared by `aws s3 cp`, `kubectl cp` and `scp`: a
+        // `:` in a word that does not begin at a filesystem root
+        for word in [
+            "s3://bucket/key",
+            "host:/tmp/x",
+            "user@host:notes.txt",
+            "pod:/etc/config",
+            "ns/pod:/etc/config",
         ] {
-            let g = lower(src);
-            assert_eq!(g.emit(), src, "P1 violated for {src:?}");
-            assert!(
-                g.overlapping_segments().is_none(),
-                "overlapping segments for {src:?}"
-            );
+            assert_eq!(locality_of(word), Locality::Remote, "{word}");
+        }
+        // ...and everything that could name something outside this directory
+        // starts with a separator or a dot, so it cannot be mistaken for one
+        for word in [
+            "/var/log/a:b",
+            "./a:b",
+            "../a:b",
+            "~/a:b",
+            "src/main.rs",
+            "README.md",
+            "-",
+            "",
+        ] {
+            assert_eq!(locality_of(word), Locality::Local, "{word}");
         }
     }
 
     #[test]
-    fn redirect_becomes_a_stream_attached_to_its_command() {
-        let g = lower("echo hi > out.txt");
-        let stream = g
-            .nodes
-            .iter()
-            .enumerate()
-            .find_map(|(i, n)| matches!(n, Node::Stream(_)).then_some(i))
-            .expect("stream node");
-        assert!(g.edges_from(stream).any(|e| e.kind == EdgeKind::On));
-        assert_eq!(g.emit(), "echo hi > out.txt");
+    fn a_remote_reference_splits_into_machine_and_path() {
+        // the split nothing configures yet, and the reason the graph carries it
+        // anyway: `s3://prod-bucket/key` is a key in a NAMED bucket, and a rule
+        // that cannot see the bucket can never be written
+        let s3 = RemoteRef::parse("s3://prod-bucket/data/x.csv").expect("remote");
+        assert_eq!(s3.scheme.as_deref(), Some("s3"));
+        assert_eq!(s3.authority, "prod-bucket");
+        assert_eq!(s3.path, "/data/x.csv");
+
+        let scp = RemoteRef::parse("user@host:/etc/shadow").expect("remote");
+        assert_eq!(scp.scheme, None);
+        assert_eq!(scp.authority, "user@host");
+        assert_eq!(scp.path, "/etc/shadow");
+
+        // a bucket with no key, and a host with no path
+        assert_eq!(RemoteRef::parse("s3://bucket").unwrap().path, "");
+        assert_eq!(RemoteRef::parse("host:").unwrap().path, "");
+        // kubectl's namespaced form: the machine is `ns/pod`
+        assert_eq!(
+            RemoteRef::parse("ns/pod:/etc/x").unwrap().authority,
+            "ns/pod"
+        );
+
+        assert_eq!(RemoteRef::parse("/var/log/a:b"), None);
+        assert_eq!(RemoteRef::parse("src/main.rs"), None);
     }
 
     #[test]
-    fn dynamic_word_is_marked_and_not_resolved() {
-        let g = lower("cat $TARGET");
-        let values: Vec<_> = g
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Node::Value(v) => Some(v),
-                _ => None,
-            })
-            .collect();
-        let dynamic = values
-            .iter()
-            .find(|v| v.facts.dynamic)
-            .expect("dynamic value");
-        assert!(dynamic.text.is_none());
-        assert!(!dynamic.facts.literal);
-    }
-
-    #[test]
-    fn absolute_and_relative_are_distinguished() {
-        let g = lower("cp src/a.txt /etc/b.txt");
-        let mut facts: Vec<_> = g
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Node::Value(v) => Some(v.facts),
-                _ => None,
-            })
-            .collect();
-        facts.retain(|f| f.absolute || f.relative);
-        assert_eq!(facts.len(), 2);
-        assert!(facts.iter().any(|f| f.absolute));
-        assert!(facts.iter().any(|f| f.relative));
-    }
-
-    #[test]
-    fn command_substitution_payload_is_spawned() {
-        let g = lower("grep pattern $(cat list.txt)");
-        assert!(names(&g).contains(&"cat".to_string()));
-        assert!(g.edges.iter().any(|e| e.kind == EdgeKind::Spawns));
-        assert_eq!(g.emit(), "grep pattern $(cat list.txt)");
-    }
-
-    #[test]
-    fn no_reference_edges_without_an_argument_map() {
-        // the inverted default: an unmapped program produces no claims at all
-        let g = lower("rm -rf /etc/passwd");
+    fn lowering_alone_makes_no_claims() {
+        // `lower` stays opinion-free: every claim enters through `apply_maps`,
+        // so a caller with no recipes gets exactly the stage-1 graph. The case
+        // files all run WITH recipes, so this is the one direction they cannot
+        // check.
+        let g = lower("rm -rf /etc/passwd > /tmp/log");
         assert!(!g.edges.iter().any(|e| matches!(
             e.kind,
             EdgeKind::Reads
@@ -1532,36 +1868,41 @@ mod tests {
                 | EdgeKind::Creates
                 | EdgeKind::Execs
         )));
-    }
-
-    #[test]
-    fn unmodelled_constructs_still_round_trip() {
-        // `if`/`for` are not modelled in stage 1; their keywords fall through
-        // as gaps, and the commands inside them are still lowered
-        for src in [
-            "if [ -f x ]; then cat x; fi",
-            "for f in *.rs; do rustfmt $f; done",
-            "while read l; do echo $l; done",
-        ] {
-            assert_eq!(lower(src).emit(), src, "round-trip failed for {src}");
-        }
+        assert!(g.references().is_empty());
     }
 
     #[test]
     fn emit_with_replaces_only_the_named_node() {
         // the #7 regression in graph form: rewriting the program name must
-        // leave every flag and argument exactly where it was
+        // leave every flag and argument exactly where it was. Expressed in node
+        // ids, which is why it is here and not in a case file.
         let g = lower("grep -n TODO src/main.rs");
         let (cmd, _) = g.commands().next().unwrap();
         let name_span = g.nodes[cmd].spans()[0];
-        let owner = g
-            .segments
-            .iter()
-            .find(|(s, _)| *s == name_span)
-            .map(|(_, id)| *id)
-            .unwrap();
+        let owner = g.segment_owner(name_span).expect("the name span is owned");
         let mut edits = HashMap::new();
         edits.insert(owner, "rg".to_string());
         assert_eq!(g.emit_with(&edits), "rg -n TODO src/main.rs");
+    }
+
+    #[test]
+    fn a_minted_payload_command_owns_no_bytes() {
+        // Two owners for one stretch of source is the span-surgery bug (#7) by
+        // construction, and a wrapper's payload is what invites it: `rm` is
+        // already a `Value` of `sudo`, and the `Command` minted for it borrows
+        // those spans for reporting without claiming them. An edit still
+        // addresses the `Value`, which is what `edits.toml` exercises.
+        let maps = crate::cmdmap::Maps::builtin().expect("recipes");
+        let g = lower_with_maps("sudo rm -rf /etc/x", &maps);
+        assert!(g.overlapping_segments().is_none());
+        let (payload, node) = g
+            .commands()
+            .find(|(_, c)| c.name.as_deref() == Some("rm"))
+            .expect("the payload is a command of its own");
+        assert!(g.owned_spans(payload).is_empty());
+        let owner = g
+            .segment_owner(node.spans[0])
+            .expect("the program word is owned by something");
+        assert!(matches!(g.node(owner), Node::Value(_)), "{owner:?}");
     }
 }

@@ -1,0 +1,87 @@
+name  = "a wrapper's payload is a command of its own"
+issue = 13
+
+# `sudo rm -rf x` used to lower as ONE command called `sudo`, with rm's delete
+# edge hanging off it — the graph literally claimed that *sudo* deletes the
+# file. Now the payload is its own node, which is what carries the three facts
+# somebody asks about: which program actually runs, whether it runs as root, and
+# which machine it runs on.
+
+[[case]]
+name    = "sudo's payload is rm, and rm is the one running as root"
+command = "sudo rm -rf /etc/x"
+expect  = { commands = [
+  "sudo !root",
+  "rm !root",
+], local = [
+  "execs rm",
+  "deletes /etc/x/**",
+], spawns = ["sudo spawns rm"] }
+
+[[case]]
+name    = "env"
+command = "env cat notes.txt"
+expect  = { commands = ["env", "cat"], local = ["execs cat", "reads notes.txt"] }
+
+[[case]]
+name    = "xargs"
+command = "xargs rm build/out"
+expect  = { commands = ["xargs", "rm"], local = ["execs rm", "deletes build/out"] }
+
+[[case]]
+name    = "the wrapper's own flags do not become the payload"
+command = "sudo -u root rm /etc/x"
+expect  = { commands = ["sudo !root", "rm !root"], local = [
+  "execs rm",
+  "deletes /etc/x",
+] }
+
+[[case]]
+# The payload used to be built from positionals only, which silently dropped
+# every flag: `sudo grep -e pat file` bound nothing at all.
+name    = "the payload gets the whole line, flags included"
+command = "sudo grep -e pat file.rs"
+expect  = { local = ["execs grep", "reads file.rs"], binds = ["-e=pat"] }
+
+[[case]]
+name    = "the sharp case: a flag carrying a path keeps its read edge"
+command = "sudo grep -f list.txt src.rs"
+expect  = { local = ["execs grep", "reads list.txt", "reads src.rs"] }
+
+[[case]]
+name    = "and the recursion flag survives the wrapper"
+command = "sudo rm -rf build"
+expect  = { local = ["execs rm", "deletes build/**"] }
+
+# ── the same machinery, one machine over ──
+
+[[case]]
+name    = "ssh runs its payload on the host it names"
+command = "ssh host rm /etc/y"
+expect  = { commands = [
+  "ssh",
+  "rm @host",
+], local = [], remote = [
+  "execs rm",
+  "deletes /etc/y",
+] }
+
+[[case]]
+name    = "remoteness is inherited all the way down"
+command = "ssh host sudo rm /etc/y"
+expect  = { commands = [
+  "ssh",
+  "sudo @host !root",
+  "rm @host !root",
+], remote = [
+  "execs sudo",
+  "execs rm",
+  "deletes /etc/y",
+] }
+
+[[case]]
+# `1+` in ssh's recipe: the payload starts AFTER the host. `rest` would take the
+# hostname itself as the program to run.
+name    = "the host is not mistaken for the program"
+command = "ssh build-box uptime"
+expect  = { commands = ["ssh", "uptime @build-box"], local = [] }

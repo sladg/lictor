@@ -86,6 +86,61 @@ fn an_unmapped_program_is_invisible_to_the_graph_source() {
 }
 
 #[test]
+fn a_transfer_is_judged_on_its_local_side_only() {
+    // Issue #25, through the consumer that acts on it. `aws s3 cp` and `scp`
+    // name both machines in one positional list, and the jail is a claim about
+    // this one: the local side is a real escape, the bucket key and the far end
+    // of the ssh connection are not paths here at all.
+    for (command, expected) in [
+        ("scp /etc/shadow host:/tmp/x", "/etc/shadow"),
+        ("scp host:/etc/shadow /tmp/x", "/tmp/x"),
+        ("aws s3 cp /etc/shadow s3://bucket/k", "/etc/shadow"),
+        ("aws s3 sync s3://bucket /etc/cron.d", "/etc/cron.d"),
+    ] {
+        assert_eq!(
+            violations("graph", command),
+            [expected],
+            "{command:?} must be judged on its local side alone"
+        );
+    }
+    // and a transfer with no local side at all is silent, rather than claiming
+    // a bucket key is a file here
+    assert!(violations("graph", "aws s3 rm s3://bucket/key").is_empty());
+}
+
+#[test]
+fn a_redirect_target_is_a_path_the_graph_can_see() {
+    // Issue #29. A redirect target is not one of the command's WORDS, so the
+    // walk the jail does never looked at it: `echo x >> /etc/hosts` writes
+    // outside the project and was invisible to both sources.
+    //
+    // The graph models it — a redirect is shell syntax that opens a file
+    // whatever the program is — and the graph source no longer lets the old
+    // extractor's word list bound what it may say.
+    for (command, expected) in [
+        ("echo x >> /etc/hosts", "/etc/hosts"),
+        ("echo x > /etc/passwd", "/etc/passwd"),
+        ("cat < /etc/shadow", "/etc/shadow"),
+        // an unmapped program cannot hide a write behind a redirect either
+        ("frobnicate --quiet > /etc/passwd", "/etc/passwd"),
+    ] {
+        assert!(
+            violations("heuristic", command).is_empty(),
+            "{command:?} — if the heuristic starts catching this, the comparison is moot"
+        );
+        assert_eq!(
+            violations("graph", command),
+            [expected],
+            "{command:?} must be caught by the graph source"
+        );
+    }
+    // ...and a redirect inside the project is still nobody's business
+    assert!(violations("graph", "echo x > ./out.txt").is_empty());
+    // a descriptor dup names no file at all
+    assert!(violations("graph", "cmd 2>&1").is_empty());
+}
+
+#[test]
 fn an_in_project_path_is_flagged_by_neither() {
     for mode in ["heuristic", "graph", "compare"] {
         assert!(violations(mode, "cat README.md").is_empty());

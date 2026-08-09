@@ -1,0 +1,73 @@
+name  = "one row per shape that broke an earlier consumer"
+issue = 13
+
+# These are the command shapes where a consumer re-derived structure from the
+# CST and got it wrong. Every case here asserts P1 for free, which is what this
+# file replaced: a hand-written round-trip list in `graph_p1.rs` that asserted
+# nothing else. Stating a claim as well is strictly stronger and no longer.
+
+[[case]]
+name    = "#7 — the rewrite that ate the flag"
+command = "grep -n TODO src/main.rs"
+expect  = { local = ["reads src/main.rs"] }
+
+[[case]]
+name    = "#12 — a bare heredoc"
+command = "cat <<EOF\nbody\nEOF"
+expect  = { commands = ["cat"] }
+
+[[case]]
+name    = "#4 — a regex that looks like a path"
+command = "rg '/api/v1/users' src/"
+expect  = { local = ["reads src/"] }
+
+[[case]]
+name    = "#8 — a three-stage pipeline"
+command = "a | b | c"
+expect  = { flow = ["a --pipe--> b", "b --pipe--> c"] }
+
+[[case]]
+name    = "#8 — mixed connectors, including the top-level `;`"
+command = "a && b || c ; d"
+expect  = { flow = ["a --and--> b", "b --or--> c", "c --seq--> d"] }
+
+[[case]]
+# `tee` has no recipe, so its argument is claimed by nobody — the inverted
+# default, visible in passing
+name    = "a descriptor dup mid-pipeline"
+command = "cmd 2>&1 | tee log.txt"
+expect  = { flow = ["cmd --pipe--> tee"], local = [] }
+
+[[case]]
+name    = "quoting and expansion in one word list"
+command = "echo \"a $VAR b\" 'raw' $'ansi\\x20c'"
+expect  = { commands = ["echo"] }
+
+[[case]]
+name    = "an assignment prefix is not an argument"
+command = "D=/tmp/x cmd --flag=value -- trailing"
+expect  = { commands = ["cmd"], binds = ["--flag=value"] }
+
+[[case]]
+name    = "a subshell"
+command = "( cd /tmp && ls )"
+expect  = { commands = ["cd", "ls"], flow = ["cd --and--> ls"] }
+
+[[case]]
+name    = "a brace group"
+command = "{ echo a; echo b; }"
+expect  = { commands = ["echo", "echo"] }
+
+# ── degenerate input still has to round-trip ──
+
+[[case]]
+command = ""
+expect  = { commands = [] }
+
+[[case]]
+command = "   "
+expect  = { commands = [] }
+
+[[case]]
+command = "#!/bin/sh"
+expect  = { commands = [] }

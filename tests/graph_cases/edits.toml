@@ -1,0 +1,75 @@
+name  = "edit soundness — what the emitted text re-parses to"
+issue = 7
+
+# P2 (`parse(emit(g′)) ≡ g′`) with the intended graph written down by a person
+# instead of derived from the graph under test. A derivation shares its bugs
+# with the thing it checks; a table does not.
+#
+# `tests/graph_p2.rs` sweeps the whole corpus for the structural half of this.
+# What lives here is the half a sweep cannot state: after the edit, are the
+# CLAIMS still the ones you meant?
+
+[[case]]
+# #7 itself: `grep -n TODO x` rewrote to `rg TODO x`, one flag quietly gone
+name    = "renaming the program leaves every flag where it was"
+command = "grep -n TODO src/main.rs"
+edit    = { command = "grep", to = "rg" }
+expect  = { emit = "rg -n TODO src/main.rs", local = ["reads src/main.rs"] }
+
+[[case]]
+# This used to be impossible to express: `sudo grep …` lowered as ONE command
+# called sudo, so there was no inner program to name. `graph_p2.rs` still
+# carries the note that a rewrite could not target it.
+name    = "a wrapper's payload can be rewritten"
+command = "sudo grep foo /var/log/x"
+edit    = { command = "grep", to = "rg" }
+expect  = { emit = "sudo rg foo /var/log/x", local = [
+  "execs rg",
+  "reads /var/log/x",
+] }
+
+[[case]]
+name    = "editing an argument moves the claim with it"
+command = "cp a.txt b.txt"
+edit    = { value = "a.txt", to = "c.txt" }
+expect  = { emit = "cp c.txt b.txt", local = [
+  "reads c.txt",
+  "writes b.txt",
+  "creates b.txt",
+] }
+
+[[case]]
+# the case the fingerprint's locality exists for: an edit that moves a reference
+# from this machine to another one is a change in meaning, not a rename
+name    = "an edit can move a reference to another machine"
+command = "aws s3 cp ./build s3://bucket/path"
+edit    = { value = "./build", to = "s3://other/x" }
+expect  = { emit = "aws s3 cp s3://other/x s3://bucket/path", local = [], remote = [
+  "reads s3://other/x",
+  "writes s3://bucket/path",
+  "creates s3://bucket/path",
+] }
+
+[[case]]
+name    = "a heredoc must not swallow the edit or the rest of the pipeline"
+command = "cat <<EOF | grep secret\nline one\nEOF"
+edit    = { command = "cat", to = "tee" }
+expect  = { emit = "tee <<EOF | grep secret\nline one\nEOF", flow = [
+  "tee --pipe--> grep",
+] }
+
+[[case]]
+# the discontiguous-span case: only the string's own bytes move
+name    = "a substitution inside an edited word survives"
+command = "echo \"pre $(id) post\""
+edit    = { command = "echo", to = "printf" }
+expect  = { emit = "printf \"pre $(id) post\"", commands = ["printf", "id"] }
+
+[[case]]
+name    = "rewriting the destination of a redirect leaves the operator alone"
+command = "echo hi > /etc/passwd"
+edit    = { value = "/etc/passwd", to = "./out.txt" }
+expect  = { emit = "echo hi > ./out.txt", local = [
+  "writes ./out.txt",
+  "creates ./out.txt",
+] }
