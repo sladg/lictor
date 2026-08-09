@@ -235,6 +235,13 @@ pub struct Settings {
     pub jail: Option<Action>,
     #[serde(default)]
     pub jail_allow: Option<Vec<String>>,
+    // a jail candidate outside every root, whose path and every parent
+    // directory don't exist on disk, is a false positive (a sed script, a
+    // regex) rather than an escape. Off by default: it also blinds the jail to
+    // a genuine attempt to CREATE a file outside the repo, which is exactly
+    // what a deny jail exists to catch.
+    #[serde(default)]
+    pub jail_require_existing: Option<bool>,
     // fallback when no rule produced a decision: flips lictor from blocklist to
     // allowlist (e.g. plan mode: default_bash/default_edit = "deny", only the
     // explicit allow rules pass). default_web covers unmatched WebFetch URLs.
@@ -409,6 +416,9 @@ impl Config {
         if other.settings.jail_allow.is_some() {
             self.settings.jail_allow = other.settings.jail_allow;
         }
+        if other.settings.jail_require_existing.is_some() {
+            self.settings.jail_require_existing = other.settings.jail_require_existing;
+        }
         if other.settings.default_bash.is_some() {
             self.settings.default_bash = other.settings.default_bash;
         }
@@ -524,6 +534,10 @@ impl Config {
 
     pub fn jail_allow(&self) -> &[String] {
         self.settings.jail_allow.as_deref().unwrap_or(&[])
+    }
+
+    pub fn jail_require_existing(&self) -> bool {
+        self.settings.jail_require_existing.unwrap_or(false)
     }
 
     // relative paths resolve against the hook's cwd, not the lictor process cwd

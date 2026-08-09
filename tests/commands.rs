@@ -2489,3 +2489,32 @@ fn piped_into_denies_the_pipeline_but_not_its_parts() {
     );
     assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
 }
+
+// issue #4: execution locality suppresses the jail's LOCAL-filesystem reasoning
+// for a remote command's payload, but [[bash]] deny rules read `Command::words`
+// directly (not through jail's walk_words) — they must still see and gate the
+// inner command, e.g. `kubectl exec pod -- rm -rf /`. `kubectl exec ...` parses
+// as ONE command (no nested command node the way `bash -c` gets), so the rule
+// has to match on `contains`, which scans every word regardless of position —
+// not on a `match` prefix anchored to word[0].
+#[test]
+fn remote_command_still_gated_by_bash_deny_rules() {
+    let policy = r#"
+[[bash]]
+match = "kubectl*"
+contains = ["rm"]
+action = "deny"
+reason = "no rm through kubectl exec"
+
+[settings]
+jail = "deny"
+"#;
+    let output = run_with(
+        policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "kubectl exec pod -- rm -rf /"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+}

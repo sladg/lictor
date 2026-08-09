@@ -10,11 +10,16 @@ use crate::config::{Config, ModuleSetting};
 // invoked from a subdirectory can still `cd ..`/reference sibling paths
 // anywhere in the repo. cwd is the fallback when it isn't inside a repo.
 
-// project root (git repo containing cwd) + jail_allow — the one "trusted roots"
-// list the outside-project check reasons about
+// project root(s) (git repo containing cwd, plus — inside a linked worktree —
+// the main checkout) + jail_allow: the "trusted roots" list the outside-project
+// check reasons about
 pub(crate) fn roots(config: &Config, cwd: &str, home: &str) -> Vec<String> {
-    let primary = git_root(cwd).unwrap_or_else(|| cwd.to_string());
-    let mut roots = vec![normalize(&primary, cwd, home)];
+    let primary = git_roots(cwd);
+    let mut roots: Vec<String> = if primary.is_empty() {
+        vec![normalize(cwd, cwd, home)]
+    } else {
+        primary.iter().map(|p| normalize(p, cwd, home)).collect()
+    };
     roots.extend(config.jail_allow().iter().map(|p| normalize(p, cwd, home)));
     roots
 }
@@ -82,17 +87,39 @@ pub fn violation_for_path(path: &str, config: &Config, cwd: &str) -> Option<Stri
 pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = roots(config, cwd, &home);
+    let require_existing = config.jail_require_existing();
     let mut out = Vec::new();
     let candidate_of = |text: &str| {
         let candidate = path_candidate(text);
         looks_like_path(candidate).then(|| candidate.to_string())
     };
     for (_, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
-        if !is_trusted(&roots, &resolved) && !out.contains(&resolved) {
-            out.push(resolved);
+        if is_trusted(&roots, &resolved) || out.contains(&resolved) {
+            continue;
         }
+        if require_existing && !exists_or_parent_exists(&resolved) {
+            continue;
+        }
+        out.push(resolved);
     }
     out
+}
+
+// settings.jail_require_existing backstop: nothing on this candidate's chain
+// (itself or any ancestor, stopping short of the filesystem root — which
+// trivially always exists) is real, so it reads as a non-path token the shape
+// heuristics missed rather than a genuine escape.
+fn exists_or_parent_exists(path: &str) -> bool {
+    let mut current = std::path::PathBuf::from(path);
+    while current.as_os_str().len() > 1 {
+        if current.exists() {
+            return true;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    false
 }
 
 // the inside-the-project mirror of `violations`: an absolute path pointing at a
@@ -226,7 +253,18 @@ pub(crate) fn walk_words(
         if command.synthetic && !include_synthetic {
             continue;
         }
-        for word in command.words.iter().skip(1) {
+        // words at/after remote_from execute on another filesystem (ssh's
+        // remote command, kubectl exec's payload, ...) — local containment has
+        // no opinion on them. [[bash]] rules don't go through walk_words, so
+        // they still see these words untouched.
+        let remote_from = command.remote_from.unwrap_or(usize::MAX);
+        // program-text slots (a sed/awk script, a grep -e pattern, ...) look
+        // like paths lexically but aren't filesystem references at all
+        let expressions = crate::word_roles::expression_word_indices(command);
+        for (i, word) in command.words.iter().enumerate().skip(1) {
+            if i >= remote_from || expressions.contains(&i) {
+                continue;
+            }
             let expanded;
             let text = match word.text.as_deref() {
                 Some(text) => text,
@@ -284,8 +322,33 @@ fn cd_target(command: &Command, home: &str) -> Option<Option<String>> {
 // primary root is the whole repo — not the literal directory the hook happened
 // to start from. None when cwd isn't inside a repo (or `git` isn't available).
 fn git_root(cwd: &str) -> Option<String> {
+    git_probe(cwd, "--show-toplevel")
+}
+
+// `--show-toplevel` alone returns the WORKTREE root inside a linked git
+// worktree, not the main checkout — a shell that `cd`s into a worktree could
+// then never `cd` back out, since every route including editing jail_allow
+// itself reads as outside the jail (issue #6, reproduced against a live
+// session). `--git-common-dir`'s parent is the main checkout in both cases: a
+// linked worktree AND an ordinary repo, where it equals --show-toplevel — a
+// harmless duplicate root, is_inside already dedupes via its `{r}/` prefix check.
+fn git_roots(cwd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    out.extend(git_probe(cwd, "--show-toplevel"));
+    if let Some(common) = git_probe(cwd, "--git-common-dir")
+        && let Some(parent) = std::path::Path::new(&common).parent()
+    {
+        out.push(parent.to_string_lossy().into_owned());
+    }
+    out
+}
+
+// --path-format=absolute matters for --git-common-dir: an ordinary (non-worktree)
+// checkout returns a bare relative ".git" otherwise, which would resolve against
+// the wrong base. --show-toplevel is already always absolute; harmless there.
+fn git_probe(cwd: &str, arg: &str) -> Option<String> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args(["rev-parse", "--path-format=absolute", arg])
         .current_dir(cwd)
         .stderr(std::process::Stdio::null())
         .output()
@@ -326,12 +389,21 @@ fn expand_home(raw: &str, home: &str) -> Option<String> {
 }
 
 pub(crate) fn looks_like_path(text: &str) -> bool {
-    text.starts_with('/')
+    (text.starts_with('/')
         || text == "~"
         || text.starts_with("~/")
         || text == ".."
         || text.starts_with("../")
-        || text.contains("/../")
+        || text.contains("/../"))
+        && !has_non_path_shape(text)
+}
+
+// long-tail shape signal for candidates the argument-role table doesn't cover:
+// a trailing '/' (nothing on a real filesystem ends a path there on purpose)
+// or regex metacharacters a literal path segment wouldn't contain (`s/a/b/g`)
+fn has_non_path_shape(text: &str) -> bool {
+    (text.ends_with('/') && text.len() > 1)
+        || text.contains(|c: char| matches!(c, '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '\\'))
 }
 
 pub(crate) fn normalize(path: &str, cwd: &str, home: &str) -> String {
@@ -662,13 +734,23 @@ mod tests {
 
     #[test]
     fn multi_hop_cd_escape_now_detected() {
-        // previously `../README.md` resolved against the ORIGINAL cwd
-        // (src/modules), landing inside `src/` — a false negative. With `cd`
-        // tracked, it resolves against the post-`cd ../..` cwd (repo root),
-        // landing one level ABOVE the repo — correctly flagged.
+        // previously a post-cd relative escape resolved against the ORIGINAL
+        // cwd (src/modules), landing inside `src/` — a false negative. With
+        // `cd` tracked, it resolves against the post-`cd ../..` cwd (repo
+        // root) instead — correctly flagged. Escapes far enough (clamped at
+        // `/` by normalize, landing in `/etc`) to stay unambiguously outside
+        // every trusted root no matter how deep this checkout sits — issue #6
+        // adds a second root (the main checkout) when this crate's own
+        // checkout is itself a linked worktree nested under it, which a
+        // one-level-up escape used to land inside by coincidence.
         let subdir = repo_subdir("src/modules");
         assert_eq!(
-            check_at("cd ../.. && cat ../README.md", &[], &subdir).len(),
+            check_at(
+                "cd ../.. && cat ../../../../../../../../../../etc/hosts",
+                &[],
+                &subdir
+            )
+            .len(),
             1
         );
     }
@@ -702,7 +784,188 @@ mod tests {
         assert!(!check_at("cd - && cat ../../../../../../etc/passwd", &[], &subdir).is_empty());
     }
 
+    // ── issue #6: a linked git worktree must not one-way-latch the jail ──
+    //
+    // `--show-toplevel` alone returns the WORKTREE root inside a linked
+    // worktree, not the main checkout — before this fix, cd-ing into a
+    // worktree meant every route back out (including editing jail_allow
+    // itself) read as "outside the project". This crate's own checkout under
+    // test IS a linked worktree in CI/agent sandboxes, so these fixtures
+    // create a throwaway worktree/repo with `git` directly rather than assume
+    // one already exists.
+
+    #[test]
+    fn linked_worktree_trusts_main_checkout_root() {
+        let main_root = env!("CARGO_MANIFEST_DIR");
+        let wt_path = std::env::temp_dir().join(format!("lictor-jail-worktree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt_path);
+        let added = std::process::Command::new("git")
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&wt_path)
+            .current_dir(main_root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !added.is_ok_and(|s| s.success()) {
+            // no git / can't create worktrees in this environment — nothing to assert
+            return;
+        }
+        let wt = wt_path.to_str().unwrap();
+
+        // the main checkout root itself, reached from inside the worktree
+        assert!(check_at(&format!("cd {main_root}"), &[], wt).is_empty());
+        // a file inside the main checkout, not the worktree
+        assert!(check_at(&format!("cat {main_root}/README.md"), &[], wt).is_empty());
+        // real escapes are still caught — this isn't a blanket unlock
+        assert_eq!(check_at("cat /etc/hosts", &[], wt), vec!["/etc/hosts"]);
+
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&wt_path)
+            .current_dir(main_root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::fs::remove_dir_all(&wt_path).ok();
+    }
+
+    #[test]
+    fn ordinary_checkout_no_regression() {
+        // a plain (non-worktree) repo: --show-toplevel and --git-common-dir's
+        // parent are the same directory, so the fix is purely additive here
+        let base = std::env::temp_dir().join(format!("lictor-jail-ordinary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let inited = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&base)
+            .status();
+        if !inited.is_ok_and(|s| s.success()) {
+            std::fs::remove_dir_all(&base).ok();
+            return;
+        }
+        let repo = base.to_str().unwrap();
+        let parent = base.parent().unwrap().to_str().unwrap();
+
+        // repo root trusted, as before
+        assert!(check_at("cat README.md", &[], repo).is_empty());
+        // its parent — outside the repo — is still flagged
+        assert_eq!(check_at(&format!("cat {parent}"), &[], repo), vec![parent.to_string()]);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     fn check_at(command: &str, allow: &[&str], cwd: &str) -> Vec<String> {
         violations(&bash::extract(command), &config(allow), cwd)
+    }
+
+    // ── issue #4 required test matrix: jail false positives on non-local paths ──
+
+    #[test]
+    fn kubectl_exec_inner_path_not_local() {
+        // /etc/config/config.yaml lives inside the container, not on this machine
+        assert!(check("kubectl -n ns exec pod -c c -- grep -c img /etc/config/config.yaml", &[]).is_empty());
+    }
+
+    #[test]
+    fn sed_address_script_not_a_path() {
+        assert!(check("sed -n '/needle/p' README.md", &[]).is_empty());
+    }
+
+    #[test]
+    fn sed_substitution_script_not_a_path() {
+        assert!(check("sed 's/foo/bar/g' README.md", &[]).is_empty());
+    }
+
+    #[test]
+    fn awk_program_not_a_path() {
+        assert!(check("awk '/error/ {print $2}' log.txt", &[]).is_empty());
+    }
+
+    #[test]
+    fn ssh_remote_argument_not_local() {
+        assert!(check("ssh host cat /etc/hosts", &[]).is_empty());
+    }
+
+    #[test]
+    fn rg_pattern_not_a_path() {
+        assert!(check("rg '/api/v1/users' src/", &[]).is_empty());
+    }
+
+    #[test]
+    fn sed_dash_f_value_is_a_real_path_still_denied() {
+        // -f names an actual script file on disk — must not regress into the
+        // "it's just an expression" bucket
+        assert_eq!(
+            check("sed -f /etc/scripts/x.sed README.md", &[]),
+            vec!["/etc/scripts/x.sed"]
+        );
+    }
+
+    #[test]
+    fn plain_cat_outside_repo_still_denied() {
+        // regression guard: none of the new machinery should touch the base case
+        assert_eq!(check("cat /etc/hosts", &[]), vec!["/etc/hosts"]);
+    }
+
+    // ── jail_require_existing backstop ──
+
+    fn config_require_existing(require: bool) -> Config {
+        toml::from_str(&format!(
+            "[settings]\njail = \"ask\"\njail_require_existing = {require}"
+        ))
+        .expect("test config parses")
+    }
+
+    // a candidate the argument-role table and shape heuristic both miss (plain
+    // `cat`, no delimiter shape) but that plainly doesn't exist anywhere
+    const NONEXISTENT: &str = "/definitely-nonexistent-lictor-jail-test-canary/file.txt";
+
+    #[test]
+    fn require_existing_drops_nonexistent_candidate() {
+        // the candidate and every ancestor are absent from disk — the backstop
+        // treats it as a false positive rather than an escape
+        let out = violations(
+            &bash::extract(&format!("cat {NONEXISTENT}")),
+            &config_require_existing(true),
+            CWD,
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn require_existing_keeps_real_path_denied() {
+        // /etc/hosts is real on any machine running this test — the backstop
+        // must not blind the jail to genuine escapes
+        let out = violations(
+            &bash::extract("cat /etc/hosts"),
+            &config_require_existing(true),
+            CWD,
+        );
+        assert_eq!(out, vec!["/etc/hosts"]);
+    }
+
+    #[test]
+    fn require_existing_off_by_default_still_flags_nonexistent_candidate() {
+        // off (the default): today's behavior is unchanged, the candidate still denies
+        let out = violations(
+            &bash::extract(&format!("cat {NONEXISTENT}")),
+            &config_require_existing(false),
+            CWD,
+        );
+        assert_eq!(out, vec![NONEXISTENT]);
+    }
+
+    // ── looks_like_path shape heuristic ──
+
+    #[test]
+    fn shape_heuristic_rejects_delimiter_forms() {
+        // a trailing slash: nothing on a real filesystem argument ends there
+        assert!(!looks_like_path("/trailing/slash/"));
+        // regex metacharacters a literal path segment wouldn't contain
+        assert!(!looks_like_path("/[Ee]rror/p"));
+        assert!(!looks_like_path("/^anchored$/"));
+        // a genuine path is untouched
+        assert!(looks_like_path("/etc/hosts"));
     }
 }

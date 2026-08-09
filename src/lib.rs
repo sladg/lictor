@@ -11,3 +11,4 @@ pub mod minify;
 pub mod modules;
 pub mod rules;
 pub mod web;
+pub mod word_roles;

@@ -47,6 +47,12 @@ pub struct Command {
     pub position: usize,
     pub group_len: usize,
     pub connector: Connector,
+    // word index at which this command's arguments start executing on another
+    // filesystem (ssh's remote command, kubectl exec's payload, ...); None =
+    // fully local. Local-filesystem checks (jail, path_rules) stop reasoning
+    // about paths from this index on — [[bash]] rules are untouched, they still
+    // see every word.
+    pub remote_from: Option<usize>,
 }
 
 impl Command {
@@ -426,6 +432,7 @@ fn push_variant(
     // inline detection per-variant: raw `sudo python -c` -> None, stripped `python -c` -> Some,
     // find-exec'd `sh` -> Some (this is what closes the -exec shell-spawn gap)
     let inline = detect_inline(&words);
+    let remote_from = detect_remote_from(&words);
     out.commands.push(Command {
         words,
         synthetic,
@@ -437,6 +444,7 @@ fn push_variant(
         position: group.position,
         group_len: group.group_len,
         connector: group.connector,
+        remote_from,
     });
 }
 
@@ -675,6 +683,161 @@ fn strip_wrappers(words: &[Word]) -> Option<Vec<Word>> {
         stripped_any = true;
     }
     stripped_any.then_some(current)
+}
+
+// execution locality, beside WRAPPERS: some programs relocate their trailing
+// arguments onto another filesystem entirely (a remote host, a container). The
+// jail and [[path]] rules must not reason about local containment for words
+// past the boundary — `kubectl exec pod -- cat /etc/shadow` reads a path that
+// doesn't exist on this machine. [[bash]] deny rules are unaffected: they
+// still see every word, so `kubectl exec pod -- rm -rf /` stays gateable.
+struct LocalityRule {
+    name: &'static str,
+    // restricts the rule to a specific subcommand word (kubectl exec, docker
+    // run); None applies to every invocation of `name`
+    subcommand: Option<&'static [&'static str]>,
+    flags_with_arg: &'static [&'static str],
+    boundary: LocalityBoundary,
+}
+
+enum LocalityBoundary {
+    // remote begins at the word right after the Nth bare positional
+    AfterPositional(usize),
+    // remote begins right after a literal `--` token
+    AfterDashDash,
+}
+
+const LOCALITY: &[LocalityRule] = &[
+    LocalityRule {
+        name: "ssh",
+        subcommand: None,
+        flags_with_arg: &[
+            "-p", "-i", "-o", "-l", "-F", "-B", "-b", "-c", "-D", "-E", "-e", "-I", "-J", "-L",
+            "-m", "-O", "-Q", "-R", "-S", "-W", "-w",
+        ],
+        boundary: LocalityBoundary::AfterPositional(1), // after the host
+    },
+    LocalityRule {
+        name: "kubectl",
+        subcommand: Some(&["exec"]),
+        flags_with_arg: &[],
+        boundary: LocalityBoundary::AfterDashDash,
+    },
+    LocalityRule {
+        name: "docker",
+        subcommand: Some(&["exec"]),
+        flags_with_arg: &["-e", "--env", "-u", "--user", "-w", "--workdir", "-h", "--hostname"],
+        boundary: LocalityBoundary::AfterPositional(1), // after the container
+    },
+    LocalityRule {
+        name: "docker",
+        subcommand: Some(&["run"]),
+        flags_with_arg: &[
+            "-p", "--publish", "-v", "--volume", "-e", "--env", "--name", "-w", "--workdir", "-u",
+            "--user", "--network", "--entrypoint", "-h", "--hostname", "-m", "--memory", "--cpus",
+            "--restart",
+        ],
+        boundary: LocalityBoundary::AfterPositional(1), // after the image
+    },
+    LocalityRule {
+        name: "podman",
+        subcommand: None,
+        flags_with_arg: &[
+            "-p", "--publish", "-v", "--volume", "-e", "--env", "--name", "-w", "--workdir", "-u",
+            "--user", "--network", "--entrypoint", "-h", "--hostname",
+        ],
+        boundary: LocalityBoundary::AfterPositional(1), // subcommand, then container/image
+    },
+    LocalityRule {
+        name: "nsenter",
+        subcommand: None,
+        flags_with_arg: &[
+            "-t", "--target", "-m", "--mount", "-u", "--uts", "-i", "--ipc", "-n", "--net", "-p",
+            "--pid", "-C", "--cgroup", "-U", "--user", "-T", "--time", "-S", "--setuid", "-G",
+            "--setgid", "-R", "--root", "-w", "--wd",
+        ],
+        boundary: LocalityBoundary::AfterPositional(0), // the program to run, straight after flags
+    },
+    LocalityRule {
+        name: "chroot",
+        subcommand: None,
+        flags_with_arg: &["--userspec", "--groups"],
+        boundary: LocalityBoundary::AfterPositional(1), // after the new root
+    },
+];
+
+fn detect_remote_from(words: &[Word]) -> Option<usize> {
+    let program = basename(words.first()?.text.as_deref()?);
+    for rule in LOCALITY {
+        if rule.name != program {
+            continue;
+        }
+        // the raw (un-normalized) variant still carries global flags ahead of
+        // the subcommand (`kubectl -n ns exec ...`) — skip past those the same
+        // way strip_global_flags does, or `exec` is never found at words[1]
+        let mut idx = skip_known_global_flags(words, program, 1);
+        if let Some(subs) = rule.subcommand {
+            if !words.get(idx)?.text.as_deref().is_some_and(|s| subs.contains(&s)) {
+                continue;
+            }
+            idx += 1;
+        }
+        return locality_boundary(words, idx, rule);
+    }
+    None
+}
+
+fn skip_known_global_flags(words: &[Word], program: &str, mut idx: usize) -> usize {
+    let Some((_, flags_with_arg)) = GLOBAL_FLAGS.iter().find(|(name, _)| *name == program) else {
+        return idx;
+    };
+    while idx < words.len() {
+        let Some(text) = words[idx].text.as_deref() else {
+            break;
+        };
+        if !text.starts_with('-') {
+            break;
+        }
+        let takes_arg = !text.contains('=') && flags_with_arg.contains(&text);
+        idx += if takes_arg { 2 } else { 1 };
+    }
+    idx
+}
+
+// walks flags (consuming their values) until the Nth bare positional, then
+// returns the index right after it — a dynamic word makes the boundary
+// unknowable, so locality stays local (fail closed: still checked)
+fn locality_boundary(words: &[Word], mut idx: usize, rule: &LocalityRule) -> Option<usize> {
+    let mut positionals = 0;
+    while idx < words.len() {
+        let text = words[idx].text.as_deref()?;
+        // `--` is itself the boundary marker for this variant, not just another
+        // flag to skip — must be checked before the generic dash-flag branch below
+        if let LocalityBoundary::AfterDashDash = rule.boundary {
+            idx += 1;
+            if text == "--" {
+                return (idx < words.len()).then_some(idx);
+            }
+            continue;
+        }
+        if rule.flags_with_arg.contains(&text) {
+            idx += 2;
+            continue;
+        }
+        if text.starts_with('-') && text != "-" {
+            idx += 1;
+            continue;
+        }
+        let LocalityBoundary::AfterPositional(n) = rule.boundary else {
+            unreachable!()
+        };
+        if positionals == n {
+            return Some(idx);
+        }
+        positionals += 1;
+        idx += 1;
+    }
+    None
 }
 
 const GLOBAL_FLAGS: &[(&str, &[&str])] = &[
