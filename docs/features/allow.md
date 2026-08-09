@@ -51,3 +51,47 @@ rg TODO > /dev/null           → runs, no prompt (/dev/null target is harmless)
 ```
 
 Deny always beats allow — an `allow` in a project config can't unban a user-level `deny`.
+
+## Pipeline/chain-aware matching
+
+`piped_into`, `with`, and `position` are optional predicates on any `[[bash]]` rule (not just `allow`) that look at a command's *neighbours* in its pipeline or `&&`/`||` chain. All three default to "unset" — a rule that doesn't use them behaves exactly as before.
+
+```toml
+[[bash]]
+match = "pnpm run *"
+action = "allow"
+
+[[bash]]
+match = "head*"
+action = "allow"
+
+# each half is fine alone; piped together they hide a build failure behind
+# a truncated log, which the per-command allows above can't see
+[[bash]]
+match      = "pnpm run *"
+piped_into = "head*"       # adjacency: the NEXT command in the same pipeline
+action     = "deny"
+reason     = "don't truncate a build log — read the full output"
+
+[[bash]]
+match  = "git log*"
+with   = ["rm*"]           # any glob matching ANY other command in the same chain
+action = "ask"
+
+[[bash]]
+match    = "rg*"
+position = "only"          # matches only a standalone invocation — not in any pipe/chain
+action   = "allow"
+```
+
+```
+pnpm run build | head -5      → denied by the piped_into rule
+pnpm run build                → still allowed on its own
+head -5 out.txt               → still allowed on its own
+git log && rm -rf build/      → asks (with = ["rm*"] catches the neighbour)
+git log || true               → unaffected — "true" doesn't match "rm*"
+rg TODO                       → allowed (standalone)
+rg TODO | wc -l                → not vetted by the position="only" rule — it's no longer standalone
+```
+
+`position = "only"` is the more conservative default for an allowlist: auto-approve a command standing alone, fall back to the normal permission flow the moment it's composed into something. A dynamic neighbour (e.g. `$CMD` in the next pipe stage) makes `piped_into`/`with` unprovable rather than a silent non-match — same fail-closed treatment as `contains`/`only`.

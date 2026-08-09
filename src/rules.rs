@@ -1,4 +1,4 @@
-use crate::bash::{Command, Extraction, Word, basename, bin_path_basename};
+use crate::bash::{Command, Connector, Extraction, Word, basename, bin_path_basename};
 use crate::config::{Action, BashRule, Config};
 use regex::Regex;
 
@@ -16,6 +16,10 @@ pub struct CompiledBashRule<'a> {
     patterns: Vec<Pattern>,
     contains: Vec<Regex>,
     only: Vec<Regex>,
+    piped_into: Option<Pattern>,
+    with: Vec<Pattern>,
+    // "only" is the sole recognized value today, so this collapses to a bool
+    position_only: bool,
 }
 
 fn compile_pattern(source: &str) -> Result<Pattern, String> {
@@ -55,11 +59,36 @@ pub fn compile_bash_rules(config: &Config) -> Result<Vec<CompiledBashRule<'_>>, 
                 .map(|g| glob_to_regex(g))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
+            let piped_into = rule
+                .piped_into
+                .as_deref()
+                .map(compile_pattern)
+                .transpose()
+                .map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
+            let with = rule
+                .with
+                .iter()
+                .map(|s| compile_pattern(s))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
+            let position_only = match rule.position.as_deref() {
+                None => false,
+                Some("only") => true,
+                Some(other) => {
+                    return Err(format!(
+                        "bash rule '{}': unknown position '{other}' (only 'only' is supported)",
+                        rule.pattern
+                    ));
+                }
+            };
             Ok(CompiledBashRule {
                 rule,
                 patterns,
                 contains,
                 only,
+                piped_into,
+                with,
+                position_only,
             })
         })
         .collect()
@@ -175,7 +204,44 @@ fn match_only(only: &[Regex], args: &[Word]) -> Match {
     if unknown { Match::Unknown } else { Match::Yes }
 }
 
-pub fn match_command(rule: &CompiledBashRule, command: &Command) -> Match {
+// adjacency: the command immediately after this one in the same pipeline.
+// only meaningful for Connector::Pipe — `&&`/`||`/standalone have no "next
+// stage", so they never satisfy `piped_into`
+fn match_piped_into(pattern: &Pattern, commands: &[Command], command: &Command) -> Match {
+    if command.connector != Connector::Pipe {
+        return Match::No;
+    }
+    let next = command.position + 1;
+    if next >= command.group_len {
+        return Match::No;
+    }
+    let mut best = Match::No;
+    for candidate in commands
+        .iter()
+        .filter(|c| c.group == command.group && c.position == next)
+    {
+        best = best.max(match_prefix(pattern, candidate));
+    }
+    best
+}
+
+// any of `patterns` matching any OTHER command sharing this command's group
+// (pipeline or `&&`/`||` chain) — order-independent, unlike `piped_into`
+fn match_with(patterns: &[Pattern], commands: &[Command], command: &Command) -> Match {
+    let mut best = Match::No;
+    for candidate in commands
+        .iter()
+        .filter(|c| c.group == command.group && c.position != command.position)
+    {
+        for pattern in patterns {
+            best = best.max(match_prefix(pattern, candidate));
+        }
+    }
+    best
+}
+
+pub fn match_command(rule: &CompiledBashRule, commands: &[Command], ci: usize) -> Match {
+    let command = &commands[ci];
     let match_raw = matches!(rule.rule.action, Action::Deny);
     let mut best = Match::No;
     for pattern in &rule.patterns {
@@ -185,7 +251,25 @@ pub fn match_command(rule: &CompiledBashRule, command: &Command) -> Match {
         }
         let contains = match_contains(&rule.contains, command, match_raw);
         let only = match_only(&rule.only, &command.words[pattern.words.len()..]);
-        best = best.max(prefix.min(contains).min(only));
+        let piped = match &rule.piped_into {
+            Some(p) => match_piped_into(p, commands, command),
+            None => Match::Yes,
+        };
+        let with = if rule.with.is_empty() {
+            Match::Yes
+        } else {
+            match_with(&rule.with, commands, command)
+        };
+        let position = if rule.position_only {
+            if command.connector == Connector::Standalone {
+                Match::Yes
+            } else {
+                Match::No
+            }
+        } else {
+            Match::Yes
+        };
+        best = best.max(prefix.min(contains).min(only).min(piped).min(with).min(position));
     }
     best
 }
@@ -259,12 +343,11 @@ pub fn gate(
     // elsewhere still wins. Lets a narrow rule carve an exception out of a
     // broad catalog (e.g. one `rm` pattern out of `mutating`'s blanket ask),
     // handing the decision back to Claude Code's own permission rules.
-    let skipped: Vec<bool> = extraction
-        .commands
-        .iter()
-        .map(|command| {
+    let skipped: Vec<bool> = (0..extraction.commands.len())
+        .map(|ci| {
             rules.iter().any(|rule| {
-                rule.rule.action == Action::Skip && match_command(rule, command) == Match::Yes
+                rule.rule.action == Action::Skip
+                    && match_command(rule, &extraction.commands, ci) == Match::Yes
             })
         })
         .collect();
@@ -282,7 +365,7 @@ pub fn gate(
     // so config order can't let an ask/allow rule shadow a deny
     for (ci, command) in extraction.commands.iter().enumerate() {
         for rule in rules {
-            let matched = match_command(rule, command);
+            let matched = match_command(rule, &extraction.commands, ci);
             if matched == Match::No || rule.rule.action == Action::Skip {
                 continue;
             }
@@ -680,5 +763,88 @@ mod tests {
         let policy = "[[bash]]\nmatch = \"grep *\"\naction = \"rewrite\"\nrewrite = \"rg\"\n";
         let command = "find . -exec grep -n x {} \\;";
         assert_eq!(rewritten(policy, command), command);
+    }
+
+    // wraps a single predicate line in a `match = "*"` rule so the result of
+    // `match_command` is driven purely by that predicate, then evaluates it
+    // against the first command site extracted from `command` (the one named
+    // in the issue #5 test matrix's "command" column)
+    fn eval_predicate(predicate_toml: &str, command: &str) -> Match {
+        let policy = format!("[[bash]]\nmatch = \"*\"\naction = \"deny\"\n{predicate_toml}\n");
+        let config: Config = toml::from_str(&policy).expect("test policy parses");
+        let compiled = compile_bash_rules(&config).expect("rule compiles");
+        let extraction = crate::bash::extract(command);
+        match_command(&compiled[0], &extraction.commands, 0)
+    }
+
+    #[test]
+    fn piped_into_matches_pipe_adjacency_only() {
+        let cases = [
+            ("pnpm run build", Match::No),
+            ("pnpm run build | head -5", Match::Yes),
+            ("pnpm run build | tail -5", Match::No),
+            ("git log && rm x", Match::No),
+            ("git log || true", Match::No),
+            // wrapper-stripped variant shares the raw variant's site, so
+            // grouping survives `sudo` peeling
+            ("sudo pnpm run build | head -5", Match::Yes),
+        ];
+        for (command, expected) in cases {
+            let got = eval_predicate(r#"piped_into = "head*""#, command);
+            assert_eq!(got, expected, "piped_into for `{command}`: got {got:?}");
+        }
+    }
+
+    #[test]
+    fn with_matches_any_other_command_in_the_chain() {
+        let cases = [
+            ("pnpm run build", Match::No),
+            ("pnpm run build | head -5", Match::No),
+            ("pnpm run build | tail -5", Match::No),
+            ("git log && rm x", Match::Yes),
+            ("git log || true", Match::No),
+        ];
+        for (command, expected) in cases {
+            let got = eval_predicate(r#"with = ["rm*"]"#, command);
+            assert_eq!(got, expected, "with for `{command}`: got {got:?}");
+        }
+    }
+
+    #[test]
+    fn position_only_matches_standalone_invocations() {
+        let cases = [
+            ("pnpm run build", Match::Yes),
+            ("pnpm run build | head -5", Match::No),
+            ("pnpm run build | tail -5", Match::No),
+            ("git log && rm x", Match::No),
+            ("git log || true", Match::No),
+            ("sudo pnpm run build | head -5", Match::No),
+        ];
+        for (command, expected) in cases {
+            let got = eval_predicate(r#"position = "only""#, command);
+            assert_eq!(got, expected, "position=only for `{command}`: got {got:?}");
+        }
+    }
+
+    #[test]
+    fn absent_predicates_behave_like_before() {
+        // no piped_into/with/position set -> those three axes must never
+        // constrain the result; only `match`/`contains`/`only` matter
+        let config: Config = toml::from_str(
+            "[[bash]]\nmatch = \"pnpm run *\"\naction = \"allow\"\n",
+        )
+        .expect("policy parses");
+        let compiled = compile_bash_rules(&config).expect("rule compiles");
+        let extraction = crate::bash::extract("pnpm run build | head -5");
+        assert_eq!(match_command(&compiled[0], &extraction.commands, 0), Match::Yes);
+    }
+
+    #[test]
+    fn unknown_position_value_is_a_compile_error() {
+        let config: Config = toml::from_str(
+            "[[bash]]\nmatch = \"*\"\naction = \"deny\"\nposition = \"first\"\n",
+        )
+        .expect("policy parses");
+        assert!(compile_bash_rules(&config).is_err());
     }
 }

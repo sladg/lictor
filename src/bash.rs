@@ -1,6 +1,18 @@
+use std::collections::HashMap;
 use tree_sitter::Node;
 
 const MAX_DEPTH: usize = 5;
+
+// how a command relates to its neighbours in the same pipeline/list — the
+// structural context #5's `piped_into` / `with` / `position` predicates key off
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connector {
+    Pipe,
+    And,
+    Or,
+    Seq,
+    Standalone,
+}
 
 #[derive(Debug, Clone)]
 pub struct Word {
@@ -28,6 +40,13 @@ pub struct Command {
     // middle of the enclosing `find` line. Security rules still see them
     // (this is distinct from `synthetic`); only rewriting is refused.
     pub rewritable: bool,
+    // pipeline/chain id — shared by every command in the same enclosing
+    // pipeline/list node; assigned per site (see push_variant), not per variant
+    pub group: usize,
+    // index of this command's site within `group`
+    pub position: usize,
+    pub group_len: usize,
+    pub connector: Connector,
 }
 
 impl Command {
@@ -61,6 +80,17 @@ pub struct Extraction {
     pub redirect_targets: Vec<String>,
     // names of functions defined in the source; path_check must not flag their calls
     pub functions: Vec<String>,
+    // monotonic counter minting fresh Command::group ids across the whole
+    // extraction, including nested re-parses (bash -c, eval) so ids never collide
+    next_group: usize,
+}
+
+impl Extraction {
+    fn next_group_id(&mut self) -> usize {
+        let id = self.next_group;
+        self.next_group += 1;
+        id
+    }
 }
 
 fn is_device_write_target(dest: &str) -> bool {
@@ -140,12 +170,24 @@ fn extract_into(source: &str, synthetic: bool, depth: usize, out: &mut Extractio
     if tree.root_node().has_error() {
         block(out, "command could not be parsed as valid bash");
     }
-    walk(tree.root_node(), source, synthetic, depth, out);
+    // scoped to this parse: pipeline/list node id -> minted group id. A fresh
+    // map per extract_into call means nested re-parses (bash -c, eval) can't
+    // collide with the outer tree's node ids, which tree-sitter does not
+    // guarantee to be globally unique across separate Trees
+    let mut groups: HashMap<usize, usize> = HashMap::new();
+    walk(tree.root_node(), source, synthetic, depth, out, &mut groups);
 }
 
-fn walk(node: Node, source: &str, synthetic: bool, depth: usize, out: &mut Extraction) {
+fn walk(
+    node: Node,
+    source: &str,
+    synthetic: bool,
+    depth: usize,
+    out: &mut Extraction,
+    groups: &mut HashMap<usize, usize>,
+) {
     if node.kind() == "command" {
-        collect_command(node, source, synthetic, depth, out);
+        collect_command(node, source, synthetic, depth, out, groups);
     }
     // `export/declare/local/readonly VAR=/path` parses as a declaration_command,
     // not a plain command, so collect_command never sees it — capture the
@@ -191,12 +233,19 @@ fn walk(node: Node, source: &str, synthetic: bool, depth: usize, out: &mut Extra
     }
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
-            walk(child, source, synthetic, depth, out);
+            walk(child, source, synthetic, depth, out, groups);
         }
     }
 }
 
-fn collect_command(node: Node, source: &str, synthetic: bool, depth: usize, out: &mut Extraction) {
+fn collect_command(
+    node: Node,
+    source: &str,
+    synthetic: bool,
+    depth: usize,
+    out: &mut Extraction,
+    groups: &mut HashMap<usize, usize>,
+) {
     let mut words = Vec::new();
     for i in 0..node.named_child_count() {
         let Some(child) = node.named_child(i) else {
@@ -255,12 +304,107 @@ fn collect_command(node: Node, source: &str, synthetic: bool, depth: usize, out:
     }
 
     let redirects_output = writes_via_redirect(node, source);
-    push_variant(out, words, synthetic, false, redirects_output, true);
+    // computed once per SITE (from the real tree-sitter node), not per variant —
+    // otherwise `position = "only"` would never match anything, since a wrapped
+    // command (sudo x) always produces >= 2 variants sharing one site
+    let group_info = group_info(node, source, groups, out);
+    push_variant(out, words, synthetic, false, redirects_output, true, group_info);
     if let Some(stripped) = stripped {
-        push_variant(out, stripped, synthetic, false, redirects_output, true);
+        push_variant(
+            out,
+            stripped,
+            synthetic,
+            false,
+            redirects_output,
+            true,
+            group_info,
+        );
     }
     if let Some(flag_normalized) = flag_normalized {
-        push_variant(out, flag_normalized, synthetic, true, redirects_output, true);
+        push_variant(
+            out,
+            flag_normalized,
+            synthetic,
+            true,
+            redirects_output,
+            true,
+            group_info,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GroupInfo {
+    group: usize,
+    position: usize,
+    group_len: usize,
+    connector: Connector,
+}
+
+// nearest enclosing pipeline/list node, climbing transparently through
+// `redirected_statement` (`cmd > file` inside a chain still counts as chained).
+// Returns the ancestor plus the direct child of that ancestor which contains
+// `node`, so callers can find `node`'s index among the ancestor's named children.
+fn enclosing_group(node: Node) -> Option<(Node, Node)> {
+    let mut site = node;
+    loop {
+        let parent = site.parent()?;
+        match parent.kind() {
+            "pipeline" | "list" => return Some((parent, site)),
+            "redirected_statement" => site = parent,
+            _ => return None,
+        }
+    }
+}
+
+fn connector_of(ancestor: Node, source: &str) -> Connector {
+    if ancestor.kind() == "pipeline" {
+        return Connector::Pipe;
+    }
+    // `list` is always binary with exactly one operator token among its children
+    let mut cursor = ancestor.walk();
+    for child in ancestor.children(&mut cursor) {
+        match child.utf8_text(source.as_bytes()).unwrap_or("") {
+            "&&" => return Connector::And,
+            "||" => return Connector::Or,
+            ";" => return Connector::Seq,
+            _ => {}
+        }
+    }
+    Connector::Seq
+}
+
+fn group_info(
+    node: Node,
+    source: &str,
+    groups: &mut HashMap<usize, usize>,
+    out: &mut Extraction,
+) -> GroupInfo {
+    let Some((ancestor, site)) = enclosing_group(node) else {
+        return GroupInfo {
+            group: out.next_group_id(),
+            position: 0,
+            group_len: 1,
+            connector: Connector::Standalone,
+        };
+    };
+    let group = *groups
+        .entry(ancestor.id())
+        .or_insert_with(|| out.next_group_id());
+    let mut position = 0;
+    let mut group_len = 0;
+    let mut cursor = ancestor.walk();
+    for child in ancestor.named_children(&mut cursor) {
+        if child.id() == site.id() {
+            position = group_len;
+        }
+        group_len += 1;
+    }
+    GroupInfo {
+        group,
+        position,
+        group_len,
+        connector: connector_of(ancestor, source),
     }
 }
 
@@ -271,6 +415,7 @@ fn push_variant(
     share_site: bool,
     redirects_output: bool,
     rewritable: bool,
+    group: GroupInfo,
 ) {
     let last_site = out.commands.last().map(|c| c.site);
     let site = match (share_site, last_site) {
@@ -288,6 +433,10 @@ fn push_variant(
         inline,
         redirects_output,
         rewritable,
+        group: group.group,
+        position: group.position,
+        group_len: group.group_len,
+        connector: group.connector,
     });
 }
 
@@ -694,9 +843,17 @@ fn derive_find_exec(words: &[Word], out: &mut Extraction) {
         if end > start {
             let inner = words[start..end].to_vec();
             derive_nested(&inner, 0, out);
+            // not a real tree-sitter command node (it's a word-slice of `find`'s
+            // arguments) — no pipeline/list ancestor to derive structure from
+            let standalone = GroupInfo {
+                group: out.next_group_id(),
+                position: 0,
+                group_len: 1,
+                connector: Connector::Standalone,
+            };
             // not synthetic (security rules must still see it), but not
             // rewritable — its word spans index into the outer `find` line
-            push_variant(out, inner, false, false, false, false);
+            push_variant(out, inner, false, false, false, false, standalone);
         }
         idx = end + 1;
     }
