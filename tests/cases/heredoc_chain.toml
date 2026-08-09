@@ -1,0 +1,35 @@
+name  = "with / position must see across a heredoc too"
+issue = 12
+
+# `piped_into` is not the only predicate keyed off group identity — `with` and
+# `position` read the same fields, which is why the fix belongs in `group_info`
+# rather than in any one predicate.
+
+[config]
+[[config.bash]]
+match  = "cat*"
+with   = ["rm*"]
+action = "deny"
+reason = "cat alongside rm"
+
+[[case]]
+name    = "regression guard: the plain chain still matches"
+command = "cat x && rm y"
+expect  = { decision = "deny", reason = "cat alongside rm" }
+
+[[case]]
+# `&&` and the command sit as DIRECT children of the redirect here — there is
+# no `list` wrapper at all, unlike the pipeline case
+name    = "&& across a heredoc"
+command = "cat <<EOF && rm x\nbody\nEOF"
+expect  = { decision = "deny", reason = "cat alongside rm" }
+
+[[case]]
+name    = "|| across a heredoc"
+command = "cat <<EOF || rm x\nbody\nEOF"
+expect  = { decision = "deny", reason = "cat alongside rm" }
+
+[[case]]
+name    = "no rm in the chain — still no opinion"
+command = "cat <<EOF && ls\nbody\nEOF"
+expect  = { decision = "none" }

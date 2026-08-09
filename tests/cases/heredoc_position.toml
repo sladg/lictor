@@ -1,0 +1,34 @@
+name  = "position = \"only\" must not be fooled by a heredoc either"
+issue = 12
+
+# The allow-side mirror of the bypass, and the one that failed in the *other*
+# direction. Before the fix a heredoc left its owner with no enclosing group at
+# all, so `cat` in `cat <<EOF | grep x` looked Standalone and `position = "only"`
+# wrongly matched — a rule scoped to lone invocations firing on a pipeline.
+
+[config]
+[[config.bash]]
+match    = "cat*"
+position = "only"
+action   = "deny"
+reason   = "standalone cat"
+
+[[case]]
+name    = "regression guard: a lone cat still matches"
+command = "cat notes.txt"
+expect  = { decision = "deny", reason = "standalone cat" }
+
+[[case]]
+name    = "a lone cat with a heredoc is still lone"
+command = "cat <<EOF\nbody\nEOF"
+expect  = { decision = "deny", reason = "standalone cat" }
+
+[[case]]
+name    = "a heredoc followed by a pipe is NOT a lone invocation"
+command = "cat <<EOF | grep x\nbody\nEOF"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "a heredoc followed by a chain is NOT a lone invocation"
+command = "cat <<EOF && ls\nbody\nEOF"
+expect  = { decision = "none" }

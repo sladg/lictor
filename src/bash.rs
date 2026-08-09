@@ -308,7 +308,15 @@ fn collect_command(
     // otherwise `position = "only"` would never match anything, since a wrapped
     // command (sudo x) always produces >= 2 variants sharing one site
     let group_info = group_info(node, source, groups, out);
-    push_variant(out, words, synthetic, false, redirects_output, true, group_info);
+    push_variant(
+        out,
+        words,
+        synthetic,
+        false,
+        redirects_output,
+        true,
+        group_info,
+    );
     if let Some(stripped) = stripped {
         push_variant(
             out,
@@ -374,12 +382,166 @@ fn connector_of(ancestor: Node, source: &str) -> Connector {
     Connector::Seq
 }
 
+// ── heredoc re-parenting (#12) ──
+//
+// tree-sitter nests the rest of the pipeline INSIDE `heredoc_redirect`:
+// `cat <<EOF | grep x` parses as
+//
+//   redirected_statement
+//     command "cat"
+//     heredoc_redirect
+//       << / heredoc_start / pipeline("| grep x") / heredoc_body / heredoc_end
+//
+// so the two ends of the pipe are not siblings, `enclosing_group` put them in
+// different groups, and every `piped_into`/`with` deny rule was evadable by
+// adding a heredoc.
+//
+// Correcting it here rather than in each predicate is the point: `group`,
+// `position`, `group_len` and `connector` are all minted in `group_info`, so
+// one fix reaches every current and future consumer of the structure and none
+// of them can rediscover the bug independently.
+//
+// The logical members are the statement's body followed by the commands the
+// heredoc swallowed, in source order.
+fn heredoc_split_group(node: Node) -> Option<(Node, Vec<Node>)> {
+    let stmt = enclosing_redirected_statement(node)?;
+    // an ordinary `cmd > file` has nothing nested; leave that path untouched
+    let nested = heredoc_members(stmt);
+    if nested.is_empty() {
+        return None;
+    }
+    let mut members = body_members(stmt);
+    members.extend(nested);
+    (members.len() > 1).then_some((stmt, members))
+}
+
+fn enclosing_redirected_statement(node: Node) -> Option<Node> {
+    let mut site = node;
+    loop {
+        let parent = site.parent()?;
+        match parent.kind() {
+            "redirected_statement" => return Some(parent),
+            "pipeline" | "list" | "heredoc_redirect" => site = parent,
+            _ => return None,
+        }
+    }
+}
+
+fn body_members(stmt: Node) -> Vec<Node> {
+    let mut out = Vec::new();
+    for i in 0..stmt.named_child_count() {
+        if let Some(child) = stmt.named_child(i)
+            && !is_redirect(child)
+        {
+            flatten_commands(child, &mut out);
+        }
+    }
+    out
+}
+
+// commands living inside this statement's heredoc redirects — the ones the
+// grammar's nesting hid
+fn heredoc_members(stmt: Node) -> Vec<Node> {
+    let mut out = Vec::new();
+    for i in 0..stmt.named_child_count() {
+        let Some(redirect) = stmt
+            .named_child(i)
+            .filter(|c| c.kind() == "heredoc_redirect")
+        else {
+            continue;
+        };
+        for j in 0..redirect.named_child_count() {
+            if let Some(inner) = redirect.named_child(j)
+                && !matches!(
+                    inner.kind(),
+                    "heredoc_start" | "heredoc_body" | "heredoc_end"
+                )
+            {
+                flatten_commands(inner, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn is_redirect(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "heredoc_redirect" | "file_redirect" | "herestring_redirect"
+    )
+}
+
+fn flatten_commands<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+    match node.kind() {
+        "command" => out.push(node),
+        // pipelines nest right-associatively: `| a | b` is
+        // pipeline(|, pipeline(a, |, b)), so this has to recurse
+        "pipeline" | "list" | "redirected_statement" => {
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i)
+                    && !is_redirect(child)
+                {
+                    flatten_commands(child, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// the connector joining a heredoc-split group. A nested `pipeline`/`list`
+// carries it (`<<EOF | grep x`); otherwise the operator sits as a direct child
+// of the redirect (`<<EOF && rm x` has no `list` wrapper at all).
+fn heredoc_connector(stmt: Node, source: &str) -> Connector {
+    for i in 0..stmt.named_child_count() {
+        let Some(redirect) = stmt
+            .named_child(i)
+            .filter(|c| c.kind() == "heredoc_redirect")
+        else {
+            continue;
+        };
+        for j in 0..redirect.named_child_count() {
+            match redirect.named_child(j).map(|c| (c, c.kind())) {
+                Some((_, "pipeline")) => return Connector::Pipe,
+                Some((inner, "list")) => return connector_of(inner, source),
+                _ => {}
+            }
+        }
+        let mut cursor = redirect.walk();
+        for child in redirect.children(&mut cursor) {
+            match child.utf8_text(source.as_bytes()).unwrap_or("") {
+                "|" => return Connector::Pipe,
+                "&&" => return Connector::And,
+                "||" => return Connector::Or,
+                ";" => return Connector::Seq,
+                _ => {}
+            }
+        }
+    }
+    Connector::Seq
+}
+
 fn group_info(
     node: Node,
     source: &str,
     groups: &mut HashMap<usize, usize>,
     out: &mut Extraction,
 ) -> GroupInfo {
+    // the heredoc-split shape first: its members are not siblings in the CST,
+    // so `enclosing_group` cannot see them
+    if let Some((stmt, members)) = heredoc_split_group(node)
+        && let Some(position) = members.iter().position(|m| m.id() == node.id())
+    {
+        let group = *groups
+            .entry(stmt.id())
+            .or_insert_with(|| out.next_group_id());
+        return GroupInfo {
+            group,
+            position,
+            group_len: members.len(),
+            connector: heredoc_connector(stmt, source),
+        };
+    }
     let Some((ancestor, site)) = enclosing_group(node) else {
         return GroupInfo {
             group: out.next_group_id(),

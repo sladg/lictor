@@ -1,0 +1,49 @@
+name  = "a heredoc must not hide the rest of the pipeline"
+issue = 12
+
+# tree-sitter nests the rest of the pipeline INSIDE `heredoc_redirect`, so the
+# two ends of `cat <<EOF | grep x` were not siblings and landed in different
+# groups. Every `piped_into` / `with` deny rule was evadable by adding one.
+
+[config]
+[[config.bash]]
+match      = "cat*"
+piped_into = "grep*"
+action     = "deny"
+reason     = "cat piped into grep"
+
+[[case]]
+name    = "regression guard: the plain pipeline still matches"
+command = "cat notes.txt | grep secret"
+expect  = { decision = "deny", reason = "cat piped into grep" }
+
+[[case]]
+name    = "the bypass itself"
+command = "cat <<EOF | grep secret\nline one\nEOF"
+expect  = { decision = "deny", reason = "cat piped into grep" }
+
+[[case]]
+name    = "tab-stripping variant"
+command = "cat <<-EOF | grep secret\n\tline one\nEOF"
+expect  = { decision = "deny", reason = "cat piped into grep" }
+
+[[case]]
+name    = "quoted delimiter suppresses expansion but not the pipe"
+command = "cat <<'EOF' | grep secret\nline one\nEOF"
+expect  = { decision = "deny", reason = "cat piped into grep" }
+
+[[case]]
+# pipelines nest right-associatively, so the members need flattening
+name    = "three stages, the pipe target is still adjacent"
+command = "cat <<EOF | grep x | wc -l\nbody\nEOF"
+expect  = { decision = "deny", reason = "cat piped into grep" }
+
+[[case]]
+name    = "the heredoc owner is itself mid-pipeline"
+command = "echo a | cat <<EOF | grep x\nbody\nEOF"
+expect  = { decision = "deny", reason = "cat piped into grep" }
+
+[[case]]
+name    = "not piped into grep at all — still no opinion"
+command = "cat <<EOF | wc -l\nbody\nEOF"
+expect  = { decision = "none" }

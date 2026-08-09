@@ -3,8 +3,11 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-task 1 complete** (graph IR + emitter, internal only). Nothing in
-`src/graph.rs` is wired into the engine yet, and no behaviour has changed.
+Status: **sub-tasks 1 and 2 complete.** The graph IR and emitter exist and are
+still internal — nothing in `src/graph.rs` is wired into the engine. Sub-task 2
+(heredoc re-parenting) is the one behaviour change so far, and it landed in
+`bash.rs` as well as the graph because that is where today's rules read
+structure; it closes #12.
 
 ## Why
 
@@ -109,28 +112,43 @@ graph LR
 The connector is a node with its own span, so sub-task 10's `insert` can splice
 a stage beside it (`cargo test | less` → `cargo test | tokf run -- | less`).
 
-### `cat <<EOF | grep secret` — issue #12, still broken in stage 1
+### `cat <<EOF | grep secret` — issue #12, fixed by re-parenting
 
 ```mermaid
 graph LR
   C0["Command cat"]
   H1["Heredoc EOF<br/>quoted=false"]
-  K2(["Connector |"])
   C3["Command grep"]
   V4["Value secret"]
   C3 -->|"Arg(0)"| V4
   H1 -->|On| C0
+  C0 -->|"Flow(Pipe)"| C3
 ```
 
-**There is no `Flow` edge between `cat` and `grep`.** tree-sitter nests the
-whole rest of the pipeline inside `heredoc_redirect`, so the two ends of the
-pipe are not siblings. Stage 1 lowers both commands faithfully but does not
-re-parent them; sub-task 2 lifts the nested `pipeline`/`list` to its logical
-position, which closes #12 for **every** consumer at once rather than for
-`piped_into` alone.
+tree-sitter nests the whole rest of the pipeline inside `heredoc_redirect`, so
+the two ends of the pipe are **not siblings in the CST**:
 
-The bug is now *visible in the model* — a missing edge — instead of being
-implicit in a predicate that quietly returns `Match::No`.
+```
+redirected_statement
+  command "cat"
+  heredoc_redirect
+    << / heredoc_start / pipeline("| grep secret") / heredoc_body / heredoc_end
+```
+
+Stage 1 lowered both commands faithfully but left them unrelated, which is
+exactly what made every `piped_into` / `with` deny rule evadable by adding a
+heredoc. Sub-task 2 lifts the nested `pipeline`/`list` to its logical position,
+so the `Flow` edge above exists.
+
+The same correction is applied in `bash.rs`'s `group_info`, which is where
+today's rules actually read `group` / `position` / `group_len` / `connector`.
+Doing it there rather than inside any one predicate is the point: **one fix
+reaches every consumer**, and none of them can rediscover the bug
+independently.
+
+It also closed a second, opposite bug. A heredoc previously left its owner with
+no enclosing group at all, so `cat` in `cat <<EOF | grep x` looked *standalone*
+and a `position = "only"` rule wrongly fired on a pipeline.
 
 ### `echo "pre $(id) post"` — the discontiguous span list
 
@@ -188,9 +206,8 @@ yields a synthetic `git commit`, driven by the `WRAPPERS` table at
 program execs its argument" is a per-program map fact, and it becomes an `Execs`
 edge in sub-task 5 rather than a second phantom command.
 
-## What stage 1 does not do
+## What is still deferred
 
-- **No re-parenting of heredoc-nested pipelines** — sub-task 2, closes #12.
 - **No argument maps**, so no reference edges and no `PathSet` population —
   sub-tasks 5 and 6. The node and edge kinds exist so callers can match
   exhaustively.
