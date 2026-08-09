@@ -785,6 +785,31 @@ The project root is the git repo containing cwd (`git rev-parse --show-toplevel`
 
 Inside a **linked git worktree** the main checkout is trusted as well. `--show-toplevel` returns the worktree, so on its own it would leave the main checkout reading as "outside the project" — and a shell that `cd`ed into a worktree could then never `cd` back out, including to edit `jail_allow` itself. Note this also trusts sibling worktrees under the same main checkout: they are normally the same user's agent scratch space, and that is a deliberate trade against an unrecoverable lockout.
 
+## Where "this word is a path" comes from
+
+`settings.jail_paths` chooses. Default `heuristic` — unchanged behaviour.
+
+| value | meaning |
+|---|---|
+| `heuristic` | the shape of the word: a leading `/`, `~`, or `..`. What lictor has always done |
+| `graph` | only what a reviewed recipe in `recipes/` says is a path |
+| `compare` | run both, **decide with the heuristic**, print where they differ |
+
+**The graph source is not strictly better.** It trades one kind of error for the other:
+
+```
+sed -n '/needle/p' README.md    heuristic: flags /needle/p   graph: silent
+ssh host cat /etc/hosts         heuristic: flags /etc/hosts  graph: silent
+cd /tmp && cat passwd           heuristic: misses it         graph: flags /tmp/passwd
+frobnicate /etc/passwd          heuristic: flags it          graph: MISSES it
+```
+
+- it removes the false positives issue #4 is about — a sed script and a remote path stop being treated as local files
+- it closes a false negative the shape test cannot reach: `cat passwd` after a `cd` names a real file, but the bare word is not path-*shaped*, so the guess never looks at it
+- it introduces a new false negative: **a program with no recipe references no paths**, so an escape through one is invisible
+
+Which trade is right depends on how much of what you actually run has a recipe. That is what `compare` is for: leave decisions on the heuristic, collect the disagreements against real usage, and switch when the evidence says to.
+
 ## Config
 
 ```toml

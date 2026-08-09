@@ -1,6 +1,6 @@
 use super::{ModuleCtx, Plan};
 use crate::bash::{Command, Extraction};
-use crate::config::{Config, ModuleSetting};
+use crate::config::{Config, JailPaths, ModuleSetting};
 
 // literal argument words that look like filesystem paths and resolve outside
 // the project and every allowed root. Lexical only: `~` expanded, `.`/`..`
@@ -87,17 +87,78 @@ pub fn violation_for_path(path: &str, config: &Config, cwd: &str) -> Option<Stri
 pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = roots(config, cwd, &home);
-    let mut out = Vec::new();
-    let candidate_of = |text: &str| {
+    let source = config.jail_paths();
+
+    // Only the "is this word a path?" question moves to the graph. Resolution
+    // stays exactly where it is: `walk_words` tracks `cd` across a chain, expands
+    // `~`, collapses `..` and handles nested shells, and none of that is a
+    // heuristic worth replacing. Swapping the predicate alone is the whole of
+    // sub-task 8's idea.
+    let heuristic = |text: &str| {
         let candidate = path_candidate(text);
         looks_like_path(candidate).then(|| candidate.to_string())
     };
-    for (_, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
-        if !is_trusted(&roots, &resolved) && !out.contains(&resolved) {
-            out.push(resolved);
+    let graph_paths = (source != JailPaths::Heuristic).then(|| referenced_paths(extraction));
+    let from_graph = |text: &str| {
+        let candidate = path_candidate(text);
+        graph_paths
+            .as_ref()
+            .is_some_and(|known| known.iter().any(|p| p == candidate))
+            .then(|| candidate.to_string())
+    };
+
+    let decide = |candidate_of: &dyn Fn(&str) -> Option<String>| {
+        let mut found: Vec<String> = Vec::new();
+        for (_, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
+            if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
+                found.push(resolved);
+            }
+        }
+        found
+    };
+
+    match source {
+        JailPaths::Heuristic => decide(&heuristic),
+        JailPaths::Graph => decide(&from_graph),
+        // decide with the heuristic, but record what the graph would have said —
+        // so the switch can be judged against real usage before it changes any
+        // decision
+        JailPaths::Compare => {
+            let old = decide(&heuristic);
+            let new = decide(&from_graph);
+            report_disagreement(extraction, &old, &new);
+            old
         }
     }
-    out
+}
+
+/// The paths the recipes say this command references.
+///
+/// Re-parses the source: the graph and `bash::Extraction` are still two views of
+/// the same command, which sub-task 4 exists to fix. Cheap enough here, and
+/// keeping them separate means this change cannot disturb the existing parse.
+fn referenced_paths(extraction: &Extraction) -> Vec<String> {
+    let Ok(maps) = crate::cmdmap::Maps::builtin() else {
+        return Vec::new();
+    };
+    crate::graph::lower_with_maps(&extraction.source, &maps).referenced_paths()
+}
+
+/// Log where the two sources disagree, without acting on it.
+///
+/// A path the graph misses that the heuristic caught is the dangerous direction
+/// — that is a jail escape the new source would wave through — so it is recorded
+/// separately from the false positives the graph is expected to remove.
+fn report_disagreement(extraction: &Extraction, heuristic: &[String], graph: &[String]) {
+    let only_heuristic: Vec<&String> = heuristic.iter().filter(|p| !graph.contains(p)).collect();
+    let only_graph: Vec<&String> = graph.iter().filter(|p| !heuristic.contains(p)).collect();
+    if only_heuristic.is_empty() && only_graph.is_empty() {
+        return;
+    }
+    eprintln!(
+        "lictor: jail_paths=compare — command {:?}\n           only the heuristic flags (the graph would MISS these): {only_heuristic:?}\n           only the graph flags (new): {only_graph:?}",
+        extraction.source
+    );
 }
 
 // the inside-the-project mirror of `violations`: an absolute path pointing at a
