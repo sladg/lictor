@@ -89,26 +89,27 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     let roots = roots(config, cwd, &home);
     let source = config.jail_paths();
 
-    // ── the heuristic: guess from the shape of each word ──
+    // Two sources, one shape: each answers "which paths does this command line
+    // touch, resolved against the directory in effect where it appears", and
+    // neither gets to do anything else. Everything after them — the trust check,
+    // the dedupe, the order — is shared, so the two cannot drift apart and
+    // `compare` is comparing like with like.
     //
-    // Resolution rides along with the walk, because `walk_words` is what tracks
-    // `cd` across a chain. This whole path is what sub-task 8 deletes.
-    let heuristic = |text: &str| {
-        let candidate = path_candidate(text);
-        looks_like_path(candidate).then(|| candidate.to_string())
-    };
+    // Deleting the shape source outright is sub-task 8, and it waits on the
+    // graph being complete enough to replace it: see #34, #35, #39, #40 and #42
+    // for what it still catches that the graph does not.
     let by_shape = || {
-        let mut found: Vec<String> = Vec::new();
-        for (_, resolved) in walk_words(extraction, cwd, &home, true, heuristic) {
-            if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
-                found.push(resolved);
-            }
-        }
-        found
+        let guess = |text: &str| {
+            let candidate = path_candidate(text);
+            looks_like_path(candidate).then(|| candidate.to_string())
+        };
+        // resolution rides along with the walk, which is what tracks `cd` here
+        walk_words(extraction, cwd, &home, true, guess)
+            .into_iter()
+            .map(|(_, resolved)| resolved)
+            .collect::<Vec<String>>()
     };
 
-    // ── the graph: ask it once, filter the facts it hands back ──
-    //
     // One query, one struct. This used to be three: the word walk asking the
     // graph "is this word a path?", a second pass for the paths the walk never
     // visits (a redirect target is not one of the command's words, #29), and a
@@ -119,29 +120,29 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     // already sit in source order, and the rest fell out.
     //
     // What is left here is policy, which is the jail's to state and not the
-    // graph's to bake in:
+    // graph's to bake in.
     let by_graph = || {
-        let mut found: Vec<String> = Vec::new();
-        for reference in extraction
+        extraction
             .graph
             .resolved_references(cwd, &|path, base| normalize(path, base, &home))
-        {
+            .into_iter()
             // somewhere else's filesystem is not this jail's business
-            if reference.locality.is_remote() {
-                continue;
-            }
+            .filter(|r| !r.locality.is_remote())
             // A program named without a slash is found on `PATH` and names no
             // file — `npm run build` references nothing. With one, the shell
-            // executes it as a pathname (POSIX XCU 2.9.1.1) and it is a file
+            // executes it as a pathname (POSIX XCU 2.9.1.1), and it is a file
             // like any other. Bin directories get no exemption: staying inside
             // the project is the point, and a tool reachable by bare name or
             // living in the project is the supported way to have one.
-            if reference.effect == crate::cmdmap::Effect::Exec && !reference.path.contains('/') {
-                continue;
-            }
-            let Some(resolved) = reference.resolved else {
-                continue;
-            };
+            .filter(|r| r.effect != crate::cmdmap::Effect::Exec || r.path.contains('/'))
+            .filter_map(|r| r.resolved)
+            .collect::<Vec<String>>()
+    };
+
+    // the one check, applied to whichever source produced the list
+    let outside = |paths: Vec<String>| {
+        let mut found: Vec<String> = Vec::new();
+        for resolved in paths {
             if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
                 found.push(resolved);
             }
@@ -150,15 +151,14 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     };
 
     match source {
-        JailPaths::Heuristic => by_shape(),
-        JailPaths::Graph => by_graph(),
+        JailPaths::Heuristic => outside(by_shape()),
+        JailPaths::Graph => outside(by_graph()),
         // decide with the heuristic, but record what the graph would have said —
         // so the switch can be judged against real usage before it changes any
         // decision
         JailPaths::Compare => {
-            let old = by_shape();
-            let new = by_graph();
-            report_disagreement(extraction, &old, &new);
+            let old = outside(by_shape());
+            report_disagreement(extraction, &old, &outside(by_graph()));
             old
         }
     }
