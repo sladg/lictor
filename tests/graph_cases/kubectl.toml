@@ -1,0 +1,53 @@
+name  = "kubectl positionals name cluster objects, not paths"
+issue = 24
+
+# `get`, `logs`, `describe`, `delete` and `top` never take a plain positional
+# that is a path on this machine — a resource type, a resource name, a pod. So
+# every positional in these subcommands is typed `none` rather than left
+# unmapped: silence here is a decision, the same as `aws s3 rm`'s bucket key.
+#
+# The path each of these subcommands really can open is still claimed — it
+# only ever arrives through the global `-f`/`-k`/`--kubeconfig` flags, which
+# apply regardless of subcommand.
+
+[[case]]
+name    = "get's positionals are a type and a name, not paths"
+command = "kubectl get pod my-app -o yaml"
+expect  = { local = [] }
+
+[[case]]
+name    = "get -f still reads the file it names"
+command = "kubectl get -f manifest.yaml"
+expect  = { local = ["reads manifest.yaml"] }
+
+[[case]]
+# without the override, the global `-f` (kind = path) would swallow
+# `--since=1h` as its argument and lose it as a flag entirely
+name    = "logs' positional is a pod, and -f means follow, not --filename"
+command = "kubectl logs my-app -f --since=1h"
+expect  = { local = [], binds = ["--since=1h"] }
+
+[[case]]
+name    = "describe's positionals are a type and a name, not paths"
+command = "kubectl describe deployment my-app"
+expect  = { local = [] }
+
+[[case]]
+name    = "delete's positionals are a type and a name, not paths"
+command = "kubectl delete pod my-app --grace-period=0"
+expect  = { local = [] }
+
+[[case]]
+name    = "delete -f still reads the file it names"
+command = "kubectl delete -f manifest.yaml"
+expect  = { local = ["reads manifest.yaml"] }
+
+[[case]]
+name    = "top's positional is a pod or node name, not a path"
+command = "kubectl top pod my-app --containers"
+expect  = { local = [] }
+
+[[case]]
+name    = "apply still reads the manifest it's given"
+command = "kubectl apply -f deploy.yaml --prune"
+expect  = { local = ["reads deploy.yaml"] }

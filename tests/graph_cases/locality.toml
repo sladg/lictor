@@ -62,6 +62,30 @@ expect  = { local = [
   "creates /tmp/x",
 ], remote = ["reads user@host:/etc/shadow"] }
 
+[[case]]
+name    = "kubectl cp, the same shape again — a pod prefix, not a scheme"
+command = "kubectl cp ./build pod:/app"
+expect  = { local = ["reads ./build"], remote = [
+  "writes pod:/app",
+  "creates pod:/app",
+] }
+
+[[case]]
+name    = "kubectl cp pulling out of a pod writes here"
+command = "kubectl cp pod:/app ./build"
+expect  = { local = ["writes ./build", "creates ./build"], remote = [
+  "reads pod:/app",
+] }
+
+[[case]]
+# a namespace/pod prefix is still one authority, told apart from the path by
+# the FIRST colon
+name    = "kubectl cp with a namespace-qualified pod"
+command = "kubectl cp ns/pod:/app ./build"
+expect  = { local = ["writes ./build", "creates ./build"], remote = [
+  "reads ns/pod:/app",
+] }
+
 # ── the other direction, which is the dangerous one ──
 #
 # A colon is legal in a filename. `/var/log/build:2024.log` has to stay local:
