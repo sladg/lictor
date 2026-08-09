@@ -120,7 +120,12 @@ fn the_extraction_carries_the_graph_it_was_parsed_from() {
         "the extraction must carry a lowered graph"
     );
     assert_eq!(
-        extraction.graph.referenced_paths(),
+        extraction
+            .graph
+            .references()
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
         ["/etc/passwd"],
         "and the recipes must have been applied to it"
     );
