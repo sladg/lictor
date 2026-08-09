@@ -1,4 +1,4 @@
-use super::Plan;
+use super::{ModuleCtx, Plan};
 use crate::bash::{Command, Extraction};
 use crate::config::{Config, ModuleSetting};
 
@@ -107,18 +107,18 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
 // the repo root (jail's primary root), not cwd — a shell that drifted into a
 // subdir must not blind the nudge (`cd /abs/repo-root && …` used to sail
 // through). Relative resolution of later words still follows the cwd/cd chain.
-pub fn relative_hints(extraction: &Extraction, config: &Config, cwd: Option<&str>, out: &mut Plan) {
-    let setting = match config.modules.get("abs-paths") {
+pub fn relative_hints(ctx: &ModuleCtx, out: &mut Plan) {
+    let setting = match ctx.config.modules.get("abs-paths") {
         Some(s) if *s != ModuleSetting::Off => *s,
         _ => return,
     };
-    let Some(cwd) = cwd else {
+    let Some(cwd) = ctx.cwd else {
         return;
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = normalize(cwd, cwd, &home);
     let root = git_root(&cwd).map_or_else(|| cwd.clone(), |r| normalize(&r, &cwd, &home));
-    relative_hints_at(extraction, setting, &cwd, &root, &home, out);
+    relative_hints_at(ctx.extraction, setting, &cwd, &root, &home, out);
 }
 
 fn relative_hints_at(
@@ -437,7 +437,15 @@ mod tests {
         let config: Config = toml::from_str(&format!("[modules]\nabs-paths = \"{setting}\""))
             .expect("test config parses");
         let mut plan = Plan::default();
-        relative_hints(&bash::extract(command), &config, Some(CWD), &mut plan);
+        let extraction = bash::extract(command);
+        relative_hints(
+            &ModuleCtx {
+                extraction: &extraction,
+                config: &config,
+                cwd: Some(CWD),
+            },
+            &mut plan,
+        );
         plan
     }
 

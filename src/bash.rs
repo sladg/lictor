@@ -147,15 +147,60 @@ fn flag_dangerous_env(text: &str, out: &mut Extraction) {
     }
 }
 
+/// State that is the same for the whole parse of one source string.
+///
+/// `source`, `synthetic` and `depth` never change once a parse starts, and
+/// `groups` is scoped to it. Threading them positionally meant every new piece
+/// of parse state was a breaking change to four signatures *and* every
+/// recursive call in the chain — `groups` itself cost exactly that when
+/// pipeline matching was added.
+struct ParseCtx<'a> {
+    source: &'a str,
+    /// extracted from a re-parsed inner string (bash -c / eval); spans are not
+    /// valid in the original source
+    synthetic: bool,
+    depth: usize,
+    /// pipeline/list node id -> minted group id, scoped to THIS parse. A fresh
+    /// map per parse means nested re-parses can't collide with the outer tree's
+    /// node ids, which tree-sitter does not guarantee to be unique across
+    /// separate Trees.
+    groups: HashMap<usize, usize>,
+}
+
+impl<'a> ParseCtx<'a> {
+    fn new(source: &'a str, synthetic: bool, depth: usize) -> Self {
+        Self {
+            source,
+            synthetic,
+            depth,
+            groups: HashMap::new(),
+        }
+    }
+}
+
+/// Which flavour of a command site a variant is.
+///
+/// Grouped because three adjacent bools at a call site is a transposition
+/// waiting to happen and the compiler cannot catch it — the same argument #11
+/// makes about two adjacent `Option<&str>` in the module layer.
+#[derive(Clone, Copy)]
+struct Variant {
+    /// share the previous variant's approval site (flag-normalized forms) instead
+    /// of minting a fresh one (wrapper-stripped forms: `sudo git` != `git`)
+    share_site: bool,
+    redirects_output: bool,
+    rewritable: bool,
+}
+
 pub fn extract(source: &str) -> Extraction {
     let mut out = Extraction::default();
-    extract_into(source, false, 0, &mut out);
+    extract_into(&mut ParseCtx::new(source, false, 0), &mut out);
     out.source = source.to_string();
     out
 }
 
-fn extract_into(source: &str, synthetic: bool, depth: usize, out: &mut Extraction) {
-    if depth > MAX_DEPTH {
+fn extract_into(ctx: &mut ParseCtx, out: &mut Extraction) {
+    if ctx.depth > MAX_DEPTH {
         block(out, "shell nesting too deep to analyze");
         return;
     }
@@ -163,46 +208,34 @@ fn extract_into(source: &str, synthetic: bool, depth: usize, out: &mut Extractio
     parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
         .expect("bash grammar");
-    let Some(tree) = parser.parse(source, None) else {
+    let Some(tree) = parser.parse(ctx.source, None) else {
         block(out, "bash parse failed");
         return;
     };
     if tree.root_node().has_error() {
         block(out, "command could not be parsed as valid bash");
     }
-    // scoped to this parse: pipeline/list node id -> minted group id. A fresh
-    // map per extract_into call means nested re-parses (bash -c, eval) can't
-    // collide with the outer tree's node ids, which tree-sitter does not
-    // guarantee to be globally unique across separate Trees
-    let mut groups: HashMap<usize, usize> = HashMap::new();
-    walk(tree.root_node(), source, synthetic, depth, out, &mut groups);
+    walk(tree.root_node(), ctx, out);
 }
 
-fn walk(
-    node: Node,
-    source: &str,
-    synthetic: bool,
-    depth: usize,
-    out: &mut Extraction,
-    groups: &mut HashMap<usize, usize>,
-) {
+fn walk(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
     if node.kind() == "command" {
-        collect_command(node, source, synthetic, depth, out, groups);
+        collect_command(node, ctx, out);
     }
     // `export/declare/local/readonly VAR=/path` parses as a declaration_command,
     // not a plain command, so collect_command never sees it — capture the
     // assigned path the same way a `NAME=val cmd` prefix is captured
-    if !synthetic && node.kind() == "declaration_command" {
+    if !ctx.synthetic && node.kind() == "declaration_command" {
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i)
                 && child.kind() == "variable_assignment"
             {
-                if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                if let Ok(text) = child.utf8_text(ctx.source.as_bytes()) {
                     flag_dangerous_env(text, out);
                 }
                 if let Some(value) = child
                     .child_by_field_name("value")
-                    .and_then(|v| resolve_text(v, source))
+                    .and_then(|v| resolve_text(v, ctx.source))
                 {
                     out.assignments.push(value);
                 }
@@ -210,9 +243,9 @@ fn walk(
         }
     }
     if node.kind() == "function_definition"
-        && let Some(name) = function_name(node, source)
+        && let Some(name) = function_name(node, ctx.source)
     {
-        if fork_self_pipe(node, source, name) && out.obfuscation.is_none() {
+        if fork_self_pipe(node, ctx.source, name) && out.obfuscation.is_none() {
             out.obfuscation = Some("fork bomb: function recursively pipes into itself".to_string());
         }
         out.functions.push(name.to_string());
@@ -221,31 +254,24 @@ fn walk(
     if node.kind() == "file_redirect" && out.device_write.is_none() {
         let dest = node
             .named_child(node.named_child_count().saturating_sub(1))
-            .and_then(|d| d.utf8_text(source.as_bytes()).ok());
+            .and_then(|d| d.utf8_text(ctx.source.as_bytes()).ok());
         if let Some(dest) = dest.filter(|d| is_device_write_target(d)) {
             out.device_write = Some(format!("write to raw device `{dest}`"));
         }
     }
     if node.kind() == "file_redirect"
-        && let Some(target) = redirect_write_target(node, source)
+        && let Some(target) = redirect_write_target(node, ctx.source)
     {
         out.redirect_targets.push(target);
     }
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
-            walk(child, source, synthetic, depth, out, groups);
+            walk(child, ctx, out);
         }
     }
 }
 
-fn collect_command(
-    node: Node,
-    source: &str,
-    synthetic: bool,
-    depth: usize,
-    out: &mut Extraction,
-    groups: &mut HashMap<usize, usize>,
-) {
+fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
     let mut words = Vec::new();
     for i in 0..node.named_child_count() {
         let Some(child) = node.named_child(i) else {
@@ -254,22 +280,22 @@ fn collect_command(
         match child.kind() {
             // NAME=val prefix (LD_PRELOAD=x cmd) — not a word, but the name matters
             "variable_assignment" => {
-                if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                if let Ok(text) = child.utf8_text(ctx.source.as_bytes()) {
                     flag_dangerous_env(text, out);
                 }
-                if !synthetic
+                if !ctx.synthetic
                     && let Some(value) = child
                         .child_by_field_name("value")
-                        .and_then(|v| resolve_text(v, source))
+                        .and_then(|v| resolve_text(v, ctx.source))
                 {
                     out.assignments.push(value);
                 }
             }
             "command_name" => {
                 let inner = child.named_child(0).unwrap_or(child);
-                words.push(resolve_word(inner, source));
+                words.push(resolve_word(inner, ctx.source));
             }
-            _ => words.push(resolve_word(child, source)),
+            _ => words.push(resolve_word(child, ctx.source)),
         }
     }
     if words.is_empty() {
@@ -298,44 +324,37 @@ fn collect_command(
     let effective = stripped.as_ref().unwrap_or(&words);
     let flag_normalized = strip_global_flags(effective);
 
-    derive_nested(&words, depth, out);
+    derive_nested(&words, ctx.depth, out);
     if let Some(stripped) = &stripped {
-        derive_nested(stripped, depth, out);
+        derive_nested(stripped, ctx.depth, out);
     }
 
-    let redirects_output = writes_via_redirect(node, source);
+    let redirects_output = writes_via_redirect(node, ctx.source);
     // computed once per SITE (from the real tree-sitter node), not per variant —
     // otherwise `position = "only"` would never match anything, since a wrapped
     // command (sudo x) always produces >= 2 variants sharing one site
-    let group_info = group_info(node, source, groups, out);
-    push_variant(
-        out,
-        words,
-        synthetic,
-        false,
+    let group_info = group_info(node, ctx, out);
+    // the raw form, then the wrapper-stripped form (its own approval site:
+    // `sudo git` is not `git`), then the flag-normalized form (shares the site
+    // it normalizes, same privilege)
+    let base = Variant {
+        share_site: false,
         redirects_output,
-        true,
-        group_info,
-    );
+        rewritable: true,
+    };
+    push_variant(out, words, ctx.synthetic, base, group_info);
     if let Some(stripped) = stripped {
-        push_variant(
-            out,
-            stripped,
-            synthetic,
-            false,
-            redirects_output,
-            true,
-            group_info,
-        );
+        push_variant(out, stripped, ctx.synthetic, base, group_info);
     }
     if let Some(flag_normalized) = flag_normalized {
         push_variant(
             out,
             flag_normalized,
-            synthetic,
-            true,
-            redirects_output,
-            true,
+            ctx.synthetic,
+            Variant {
+                share_site: true,
+                ..base
+            },
             group_info,
         );
     }
@@ -521,25 +540,21 @@ fn heredoc_connector(stmt: Node, source: &str) -> Connector {
     Connector::Seq
 }
 
-fn group_info(
-    node: Node,
-    source: &str,
-    groups: &mut HashMap<usize, usize>,
-    out: &mut Extraction,
-) -> GroupInfo {
+fn group_info(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) -> GroupInfo {
     // the heredoc-split shape first: its members are not siblings in the CST,
     // so `enclosing_group` cannot see them
     if let Some((stmt, members)) = heredoc_split_group(node)
         && let Some(position) = members.iter().position(|m| m.id() == node.id())
     {
-        let group = *groups
+        let group = *ctx
+            .groups
             .entry(stmt.id())
             .or_insert_with(|| out.next_group_id());
         return GroupInfo {
             group,
             position,
             group_len: members.len(),
-            connector: heredoc_connector(stmt, source),
+            connector: heredoc_connector(stmt, ctx.source),
         };
     }
     let Some((ancestor, site)) = enclosing_group(node) else {
@@ -550,7 +565,8 @@ fn group_info(
             connector: Connector::Standalone,
         };
     };
-    let group = *groups
+    let group = *ctx
+        .groups
         .entry(ancestor.id())
         .or_insert_with(|| out.next_group_id());
     let mut position = 0;
@@ -566,7 +582,7 @@ fn group_info(
         group,
         position,
         group_len,
-        connector: connector_of(ancestor, source),
+        connector: connector_of(ancestor, ctx.source),
     }
 }
 
@@ -574,13 +590,11 @@ fn push_variant(
     out: &mut Extraction,
     words: Vec<Word>,
     synthetic: bool,
-    share_site: bool,
-    redirects_output: bool,
-    rewritable: bool,
+    variant: Variant,
     group: GroupInfo,
 ) {
     let last_site = out.commands.last().map(|c| c.site);
-    let site = match (share_site, last_site) {
+    let site = match (variant.share_site, last_site) {
         (true, Some(site)) => site,
         (_, Some(site)) => site + 1,
         (_, None) => 0,
@@ -593,8 +607,8 @@ fn push_variant(
         synthetic,
         site,
         inline,
-        redirects_output,
-        rewritable,
+        redirects_output: variant.redirects_output,
+        rewritable: variant.rewritable,
         group: group.group,
         position: group.position,
         group_len: group.group_len,
@@ -962,7 +976,7 @@ fn derive_shell_c(words: &[Word], depth: usize, out: &mut Extraction) {
         return;
     };
     match words.get(flag_pos + 2).map(|w| w.text.as_deref()) {
-        Some(Some(script)) => extract_into(script, true, depth + 1, out),
+        Some(Some(script)) => extract_into(&mut ParseCtx::new(script, true, depth + 1), out),
         Some(None) => block(out, "shell -c receives a dynamic string"),
         None => {}
     }
@@ -974,7 +988,7 @@ fn derive_eval(words: &[Word], depth: usize, out: &mut Extraction) {
     }
     let parts: Option<Vec<&str>> = words[1..].iter().map(|w| w.text.as_deref()).collect();
     match parts {
-        Some(parts) => extract_into(&parts.join(" "), true, depth + 1, out),
+        Some(parts) => extract_into(&mut ParseCtx::new(&parts.join(" "), true, depth + 1), out),
         None => block(out, "eval receives a dynamic string"),
     }
 }
@@ -1015,7 +1029,17 @@ fn derive_find_exec(words: &[Word], out: &mut Extraction) {
             };
             // not synthetic (security rules must still see it), but not
             // rewritable — its word spans index into the outer `find` line
-            push_variant(out, inner, false, false, false, false, standalone);
+            push_variant(
+                out,
+                inner,
+                false,
+                Variant {
+                    share_site: false,
+                    redirects_output: false,
+                    rewritable: false,
+                },
+                standalone,
+            );
         }
         idx = end + 1;
     }

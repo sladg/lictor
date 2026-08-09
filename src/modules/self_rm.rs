@@ -1,4 +1,4 @@
-use super::state_dir;
+use super::{HookCtx, state_dir};
 use crate::bash::{Command, Extraction, basename};
 use crate::config::{Config, ModuleSetting};
 use std::path::PathBuf;
@@ -58,18 +58,18 @@ fn remember(config: &Config, cwd: &str, session: &str, path: String) {
 
 // a Write to a path that doesn't exist yet is a genuine creation, not an
 // overwrite of something already there
-pub fn record_write(config: &Config, cwd: Option<&str>, session: Option<&str>, path: &str) {
-    if setting(config) == ModuleSetting::Off {
+pub fn record_write(ctx: &HookCtx, path: &str) {
+    if setting(ctx.config) == ModuleSetting::Off {
         return;
     }
-    let (Some(cwd), Some(session)) = (cwd, session) else {
+    let (Some(cwd), Some(session)) = (ctx.cwd, ctx.session) else {
         return;
     };
     let resolved = super::recreate::resolve(path, cwd);
     if std::fs::metadata(&resolved).is_ok() {
         return;
     }
-    remember(config, cwd, session, resolved);
+    remember(ctx.config, cwd, session, resolved);
 }
 
 // literal path args of `mkdir [flags]` / `touch [flags]`; a dynamic word means
@@ -93,16 +93,11 @@ fn creation_targets(command: &Command) -> Vec<String> {
         .collect()
 }
 
-pub fn record_bash(
-    extraction: &Extraction,
-    config: &Config,
-    cwd: Option<&str>,
-    session: Option<&str>,
-) {
-    if setting(config) == ModuleSetting::Off {
+pub fn record_bash(extraction: &Extraction, ctx: &HookCtx) {
+    if setting(ctx.config) == ModuleSetting::Off {
         return;
     }
-    let (Some(cwd), Some(session)) = (cwd, session) else {
+    let (Some(cwd), Some(session)) = (ctx.cwd, ctx.session) else {
         return;
     };
     for command in &extraction.commands {
@@ -111,7 +106,7 @@ pub fn record_bash(
             if std::fs::metadata(&resolved).is_ok() {
                 continue;
             }
-            remember(config, cwd, session, resolved);
+            remember(ctx.config, cwd, session, resolved);
         }
     }
 }
@@ -125,20 +120,15 @@ fn owned(created: &[String], target: &str) -> bool {
 // Some((Allow, message)) to auto-approve, Some((Warn, message)) to just hint;
 // None when the module is off, nothing is tracked, or the chain touches
 // anything besides a plain `rm`/`git rm` of tracked paths.
-pub fn check(
-    extraction: &Extraction,
-    config: &Config,
-    cwd: Option<&str>,
-    session: Option<&str>,
-) -> Option<(ModuleSetting, String)> {
-    let setting = setting(config);
+pub fn check(extraction: &Extraction, ctx: &HookCtx) -> Option<(ModuleSetting, String)> {
+    let setting = setting(ctx.config);
     if setting == ModuleSetting::Off {
         return None;
     }
-    let (Some(cwd), Some(session)) = (cwd, session) else {
+    let (Some(cwd), Some(session)) = (ctx.cwd, ctx.session) else {
         return None;
     };
-    let state = state_file(config, Some(cwd), session)?;
+    let state = state_file(ctx.config, Some(cwd), session)?;
     let created = load(&state);
     if created.is_empty() || extraction.commands.is_empty() {
         return None;
@@ -166,6 +156,15 @@ mod tests {
     use super::*;
     use crate::bash;
 
+    // the three values that used to be spelled out at every call site
+    fn ctx<'a>(config: &'a Config, dir: &'a std::path::Path, session: &'a str) -> HookCtx<'a> {
+        HookCtx {
+            config,
+            cwd: dir.to_str(),
+            session: Some(session),
+        }
+    }
+
     fn config(dir: &std::path::Path, setting: &str) -> Config {
         toml::from_str(&format!(
             "[modules]\nself-rm = \"{setting}\"\n[settings]\nlog_file = \"{}/audit.jsonl\"",
@@ -185,13 +184,8 @@ mod tests {
     fn write_then_rm_allowed() {
         let dir = temp("write");
         let config = config(&dir, "allow");
-        record_write(&config, dir.to_str(), Some("s1"), "scratch.txt");
-        let hit = check(
-            &bash::extract("rm scratch.txt"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
+        record_write(&ctx(&config, &dir, "s1"), "scratch.txt");
+        let hit = check(&bash::extract("rm scratch.txt"), &ctx(&config, &dir, "s1"));
         assert_eq!(hit.unwrap().0, ModuleSetting::Allow);
     }
 
@@ -199,18 +193,8 @@ mod tests {
     fn mkdir_then_rm_dir_allowed() {
         let dir = temp("mkdir");
         let config = config(&dir, "allow");
-        record_bash(
-            &bash::extract("mkdir scratch"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
-        let hit = check(
-            &bash::extract("rm -rf scratch"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
+        record_bash(&bash::extract("mkdir scratch"), &ctx(&config, &dir, "s1"));
+        let hit = check(&bash::extract("rm -rf scratch"), &ctx(&config, &dir, "s1"));
         assert!(hit.is_some());
     }
 
@@ -218,17 +202,10 @@ mod tests {
     fn path_inside_created_dir_allowed() {
         let dir = temp("nested");
         let config = config(&dir, "allow");
-        record_bash(
-            &bash::extract("mkdir scratch"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
+        record_bash(&bash::extract("mkdir scratch"), &ctx(&config, &dir, "s1"));
         let hit = check(
             &bash::extract("rm scratch/notes.txt"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
+            &ctx(&config, &dir, "s1"),
         );
         assert!(hit.is_some());
     }
@@ -239,12 +216,7 @@ mod tests {
         // unrelated, untracked path via a naive (non-normalizing) prefix match
         let dir = temp("traversal");
         let config = config(&dir, "allow");
-        record_bash(
-            &bash::extract("mkdir scratch"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
+        record_bash(&bash::extract("mkdir scratch"), &ctx(&config, &dir, "s1"));
         let outside = dir
             .parent()
             .unwrap()
@@ -256,7 +228,7 @@ mod tests {
             outside.file_name().unwrap().to_str().unwrap()
         );
         assert!(
-            check(&bash::extract(&escape), &config, dir.to_str(), Some("s1")).is_none(),
+            check(&bash::extract(&escape), &ctx(&config, &dir, "s1")).is_none(),
             "traversal target must not be treated as owned"
         );
     }
@@ -265,28 +237,18 @@ mod tests {
     fn untracked_target_not_allowed() {
         let dir = temp("untracked");
         let config = config(&dir, "allow");
-        record_write(&config, dir.to_str(), Some("s1"), "scratch.txt");
-        assert!(
-            check(
-                &bash::extract("rm other.txt"),
-                &config,
-                dir.to_str(),
-                Some("s1")
-            )
-            .is_none()
-        );
+        record_write(&ctx(&config, &dir, "s1"), "scratch.txt");
+        assert!(check(&bash::extract("rm other.txt"), &ctx(&config, &dir, "s1")).is_none());
     }
 
     #[test]
     fn mixed_chain_not_allowed() {
         let dir = temp("mixed");
         let config = config(&dir, "allow");
-        record_write(&config, dir.to_str(), Some("s1"), "scratch.txt");
+        record_write(&ctx(&config, &dir, "s1"), "scratch.txt");
         let hit = check(
             &bash::extract("rm scratch.txt && ls"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
+            &ctx(&config, &dir, "s1"),
         );
         assert!(hit.is_none());
     }
@@ -296,13 +258,11 @@ mod tests {
         let dir = temp("preexisting");
         let config = config(&dir, "allow");
         std::fs::write(dir.join("already-there.txt"), "x").unwrap();
-        record_write(&config, dir.to_str(), Some("s1"), "already-there.txt");
+        record_write(&ctx(&config, &dir, "s1"), "already-there.txt");
         assert!(
             check(
                 &bash::extract("rm already-there.txt"),
-                &config,
-                dir.to_str(),
-                Some("s1")
+                &ctx(&config, &dir, "s1")
             )
             .is_none()
         );
@@ -312,29 +272,16 @@ mod tests {
     fn off_setting_tracks_nothing() {
         let dir = temp("off");
         let config = config(&dir, "off");
-        record_write(&config, dir.to_str(), Some("s1"), "scratch.txt");
-        assert!(
-            check(
-                &bash::extract("rm scratch.txt"),
-                &config,
-                dir.to_str(),
-                Some("s1")
-            )
-            .is_none()
-        );
+        record_write(&ctx(&config, &dir, "s1"), "scratch.txt");
+        assert!(check(&bash::extract("rm scratch.txt"), &ctx(&config, &dir, "s1")).is_none());
     }
 
     #[test]
     fn warn_setting_hints_without_allowing() {
         let dir = temp("warn");
         let config = config(&dir, "warn");
-        record_write(&config, dir.to_str(), Some("s1"), "scratch.txt");
-        let hit = check(
-            &bash::extract("rm scratch.txt"),
-            &config,
-            dir.to_str(),
-            Some("s1"),
-        );
+        record_write(&ctx(&config, &dir, "s1"), "scratch.txt");
+        let hit = check(&bash::extract("rm scratch.txt"), &ctx(&config, &dir, "s1"));
         assert_eq!(hit.unwrap().0, ModuleSetting::Warn);
     }
 }

@@ -1,5 +1,4 @@
-use super::Plan;
-use crate::bash::Extraction;
+use super::{ModuleCtx, Plan};
 use crate::config::{Action, Config, PathRule};
 use crate::modules::jail;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -60,16 +59,11 @@ fn match_path<'a>(rules: &[CompiledPathRule<'a>], resolved: &str) -> Option<(Act
 
 // Bash: walk every literal path argument (cd-aware, including nested shells) and
 // route the first matching rule's verdict into the plan.
-pub fn plan(
-    rules: &[CompiledPathRule],
-    extraction: &Extraction,
-    cwd: Option<&str>,
-    plan: &mut Plan,
-) {
+pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
     if rules.is_empty() {
         return;
     }
-    let Some(cwd) = cwd else {
+    let Some(cwd) = ctx.cwd else {
         return;
     };
     let home = std::env::var("HOME").unwrap_or_default();
@@ -85,14 +79,16 @@ pub fn plan(
     // path args (cd-aware, including nested shells), plus the two path-bearing
     // token classes the parser split off from `words`: `NAME=val` prefix values
     // (`D=/tmp/x cmd`) and write-redirect targets (`echo x > /tmp/y`)
-    let mut candidates: Vec<String> = jail::walk_words(extraction, &cwd, &home, true, candidate_of)
-        .into_iter()
-        .map(|(_, resolved)| resolved)
-        .collect();
-    for raw in extraction
+    let mut candidates: Vec<String> =
+        jail::walk_words(ctx.extraction, &cwd, &home, true, candidate_of)
+            .into_iter()
+            .map(|(_, resolved)| resolved)
+            .collect();
+    for raw in ctx
+        .extraction
         .assignments
         .iter()
-        .chain(&extraction.redirect_targets)
+        .chain(&ctx.extraction.redirect_targets)
     {
         if jail::looks_like_path(raw) || raw.contains('/') {
             candidates.push(jail::normalize(raw, &cwd, &home));
@@ -109,9 +105,9 @@ pub fn plan(
         };
         seen.push(resolved);
         match action {
-            Action::Deny => plan.denies.push(message),
-            Action::Ask => plan.asks.push(message),
-            Action::Warn => plan.hints.push(message),
+            Action::Deny => out.denies.push(message),
+            Action::Ask => out.asks.push(message),
+            Action::Warn => out.hints.push(message),
             // allow: explicit exception — matched, nothing to flag
             Action::Allow | Action::Log | Action::Rewrite | Action::Skip => {}
         }
@@ -144,7 +140,16 @@ mod tests {
         let config = config(rules_toml);
         let compiled = compile(&config).expect("globs compile");
         let mut out = Plan::default();
-        super::plan(&compiled, &bash::extract(command), Some(CWD), &mut out);
+        let extraction = bash::extract(command);
+        super::plan(
+            &compiled,
+            &ModuleCtx {
+                extraction: &extraction,
+                config: &config,
+                cwd: Some(CWD),
+            },
+            &mut out,
+        );
         out
     }
 

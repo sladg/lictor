@@ -1,9 +1,19 @@
 use crate::audit;
 use crate::config::{Action, Config, ModuleSetting};
 use crate::hook::{HookInput, HookOutput};
-use crate::modules::{activate, retry_allow, strikes};
+use crate::modules::{HookCtx, activate, retry_allow, strikes};
 use crate::{agent, bash, content, minify, modules, rules, web};
 use serde_json::Value;
+
+// the three values every module needs, assembled once at the boundary instead
+// of spelled out at each call site
+fn hook_ctx<'a>(input: &'a HookInput, config: &'a Config) -> HookCtx<'a> {
+    HookCtx {
+        config,
+        cwd: input.cwd.as_deref(),
+        session: input.session_id.as_deref(),
+    }
+}
 
 pub fn evaluate(input: &HookInput, config: &Config) -> Option<HookOutput> {
     let result = match (input.hook_event_name.as_str(), input.tool_name.as_str()) {
@@ -222,11 +232,16 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     let mut extraction = bash::extract(original);
 
     // module rewrites (mv -> git mv, ...) land first; the gate judges the final command
-    let mut plan = modules::plan(&extraction, config, input.cwd.as_deref(), &|paths| {
+    let module_ctx = modules::ModuleCtx {
+        extraction: &extraction,
+        config,
+        cwd: input.cwd.as_deref(),
+    };
+    let mut plan = modules::plan(&module_ctx, &|paths| {
         modules::git_tracked(input.cwd.as_deref(), paths)
     });
     let path_rules = modules::path_rules::compile(config)?;
-    modules::path_rules::plan(&path_rules, &extraction, input.cwd.as_deref(), &mut plan);
+    modules::path_rules::plan(&path_rules, &module_ctx, &mut plan);
     let command = if plan.edits.is_empty() {
         original.to_string()
     } else {
@@ -269,12 +284,8 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     // ask — but only when no other module is already asking about this command
     if outcome.decision == Some("ask")
         && plan.asks.is_empty()
-        && let Some((setting, message)) = modules::self_rm::check(
-            &extraction,
-            config,
-            input.cwd.as_deref(),
-            input.session_id.as_deref(),
-        )
+        && let Some((setting, message)) =
+            modules::self_rm::check(&extraction, &hook_ctx(input, config))
     {
         match setting {
             ModuleSetting::Allow => {
@@ -308,18 +319,9 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
 
     // fingerprint rm targets while the files still exist, for delete/recreate detection
     if outcome.decision != Some("deny") {
-        modules::recreate::record(
-            &extraction,
-            config,
-            input.cwd.as_deref(),
-            input.session_id.as_deref(),
-        );
-        modules::self_rm::record_bash(
-            &extraction,
-            config,
-            input.cwd.as_deref(),
-            input.session_id.as_deref(),
-        );
+        let ctx = hook_ctx(input, config);
+        modules::recreate::record(&extraction, &ctx);
+        modules::self_rm::record_bash(&extraction, &ctx);
     }
 
     // rogue-actor guard: consecutive denies with no executed command in between
@@ -437,20 +439,10 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
     // delete/recreate: a Write that resurrects a just-deleted file is a rename
     // done the history-destroying way
     if input.tool_name == "Write" && outcome.decision != Some("deny") {
-        modules::self_rm::record_write(
-            config,
-            input.cwd.as_deref(),
-            input.session_id.as_deref(),
-            &path,
-        );
+        let ctx = hook_ctx(input, config);
+        modules::self_rm::record_write(&ctx, &path);
         let new_strings: Vec<String> = pairs.iter().map(|(_, n)| n.clone()).collect();
-        let hit = modules::recreate::check(
-            config,
-            input.cwd.as_deref(),
-            input.session_id.as_deref(),
-            &path,
-            &new_strings,
-        );
+        let hit = modules::recreate::check(&ctx, &path, &new_strings);
         if let Some((setting, hit)) = hit {
             let message = format!(
                 "lictor: this content is {}% similar to recently deleted `{}` — don't delete+recreate; run `git checkout -- {}` (or recreate it), then `git mv {} {}`",

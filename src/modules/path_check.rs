@@ -1,6 +1,6 @@
-use super::Plan;
+use super::{ModuleCtx, Plan};
 use crate::bash::Extraction;
-use crate::config::{ActivateRule, Config, ModuleSetting};
+use crate::config::{ActivateRule, ModuleSetting};
 use std::path::Path;
 
 // fail fast on guaranteed "command not found": program words that resolve to
@@ -8,13 +8,20 @@ use std::path::Path;
 // PATH lookup (`echo ===` dies with "== not found"). Aliases and functions
 // from the user's rc files are invisible here — drop to "warn" if they misfire.
 
-pub fn plan(extraction: &Extraction, config: &Config, cwd: Option<&str>, out: &mut Plan) {
-    let setting = match config.modules.get("path-check") {
+pub fn plan(ctx: &ModuleCtx, out: &mut Plan) {
+    let setting = match ctx.config.modules.get("path-check") {
         Some(s) if *s != ModuleSetting::Off => *s,
         _ => return,
     };
     let zsh = std::env::var("SHELL").is_ok_and(|s| s.ends_with("zsh"));
-    check(extraction, &config.activate, cwd, zsh, setting, out);
+    check(
+        ctx.extraction,
+        &ctx.config.activate,
+        ctx.cwd,
+        zsh,
+        setting,
+        out,
+    );
 }
 
 fn check(
