@@ -3,7 +3,7 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-tasks 1 and 2 complete.** The graph IR and emitter exist and are
+Status: **sub-tasks 1, 2 and 3 complete.** The graph IR and emitter exist and are
 still internal — nothing in `src/graph.rs` is wired into the engine. Sub-task 2
 (heredoc re-parenting) is the one behaviour change so far, and it landed in
 `bash.rs` as well as the graph because that is where today's rules read
@@ -178,6 +178,44 @@ Carried from issue #13, unchanged.
 | round-trip | **P2** (`parse(emit(g′)) ≡ g′`, edit soundness) is the merge gate for edits. P1 (`emit(parse(s)) == s`) is free once the emitter copies untouched segments, and is kept as a diagnostic |
 | heredocs | **supported**, not refused |
 | map trust | **hand-written and reviewed only**. No provenance tiers. `--help` is a one-time seeding pass whose output is reviewed before it ships; it is never consulted at runtime |
+
+## The P2 gate
+
+`tests/graph_p2.rs`. `parse(emit(g'))` makes the same claims as `g'`: apply an
+edit, emit, re-parse, and compare. Verified over **1,220 program-name rewrites**
+and **619 argument rewrites** across the corpus.
+
+This is the gate the issue requires *before* any rewrite feature exists. P1 says
+the lowering is faithful when nothing changes; it says nothing about what happens
+once you change something, which is the only case a rewrite cares about — and a
+rewrite that emits text re-parsing into a different command is exactly the #7
+bug.
+
+Equivalence is `Graph::fingerprint`: the claims, with node ids and byte offsets
+removed. An edit moves every span after it and a re-parse renumbers every node,
+so comparing either would make the property trivially false while saying nothing
+about soundness.
+
+Two things the gate had to be built against, both of which caught something:
+
+- **A no-op satisfies it.** A rewrite that changed nothing would round-trip
+  perfectly, so `edits_must_actually_change_something` asserts the edit lands,
+  the token appears, and the fingerprint moves.
+- **It can silently test a narrow slice.** The first version keyed "is this
+  command renameable?" off `Command::spans`, which is the union of the name *and*
+  its arguments — so it only ever exercised argument-less commands. It reported
+  701 checks and looked healthy. Keying off `Graph::owned_spans` (the segments a
+  node actually owns, which is what an editor needs anyway) took it to 1,220.
+
+It also pinned two facts about the model worth stating plainly:
+
+- **Derived facts are recomputed, not carried.** Renaming `sudo` to a plain token
+  de-escalates it — `privilege` follows the name, so the expected graph after an
+  edit must recompute it.
+- **Wrapped programs are not yet addressable.** In `sudo grep foo`, `sudo` *is*
+  command[0] and `grep` is one of its arguments. Rewriting the inner program
+  needs the `Execs` edge from sub-task 5. Worth knowing before `rewrite` moves
+  onto the graph.
 
 ## The P1 gate
 
