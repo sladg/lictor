@@ -10,11 +10,16 @@ use crate::config::{Config, ModuleSetting};
 // invoked from a subdirectory can still `cd ..`/reference sibling paths
 // anywhere in the repo. cwd is the fallback when it isn't inside a repo.
 
-// project root (git repo containing cwd) + jail_allow — the one "trusted roots"
-// list the outside-project check reasons about
+// project root(s) — the git repo containing cwd, plus the main checkout when
+// cwd is inside a linked worktree — and jail_allow: the "trusted roots" list
+// the outside-project check reasons about
 pub(crate) fn roots(config: &Config, cwd: &str, home: &str) -> Vec<String> {
-    let primary = git_root(cwd).unwrap_or_else(|| cwd.to_string());
-    let mut roots = vec![normalize(&primary, cwd, home)];
+    let primary = git_roots(cwd);
+    let mut roots: Vec<String> = if primary.is_empty() {
+        vec![normalize(cwd, cwd, home)]
+    } else {
+        primary.iter().map(|p| normalize(p, cwd, home)).collect()
+    };
     roots.extend(config.jail_allow().iter().map(|p| normalize(p, cwd, home)));
     roots
 }
@@ -280,12 +285,57 @@ fn cd_target(command: &Command, home: &str) -> Option<Option<String>> {
     Some(Some(home.to_string()))
 }
 
-// read-only probe: the git repository root containing `cwd`, so the jail's
-// primary root is the whole repo — not the literal directory the hook happened
-// to start from. None when cwd isn't inside a repo (or `git` isn't available).
+// The trusted git roots for `cwd`: the repo containing it, so the jail's
+// primary root is the whole repo rather than the literal directory the hook
+// happened to start from — plus, inside a linked worktree, the main checkout.
+//
+// `--show-toplevel` alone returns the WORKTREE root inside a linked worktree,
+// not the main checkout. Before this, a shell that `cd`ed into a worktree was
+// one-way latched: every route back out read as outside the jail, including
+// editing `settings.jail_allow` itself, which is self-protected by the
+// `[[path]]` rule in `src/default.toml:59-65`. The only way out was a human
+// resetting the shell from outside the hook (issue #6, hit for real while
+// running agents in `isolation: worktree`).
+//
+// `--git-common-dir`'s parent is the main checkout in both cases: in a linked
+// worktree it is the root that was missing, and in an ordinary checkout it
+// equals `--show-toplevel` — a harmless duplicate, since `is_inside` already
+// matches on a `{root}/` prefix.
+//
+// Scope note: granting the main root also grants sibling worktrees. That is
+// option 1 from #6, chosen deliberately — worktrees under `.claude/worktrees/`
+// are the same user's agent scratch space, and a total unrecoverable lockout is
+// far worse than sibling visibility.
+fn git_roots(cwd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    out.extend(git_root(cwd));
+    if let Some(common) = git_probe(cwd, "--git-common-dir")
+        && let Some(parent) = std::path::Path::new(&common).parent()
+    {
+        out.push(parent.to_string_lossy().into_owned());
+    }
+    out
+}
+
+// The single repo root containing `cwd` — the worktree itself when cwd is in a
+// linked one. Deliberately NOT `git_roots`: the abs-paths nudge rewrites an
+// absolute path to one relative to a root, and that only makes sense against
+// the checkout the agent is actually standing in. Containment (`roots`) is the
+// question with two answers, not this one.
 fn git_root(cwd: &str) -> Option<String> {
+    git_probe(cwd, "--show-toplevel")
+}
+
+// read-only `git rev-parse` probe. None when cwd isn't inside a repo (or `git`
+// isn't available).
+//
+// `--path-format=absolute` matters for `--git-common-dir`: an ordinary
+// (non-worktree) checkout returns a bare relative `.git` otherwise, whose
+// parent would then resolve against the wrong base. `--show-toplevel` is
+// already always absolute, so the flag is harmless there.
+fn git_probe(cwd: &str, arg: &str) -> Option<String> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args(["rev-parse", "--path-format=absolute", arg])
         .current_dir(cwd)
         .stderr(std::process::Stdio::null())
         .output()
@@ -662,13 +712,28 @@ mod tests {
 
     #[test]
     fn multi_hop_cd_escape_now_detected() {
-        // previously `../README.md` resolved against the ORIGINAL cwd
-        // (src/modules), landing inside `src/` — a false negative. With `cd`
-        // tracked, it resolves against the post-`cd ../..` cwd (repo root),
-        // landing one level ABOVE the repo — correctly flagged.
+        // previously a post-`cd` relative escape resolved against the ORIGINAL
+        // cwd (src/modules), landing inside `src/` — a false negative. With
+        // `cd` tracked it resolves against the post-`cd ../..` cwd (the repo
+        // root) instead, landing outside the repo — correctly flagged.
+        //
+        // Escapes far enough (clamped at `/` by `normalize`, so it lands in
+        // /etc) to stay unambiguously outside every trusted root no matter
+        // where this checkout sits. A one-level-up escape used to be enough
+        // only by coincidence: issue #6 adds the main checkout as a second
+        // root, so when this crate is tested from a worktree nested UNDER its
+        // own main checkout — `.claude/worktrees/…`, the exact layout #6 was
+        // reported from — `..` now lands inside that root and is correctly not
+        // flagged. Same assertion, just no longer dependent on the tester's
+        // directory layout.
         let subdir = repo_subdir("src/modules");
         assert_eq!(
-            check_at("cd ../.. && cat ../README.md", &[], &subdir).len(),
+            check_at(
+                "cd ../.. && cat ../../../../../../../../../../etc/hosts",
+                &[],
+                &subdir
+            )
+            .len(),
             1
         );
     }
@@ -704,5 +769,126 @@ mod tests {
 
     fn check_at(command: &str, allow: &[&str], cwd: &str) -> Vec<String> {
         violations(&bash::extract(command), &config(allow), cwd)
+    }
+
+    // ── issue #6: a linked git worktree must not one-way-latch the jail ──
+
+    #[test]
+    fn linked_worktree_trusts_main_checkout_root() {
+        // Build the main checkout from scratch rather than using
+        // CARGO_MANIFEST_DIR: this crate's own checkout is itself frequently a
+        // linked worktree (agent sandboxes, `git worktree`-based CI), in which
+        // case CARGO_MANIFEST_DIR is NOT the main checkout and these assertions
+        // would be testing the wrong root — they would fail against a correct
+        // implementation. A throwaway repo makes the topology under test
+        // explicit and environment-independent.
+        let base = std::env::temp_dir().join(format!("lictor-jail-wt-main-{}", std::process::id()));
+        let wt_path =
+            std::env::temp_dir().join(format!("lictor-jail-wt-linked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&wt_path);
+        let Some(main_root) = init_repo_with_commit(&base) else {
+            // no usable git in this environment — nothing to assert
+            std::fs::remove_dir_all(&base).ok();
+            return;
+        };
+        let added = std::process::Command::new("git")
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&wt_path)
+            .current_dir(&base)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !added.is_ok_and(|s| s.success()) {
+            std::fs::remove_dir_all(&base).ok();
+            return;
+        }
+        let wt = wt_path.to_str().unwrap();
+
+        // Collect BEFORE asserting: a panic between here and the cleanup would
+        // leak a *registered* git worktree, which `git worktree list` then
+        // reports until someone prunes it by hand.
+        let root_itself = check_at(&format!("cd {main_root}"), &[], wt);
+        let file_inside = check_at(&format!("cat {main_root}/README.md"), &[], wt);
+        let real_escape = check_at("cat /etc/hosts", &[], wt);
+
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&wt_path)
+            .current_dir(&base)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::fs::remove_dir_all(&wt_path).ok();
+        std::fs::remove_dir_all(&base).ok();
+
+        // the main checkout root itself, reached from inside the worktree
+        assert!(
+            root_itself.is_empty(),
+            "main checkout root flagged: {root_itself:?}"
+        );
+        // a file inside the main checkout, not the worktree
+        assert!(
+            file_inside.is_empty(),
+            "file in main checkout flagged: {file_inside:?}"
+        );
+        // real escapes are still caught — this is not a blanket unlock
+        assert_eq!(real_escape, vec!["/etc/hosts"]);
+    }
+
+    #[test]
+    fn ordinary_checkout_no_regression() {
+        // a plain (non-worktree) repo: --show-toplevel and --git-common-dir's
+        // parent are the same directory, so the fix is purely additive here
+        let base =
+            std::env::temp_dir().join(format!("lictor-jail-ordinary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let Some(repo) = init_repo_with_commit(&base) else {
+            std::fs::remove_dir_all(&base).ok();
+            return;
+        };
+        let parent = std::path::Path::new(&repo)
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let inside = check_at("cat README.md", &[], &repo);
+        let outside = check_at(&format!("cat {parent}"), &[], &repo);
+        std::fs::remove_dir_all(&base).ok();
+
+        // repo root trusted, as before
+        assert!(inside.is_empty(), "file in repo flagged: {inside:?}");
+        // its parent — outside the repo — is still flagged
+        assert_eq!(outside, vec![parent]);
+    }
+
+    // a throwaway repo with one commit: `git worktree add` needs a HEAD, and
+    // committing needs an identity the ambient git config may not provide
+    fn init_repo_with_commit(dir: &std::path::Path) -> Option<String> {
+        std::fs::create_dir_all(dir).ok()?;
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !git(&["init", "--quiet"]) {
+            return None;
+        }
+        git(&["config", "user.email", "test@lictor.invalid"]);
+        git(&["config", "user.name", "lictor tests"]);
+        std::fs::write(dir.join("README.md"), "fixture\n").ok()?;
+        if !git(&["add", "README.md"]) || !git(&["commit", "--quiet", "-m", "fixture"]) {
+            return None;
+        }
+        // canonicalize: on macOS `std::env::temp_dir()` is a symlink into
+        // /private/var and git reports the resolved path, so an uncanonicalized
+        // fixture would compare a symlinked cwd against a resolved root
+        Some(std::fs::canonicalize(dir).ok()?.to_str()?.to_string())
     }
 }

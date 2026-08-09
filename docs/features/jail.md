@@ -9,6 +9,8 @@ Confines the agent to the project: literal paths outside the repo (and your allo
 
 The project root is the git repo containing cwd (`git rev-parse --show-toplevel`), so the agent moves freely anywhere inside the repo even after `cd`-ing around; outside a repo it falls back to plain cwd. A `cd` earlier in a chain shifts what later relative paths resolve against; a subshell's `cd` (`bash -c`, `eval`, `find -exec`) doesn't leak out; `cd -` or a dynamic target freezes tracking at the last known cwd rather than guessing. Resolution is lexical — `~` expanded, `..` collapsed, no symlink or `$VAR` resolution.
 
+Inside a **linked git worktree** the main checkout is trusted as well. `--show-toplevel` returns the worktree, so on its own it would leave the main checkout reading as "outside the project" — and a shell that `cd`ed into a worktree could then never `cd` back out, including to edit `jail_allow` itself. Note this also trusts sibling worktrees under the same main checkout: they are normally the same user's agent scratch space, and that is a deliberate trade against an unrecoverable lockout.
+
 ## Config
 
 ```toml
