@@ -15,6 +15,13 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 clap = { version = "4.6.1", features = ["derive"] }
 
+# the P1 gate (tests/graph_p1.rs) checks the lowering against the CST directly,
+# so it needs the same grammar the library parses with — same versions, already
+# in the lockfile, no new supply chain
+[dev-dependencies]
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+
 # Strict lints. `cargo clippy --all-targets` fails on any clippy::all finding
 # (correctness + suspicious + style + complexity + perf). No pedantic/idiom groups:
 # they'd need dozens of lifetime/doc annotations that don't catch real bugs here.
