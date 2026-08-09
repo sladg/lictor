@@ -1,0 +1,8 @@
+[[cmd]]
+name = "base64"
+[cmd.flags]
+"-w" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

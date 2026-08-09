@@ -1,0 +1,6 @@
+[[cmd]]
+name = "ls"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

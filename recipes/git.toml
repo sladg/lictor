@@ -27,3 +27,17 @@ subcommand = "add"
 slots = "all"
 kind = "path"
 effect = ["read"]
+
+# The bare entry exists for git's GLOBAL flags, which have to be known before the
+# subcommand can be found at all: in `git -c core.pager=x rm f` the first word is
+# `core.pager=x`. Audit-log data over 123k invocations shows exactly this
+# misfiring — `git core.pager='!id'` shows up as a frequent "subcommand".
+[[cmd]]
+name = "git"
+[cmd.flags]
+"-c" = { takes = true }
+"-C" = { takes = true, kind = "path", effect = ["read"] }
+"--git-dir" = { takes = true, kind = "path", effect = ["read"] }
+"--work-tree" = { takes = true, kind = "path", effect = ["read"] }
+"--namespace" = { takes = true }
+"--exec-path" = { takes = true, kind = "path" }

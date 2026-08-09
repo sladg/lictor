@@ -1,0 +1,10 @@
+# the archive is the only argument tar is reliably given; the member paths that
+# follow depend on the mode flags, so they are left unmapped rather than guessed
+[[cmd]]
+name = "tar"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read", "write"] }
+"--file" = { takes = true, kind = "path", effect = ["read", "write"] }
+"-C" = { takes = true, kind = "path", effect = ["read"] }
+"--directory" = { takes = true, kind = "path", effect = ["read"] }
+"-T" = { takes = true, kind = "path", effect = ["read"] }

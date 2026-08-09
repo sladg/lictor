@@ -1088,13 +1088,17 @@ fn apply_program(
     words: &[(NodeId, bool)],
     maps: &crate::cmdmap::Maps,
 ) {
-    let first_positional = words
-        .iter()
-        .find(|(_, is_flag)| !is_flag)
-        .and_then(|(id, _)| match &graph.nodes[*id] {
-            Node::Value(v) => v.text.clone(),
-            _ => None,
-        });
+    // Finding the subcommand needs the global flags, because a flag that takes
+    // an argument hides the subcommand behind it: in `git -c core.pager=x rm f`
+    // the first *word* is `core.pager=x`, not `rm`. Real audit-log data shows
+    // this misfiring — `git core.pager='!id'` appears as one of the most
+    // frequent "subcommands" in a corpus of 123k invocations, and it is not a
+    // subcommand at all.
+    //
+    // So: resolve the bare entry first for its flags, use those to skip flag
+    // arguments, and only then decide which map applies.
+    let global = maps.lookup(name, None);
+    let first_positional = first_positional_after_flags(graph, words, global);
     let Some(program) = maps.lookup(name, first_positional.as_deref()) else {
         // no map, no claims — the inverted default
         return;
@@ -1107,13 +1111,19 @@ fn apply_program(
     for (id, is_flag) in words {
         if let Some(flag) = pending_flag.take() {
             graph.link(flag, *id, EdgeKind::Takes);
-            if let Some(spec) = flag_spec(graph, program, flag) {
+            if let Some(spec) = flag_spec(graph, program, flag)
+                .or_else(|| global.and_then(|g| flag_spec(graph, g, flag)))
+            {
                 emit_effects(graph, command, *id, spec.kind, &spec.effect);
             }
             continue;
         }
         if *is_flag {
-            let takes = flag_spec(graph, program, *id).is_some_and(|f| f.takes);
+            // a subcommand entry inherits the program's global flags: `-c` is
+            // git's, `--cached` is `git rm`'s, and both apply to `git -c x rm f`
+            let takes = flag_spec(graph, program, *id)
+                .or_else(|| global.and_then(|g| flag_spec(graph, g, *id)))
+                .is_some_and(|f| f.takes);
             if takes {
                 pending_flag = Some(*id);
             }
@@ -1161,6 +1171,34 @@ fn apply_program(
         };
         emit_effects(graph, command, *value, arg.kind, &arg.effect);
     }
+}
+
+/// The first positional that is not some flag's argument.
+///
+/// Uses the program's global flags, which is the only way to tell a subcommand
+/// from a value the shell put in the same position.
+fn first_positional_after_flags(
+    graph: &Graph,
+    words: &[(NodeId, bool)],
+    global: Option<&crate::cmdmap::Program>,
+) -> Option<String> {
+    let mut skip_next = false;
+    for (id, is_flag) in words {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if *is_flag {
+            skip_next = global
+                .and_then(|g| flag_spec(graph, g, *id))
+                .is_some_and(|f| f.takes);
+            continue;
+        }
+        if let Node::Value(v) = &graph.nodes[*id] {
+            return v.text.clone();
+        }
+    }
+    None
 }
 
 /// The payload of a wrapper: its program name, and the words that follow.

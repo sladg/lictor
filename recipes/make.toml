@@ -1,0 +1,7 @@
+[[cmd]]
+name = "make"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--file" = { takes = true, kind = "path", effect = ["read"] }
+"-C" = { takes = true, kind = "path", effect = ["read"] }
+"-j" = { takes = true }

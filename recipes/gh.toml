@@ -1,0 +1,11 @@
+[[cmd]]
+name = "gh"
+[cmd.flags]
+"-f" = { takes = true }
+"-F" = { takes = true }
+"-H" = { takes = true }
+"-X" = { takes = true }
+"-q" = { takes = true }
+"--jq" = { takes = true, kind = "code" }
+"-R" = { takes = true }
+"--repo" = { takes = true }

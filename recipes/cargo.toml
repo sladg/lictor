@@ -1,0 +1,9 @@
+[[cmd]]
+name = "cargo"
+[cmd.flags]
+"--manifest-path" = { takes = true, kind = "path", effect = ["read"] }
+"--target-dir" = { takes = true, kind = "path", effect = ["write"] }
+"-p" = { takes = true }
+"--package" = { takes = true }
+"--features" = { takes = true }
+"--target" = { takes = true }

@@ -70,6 +70,51 @@ fn the_false_positives_from_issue_4_produce_no_path_claims() {
 }
 
 #[test]
+fn the_remote_and_container_reports_from_issue_4_stay_silent() {
+    // #4's opening example, verbatim. The paths after `exec ... --` are inside a
+    // container; claiming them is the bug. kubectl's recipe maps only its
+    // unambiguously local flags, so there is nothing to deny here.
+    assert!(refs("kubectl -n ns exec pod -c c -- grep -c img /etc/config/config.yaml").is_empty());
+    // ...and the same for a remote command over ssh
+    assert!(refs("ssh host cat /etc/hosts").is_empty());
+
+    // silence is not "the recipe does nothing": the local files these programs
+    // really do open are still claimed
+    assert_eq!(refs("kubectl apply -f deploy.yaml"), ["reads deploy.yaml"]);
+    assert_eq!(
+        refs("ssh -i /home/u/.ssh/id_ed25519 host uptime"),
+        ["reads /home/u/.ssh/id_ed25519"]
+    );
+}
+
+#[test]
+fn a_first_argument_that_is_program_text_is_not_a_path() {
+    // the #4 shape, across every program that has it
+    assert_eq!(refs("jq '.items[] | .name' out.json"), ["reads out.json"]);
+    assert_eq!(refs("find . -name '/etc/*'"), ["reads ."]);
+    assert!(refs("sh -c 'rm -rf /tmp/x'").is_empty());
+    // chmod's slot 0 is a mode, not a file called `0644`
+    assert_eq!(refs("chmod 0644 src/main.rs"), ["writes src/main.rs"]);
+}
+
+#[test]
+fn a_global_flag_cannot_hide_the_subcommand_behind_it() {
+    // Found in real audit-log data: `git core.pager='!id'` appears as one of the
+    // most frequent "subcommands" across 123k invocations, and is not a
+    // subcommand at all — it is `-c`'s argument. Resolving the subcommand before
+    // binding global flags picks the wrong map and silently drops every claim.
+    assert_eq!(refs("git rm src/a.rs"), ["deletes src/a.rs"]);
+    assert_eq!(
+        refs("git -c core.pager=cat rm src/a.rs"),
+        ["deletes src/a.rs"]
+    );
+    assert_eq!(
+        refs("git -C /repo rm src/a.rs"),
+        ["reads /repo", "deletes src/a.rs"]
+    );
+}
+
+#[test]
 fn a_flag_argument_stops_being_a_positional() {
     // the slot shift is the whole reason `takes` is a map fact: with `-e`
     // consuming the pattern, the file is slot 0, and without it the file is

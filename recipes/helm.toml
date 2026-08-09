@@ -1,0 +1,10 @@
+[[cmd]]
+name = "helm"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--values" = { takes = true, kind = "path", effect = ["read"] }
+"--kubeconfig" = { takes = true, kind = "path", effect = ["read"] }
+"-n" = { takes = true }
+"--namespace" = { takes = true }
+"--set" = { takes = true }
+"-o" = { takes = true }
