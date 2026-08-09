@@ -4,6 +4,10 @@ use regex::Regex;
 
 struct Pattern {
     words: Vec<Regex>,
+    // false for a bare `*` word — a wildcard captures a command's own
+    // argument, it does not consume literal pattern text, so a rewrite must
+    // never overwrite it
+    literal: Vec<bool>,
     program_by_basename: bool,
 }
 
@@ -22,8 +26,10 @@ fn compile_pattern(source: &str) -> Result<Pattern, String> {
     if words.is_empty() {
         return Err("empty match pattern".to_string());
     }
+    let literal = words.iter().map(|re| re.as_str() != "^.*$").collect();
     Ok(Pattern {
         words,
+        literal,
         program_by_basename: !source.starts_with('/'),
     })
 }
@@ -103,7 +109,7 @@ fn match_prefix(pattern: &Pattern, command: &Command) -> Match {
                 }
             }
             None => {
-                if word_re.as_str() != "^.*$" {
+                if pattern.literal[i] {
                     unknown = true;
                 }
             }
@@ -309,7 +315,7 @@ pub fn gate(
                     )));
                 }
                 (Action::Rewrite, Match::Yes) => {
-                    if command.synthetic {
+                    if command.synthetic || !command.rewritable {
                         synthetic_rewrite.get_or_insert(format!(
                             "lictor: `{display}` matches rewrite rule `{}` inside a nested shell string; rewrite it manually",
                             rule.rule.pattern
@@ -497,9 +503,19 @@ pub fn gate(
 
 fn rewrite_edit(rule: &CompiledBashRule, command: &Command) -> Option<SpanEdit> {
     let replacement = rule.rule.rewrite.as_deref()?;
-    let pattern_len = rule.patterns.first()?.words.len();
+    if !command.rewritable {
+        return None;
+    }
+    let pattern = rule.patterns.first()?;
+    // only the leading run of literal pattern words is safe to overwrite —
+    // a wildcard captures the command's own argument and everything after
+    // it (literal or not) is left verbatim in the source
+    let literal_prefix_len = pattern.literal.iter().take_while(|&&lit| lit).count();
+    if literal_prefix_len == 0 {
+        return None;
+    }
     let first = command.words.first()?;
-    let last = command.words.get(pattern_len - 1)?;
+    let last = command.words.get(literal_prefix_len - 1)?;
     Some(SpanEdit {
         start: first.start,
         end: last.end,
@@ -601,4 +617,68 @@ pub fn apply_edits(source: &str, edits: &[SpanEdit]) -> String {
         result.replace_range(edit.start..edit.end, &edit.text);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bash;
+    use crate::config::Config;
+
+    // full rewrite pipeline: policy TOML -> gate() -> apply_edits(), asserting
+    // the exact string that would land in updatedInput.command — golden tests
+    // for issue #3 (wildcard-matched arguments must survive a rewrite)
+    fn rewritten(policy: &str, command: &str) -> String {
+        let config: Config = toml::from_str(policy).expect("test policy parses");
+        let bash_rules = compile_bash_rules(&config).expect("bash rules compile");
+        let web_rules = crate::web::compile(&config).expect("web rules compile");
+        let extraction = bash::extract(command);
+        let outcome = gate(&extraction, &bash_rules, &web_rules, &config, None);
+        apply_edits(command, &outcome.edits)
+    }
+
+    #[test]
+    fn rewrite_preserves_wildcard_matched_flag() {
+        let policy = "[[bash]]\nmatch = \"grep *\"\naction = \"rewrite\"\nrewrite = \"rg\"\n";
+        assert_eq!(
+            rewritten(policy, "grep -n TODO src/main.rs"),
+            "rg -n TODO src/main.rs"
+        );
+    }
+
+    #[test]
+    fn rewrite_preserves_wildcard_matched_pattern_arg() {
+        let policy = "[[bash]]\nmatch = \"grep *\"\naction = \"rewrite\"\nrewrite = \"rg\"\n";
+        assert_eq!(
+            rewritten(policy, "grep TODO src/main.rs"),
+            "rg TODO src/main.rs"
+        );
+    }
+
+    #[test]
+    fn rewrite_stops_at_first_wildcard_leaving_later_literal_words_untouched() {
+        // `find` needs argument reordering to fully rewrite to `rg`, which is out of
+        // scope here — phase 1 only guarantees no destruction of matched arguments
+        let policy =
+            "[[bash]]\nmatch = \"find * -name *\"\naction = \"rewrite\"\nrewrite = \"rg --files --glob\"\n";
+        assert_eq!(
+            rewritten(policy, "find . -name \"*.rs\""),
+            "rg --files --glob . -name \"*.rs\""
+        );
+    }
+
+    #[test]
+    fn all_literal_pattern_rewrites_exactly_as_before() {
+        let policy = "[[bash]]\nmatch = \"git commit\"\naction = \"rewrite\"\nrewrite = \"git ci\"\n";
+        assert_eq!(rewritten(policy, "git commit"), "git ci");
+    }
+
+    #[test]
+    fn find_exec_inner_command_is_not_spliced_into_the_outer_line() {
+        // the inner `grep -n x {}` word spans index into the OUTER `find` source;
+        // rewriting it would corrupt the enclosing command, so it must be refused
+        let policy = "[[bash]]\nmatch = \"grep *\"\naction = \"rewrite\"\nrewrite = \"rg\"\n";
+        let command = "find . -exec grep -n x {} \\;";
+        assert_eq!(rewritten(policy, command), command);
+    }
 }

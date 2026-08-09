@@ -23,6 +23,11 @@ pub struct Command {
     pub inline: Option<String>,
     // command writes to a file via redirection; blocks auto-allow and wrap
     pub redirects_output: bool,
+    // false for `find -exec` inner commands: their word spans index into the
+    // OUTER command's source, so a rewrite here would splice text into the
+    // middle of the enclosing `find` line. Security rules still see them
+    // (this is distinct from `synthetic`); only rewriting is refused.
+    pub rewritable: bool,
 }
 
 impl Command {
@@ -250,12 +255,12 @@ fn collect_command(node: Node, source: &str, synthetic: bool, depth: usize, out:
     }
 
     let redirects_output = writes_via_redirect(node, source);
-    push_variant(out, words, synthetic, false, redirects_output);
+    push_variant(out, words, synthetic, false, redirects_output, true);
     if let Some(stripped) = stripped {
-        push_variant(out, stripped, synthetic, false, redirects_output);
+        push_variant(out, stripped, synthetic, false, redirects_output, true);
     }
     if let Some(flag_normalized) = flag_normalized {
-        push_variant(out, flag_normalized, synthetic, true, redirects_output);
+        push_variant(out, flag_normalized, synthetic, true, redirects_output, true);
     }
 }
 
@@ -265,6 +270,7 @@ fn push_variant(
     synthetic: bool,
     share_site: bool,
     redirects_output: bool,
+    rewritable: bool,
 ) {
     let last_site = out.commands.last().map(|c| c.site);
     let site = match (share_site, last_site) {
@@ -281,6 +287,7 @@ fn push_variant(
         site,
         inline,
         redirects_output,
+        rewritable,
     });
 }
 
@@ -687,7 +694,9 @@ fn derive_find_exec(words: &[Word], out: &mut Extraction) {
         if end > start {
             let inner = words[start..end].to_vec();
             derive_nested(&inner, 0, out);
-            push_variant(out, inner, false, false, false);
+            // not synthetic (security rules must still see it), but not
+            // rewritable — its word spans index into the outer `find` line
+            push_variant(out, inner, false, false, false, false);
         }
         idx = end + 1;
     }
