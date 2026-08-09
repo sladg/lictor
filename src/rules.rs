@@ -269,7 +269,14 @@ pub fn match_command(rule: &CompiledBashRule, commands: &[Command], ci: usize) -
         } else {
             Match::Yes
         };
-        best = best.max(prefix.min(contains).min(only).min(piped).min(with).min(position));
+        best = best.max(
+            prefix
+                .min(contains)
+                .min(only)
+                .min(piped)
+                .min(with)
+                .min(position),
+        );
     }
     best
 }
@@ -742,8 +749,7 @@ mod tests {
     fn rewrite_stops_at_first_wildcard_leaving_later_literal_words_untouched() {
         // `find` needs argument reordering to fully rewrite to `rg`, which is out of
         // scope here — phase 1 only guarantees no destruction of matched arguments
-        let policy =
-            "[[bash]]\nmatch = \"find * -name *\"\naction = \"rewrite\"\nrewrite = \"rg --files --glob\"\n";
+        let policy = "[[bash]]\nmatch = \"find * -name *\"\naction = \"rewrite\"\nrewrite = \"rg --files --glob\"\n";
         assert_eq!(
             rewritten(policy, "find . -name \"*.rs\""),
             "rg --files --glob . -name \"*.rs\""
@@ -752,7 +758,8 @@ mod tests {
 
     #[test]
     fn all_literal_pattern_rewrites_exactly_as_before() {
-        let policy = "[[bash]]\nmatch = \"git commit\"\naction = \"rewrite\"\nrewrite = \"git ci\"\n";
+        let policy =
+            "[[bash]]\nmatch = \"git commit\"\naction = \"rewrite\"\nrewrite = \"git ci\"\n";
         assert_eq!(rewritten(policy, "git commit"), "git ci");
     }
 
@@ -830,21 +837,22 @@ mod tests {
     fn absent_predicates_behave_like_before() {
         // no piped_into/with/position set -> those three axes must never
         // constrain the result; only `match`/`contains`/`only` matter
-        let config: Config = toml::from_str(
-            "[[bash]]\nmatch = \"pnpm run *\"\naction = \"allow\"\n",
-        )
-        .expect("policy parses");
+        let config: Config =
+            toml::from_str("[[bash]]\nmatch = \"pnpm run *\"\naction = \"allow\"\n")
+                .expect("policy parses");
         let compiled = compile_bash_rules(&config).expect("rule compiles");
         let extraction = crate::bash::extract("pnpm run build | head -5");
-        assert_eq!(match_command(&compiled[0], &extraction.commands, 0), Match::Yes);
+        assert_eq!(
+            match_command(&compiled[0], &extraction.commands, 0),
+            Match::Yes
+        );
     }
 
     #[test]
     fn unknown_position_value_is_a_compile_error() {
-        let config: Config = toml::from_str(
-            "[[bash]]\nmatch = \"*\"\naction = \"deny\"\nposition = \"first\"\n",
-        )
-        .expect("policy parses");
+        let config: Config =
+            toml::from_str("[[bash]]\nmatch = \"*\"\naction = \"deny\"\nposition = \"first\"\n")
+                .expect("policy parses");
         assert!(compile_bash_rules(&config).is_err());
     }
 }

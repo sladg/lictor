@@ -1,11 +1,20 @@
-.PHONY: ci fmt lint build test fix install uninstall version release formula llms
+.PHONY: ci fmt lint build test fix install uninstall version release formula llms llms-check
 
 # single source of truth: the [package] version line in Cargo.toml
 VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 TAP_REPO := git@github.com:sladg/homebrew-tap.git
 
-# one-shot gate: format check + strict clippy + build + tests (what CI would run)
-ci: fmt lint build test
+# the docs bundle, assembled the same way by `llms` and `llms-check`.
+# LC_ALL=C because sort's collation is locale-dependent: en_US.UTF-8 folds case
+# and orders `README.md` among the lowercase names, while C puts it first. Without
+# this the file's contents depend on who ran `make llms`, and the check below
+# fails for whoever has the other locale.
+LLMS = { cat README.md; find docs -name '*.md' | LC_ALL=C sort | xargs cat; }
+
+# one-shot gate: format check + strict clippy + build + tests + docs freshness.
+# `.github/workflows/ci.yml` runs exactly this, so a local run and CI cannot
+# disagree about what passing means.
+ci: fmt lint build test llms-check
 
 fmt:
 	cargo fmt --check
@@ -36,7 +45,14 @@ version:
 # tag + push the version in Cargo.toml as vX.Y.Z. Bump Cargo.toml and commit first.
 # Gates on a clean tree, a green `ci`, and a not-yet-used tag so the tag can't drift.
 llms:
-	{ cat README.md; find docs -name '*.md' | sort | xargs cat; } > llms.txt
+	$(LLMS) > llms.txt
+
+# llms.txt is generated, so it silently goes stale whenever docs change and
+# nobody reruns `make llms` — it had already drifted by two features
+llms-check:
+	@tmp=$$(mktemp); $(LLMS) > $$tmp; \
+	  diff -q $$tmp llms.txt > /dev/null; ok=$$?; rm -f $$tmp; \
+	  [ $$ok -eq 0 ] || { echo "llms.txt is stale — run 'make llms' and commit the result"; exit 1; }
 
 release: ci llms
 	@git update-index -q --refresh

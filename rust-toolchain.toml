@@ -1,0 +1,6 @@
+# Pinned so `cargo fmt --check` and `clippy -D warnings` mean the same thing
+# everywhere — rustfmt's output drifts between releases, and `make ci` failing
+# on a clean checkout for that reason wastes a review.
+[toolchain]
+channel    = "1.90.0"
+components = ["rustfmt", "clippy"]
