@@ -1,0 +1,223 @@
+# The command graph
+
+Design notes for the bash command IR — issue #13. This document lands with
+sub-task 1 and is updated as later sub-tasks land.
+
+Status: **sub-task 1 complete** (graph IR + emitter, internal only). Nothing in
+`src/graph.rs` is wired into the engine yet, and no behaviour has changed.
+
+## Why
+
+`bash::Command` is a flat, context-free word list. Every consumer that needs
+structure re-derives it from the CST, and each one rediscovers the same bugs:
+
+| issue | what went wrong | root cause |
+|---|---|---|
+| #4 | `sed -n '/needle/p'` denied as a path escape | `looks_like_path` treats a leading `/` as proof of a filesystem path |
+| #7 | `grep -n TODO x` rewrote to `rg TODO x` | rewrites were byte-span surgery over one contiguous range |
+| #12 | `cat <<EOF \| grep secret` evades `piped_into` | the grammar nests the rest of the pipeline *inside* the heredoc |
+| #11 | 13 hand-maintained program tables | all fragments of one question: what does this argument mean to this program? |
+
+Each was patched where it surfaced. The shared cause is that structure is
+recovered independently, over and over, by code that only sees words.
+
+Lower the CST **once** into a typed graph. Rules query the graph.
+
+## The inverted default
+
+> **No map for a program → no reference edges → lictor says nothing about it.**
+
+Today every `/`-leading word is assumed to be a filesystem path, and the four
+layers of heuristic stacked on top of that assumption (`looks_like_path`, the
+argument-role table, the locality table, the shape heuristic) exist to walk it
+back. They are guesses correcting a wrong default.
+
+The graph inverts it. A program with no argument map produces no `Reads` /
+`Writes` / `Deletes` / `Creates` / `Execs` edges, so an unmapped command cannot
+generate a false positive. The cost is silence on unmapped programs, which is
+the honest failure direction: a parser can never be a security boundary, only a
+lint.
+
+The same rule applies *inside* a command. Stage 1 emits a `Takes` edge only when
+the syntax settles the binding (`--color=auto`). Whether `-e` in `grep -e foo`
+consumes the next word is a map question, so `foo` stays a plain positional
+rather than a guess.
+
+## The model
+
+**Nodes** — `Command`, `Flag`, `Value`, `PathSet`, `Stream`, `Heredoc`,
+`Connector`.
+
+**Edges** — `Has`, `Takes`, `Arg(i)`, `Flow(connector)`, `Spawns`, `On`, and the
+map-driven reference edges `Reads` / `Writes` / `Deletes` / `Creates` / `Execs` /
+`Filters`.
+
+### Nodes own a span *list*, not one range
+
+This is the load-bearing detail, and it is not a generality for its own sake.
+A word's text is genuinely discontiguous:
+
+```
+echo "pre $(id) post"
+     └─────┘    └───┘   ← one Value node, two spans
+           └──┘         ← belongs to the command `id`, not to the string
+```
+
+The `$(id)` bytes belong to another command entirely. If the string claimed
+them, an edit to either would corrupt the other — which is the shape of the #7
+bug, where a rewrite spliced text over a range it did not fully own.
+
+Segments form a **partition**: every byte of the source belongs to at most one
+node, and the gaps between owned segments (whitespace, quotes, keywords,
+parentheses) are copied through untouched by the emitter. That is what makes an
+edit surgical instead of byte-span surgery.
+
+## Worked examples
+
+All four are generated from the real lowering.
+
+### `grep -n TODO src/main.rs`
+
+```mermaid
+graph LR
+  C0["Command grep"]
+  F1["Flag -n"]
+  V2["Value TODO"]
+  V3["Value src/main.rs<br/>relative"]
+  C0 -->|Has| F1
+  C0 -->|"Arg(0)"| V2
+  C0 -->|"Arg(1)"| V3
+```
+
+The flag is a `Flag`, not argument zero. `rewrite` replaces the node holding
+`grep` and nothing else — the #7 regression, stated structurally.
+
+### `cat notes.txt | grep secret`
+
+```mermaid
+graph LR
+  C0["Command cat"]
+  V1["Value notes.txt"]
+  K2(["Connector |"])
+  C3["Command grep"]
+  V4["Value secret"]
+  C0 -->|"Arg(0)"| V1
+  C3 -->|"Arg(0)"| V4
+  C0 -->|"Flow(Pipe)"| C3
+```
+
+The connector is a node with its own span, so sub-task 10's `insert` can splice
+a stage beside it (`cargo test | less` → `cargo test | tokf run -- | less`).
+
+### `cat <<EOF | grep secret` — issue #12, still broken in stage 1
+
+```mermaid
+graph LR
+  C0["Command cat"]
+  H1["Heredoc EOF<br/>quoted=false"]
+  K2(["Connector |"])
+  C3["Command grep"]
+  V4["Value secret"]
+  C3 -->|"Arg(0)"| V4
+  H1 -->|On| C0
+```
+
+**There is no `Flow` edge between `cat` and `grep`.** tree-sitter nests the
+whole rest of the pipeline inside `heredoc_redirect`, so the two ends of the
+pipe are not siblings. Stage 1 lowers both commands faithfully but does not
+re-parent them; sub-task 2 lifts the nested `pipeline`/`list` to its logical
+position, which closes #12 for **every** consumer at once rather than for
+`piped_into` alone.
+
+The bug is now *visible in the model* — a missing edge — instead of being
+implicit in a predicate that quietly returns `Match::No`.
+
+### `echo "pre $(id) post"` — the discontiguous span list
+
+```mermaid
+graph LR
+  C0["Command echo<br/>spans 0..4, 5..10, 15..21"]
+  V1["Value dynamic<br/>spans 5..10, 15..21"]
+  C2["Command id<br/>span 12..14"]
+  C0 -->|"Arg(0)"| V1
+  V1 -->|Spawns| C2
+```
+
+The string word owns two disjoint stretches; the bytes between them belong to
+`id`. The value is `dynamic`, so its text is `None` — per the existing
+convention, a rule matching on an unknown value asks rather than guesses.
+
+## Settled decisions
+
+Carried from issue #13, unchanged.
+
+| | decision |
+|---|---|
+| glob matching | segment-wise glob∩glob matcher (`*` no `/`, `**` crosses). No DFA product, no filesystem expansion. Merge gate: differential property test vs `globset` — a false "disjoint" is a missed deny and the only dangerous direction |
+| deny criteria | requires a **witness**: a concrete path both the rule and the command's set select. Intersection alone is too weak (`grep -r x .` intersects almost everything) |
+| filesystem access | **none**. Decidable iff at least one side is concrete. Pattern-vs-pattern (`**/*.pem` vs `cat /etc/ssh/*`) → **silent**, accepted and expected |
+| dynamic words | any set containing one is `Unknown` → ask, per the existing `src/rules.rs:299` convention |
+| round-trip | **P2** (`parse(emit(g′)) ≡ g′`, edit soundness) is the merge gate for edits. P1 (`emit(parse(s)) == s`) is free once the emitter copies untouched segments, and is kept as a diagnostic |
+| heredocs | **supported**, not refused |
+| map trust | **hand-written and reviewed only**. No provenance tiers. `--help` is a one-time seeding pass whose output is reviewed before it ships; it is never consulted at runtime |
+
+## The P1 gate
+
+`tests/graph_p1.rs`. `emit(lower(s)) == s` over **1,373 string literals**
+harvested from `tests/commands.rs`, `tests/redteam.rs` and `tests/exploits.rs`.
+
+The corpus is harvested from the test sources rather than kept as a separate
+list, so a command string added tomorrow is covered automatically.
+
+P1 on its own is a weak gate in two ways, both closed explicitly:
+
+- **It tolerates overlaps.** `emit` skips a segment starting before the cursor,
+  so two nodes claiming the same bytes still round-trip. `overlapping_segments()`
+  is asserted separately. This caught a real bug: `$(…)` inside a string or an
+  unquoted heredoc body originally overlapped its parent.
+- **It tolerates modelling nothing.** A lowering that owned no spans would round-
+  trip perfectly. `coverage_is_not_vacuous` pins byte counts, and
+  `every_command_name_in_the_cst_survives_lowering` checks the lowering against
+  the grammar itself — every `command_name` tree-sitter recognises must come out
+  as a `Command`.
+
+That last check uses the CST as its oracle, deliberately **not** `bash::extract`.
+The existing extractor also emits wrapper-stripped variants — `xargs git commit`
+yields a synthetic `git commit`, driven by the `WRAPPERS` table at
+`src/bash.rs:531`. The graph does not replicate that and should not: "this
+program execs its argument" is a per-program map fact, and it becomes an `Execs`
+edge in sub-task 5 rather than a second phantom command.
+
+## What stage 1 does not do
+
+- **No re-parenting of heredoc-nested pipelines** — sub-task 2, closes #12.
+- **No argument maps**, so no reference edges and no `PathSet` population —
+  sub-tasks 5 and 6. The node and edge kinds exist so callers can match
+  exhaustively.
+- **`Locality` is always `Local`** — the field fixes the shape; the locality map
+  that makes `kubectl exec … -- cat /etc/config` a non-local reference is
+  sub-task 5.
+- **No `Extraction`/`Command` view over the graph** — sub-task 4. Every existing
+  module still uses `bash::extract` untouched.
+- **Compound constructs are not modelled semantically.** `if`, `for`, `while`,
+  `case` and function bodies parse, and the commands inside them are lowered;
+  the surrounding keywords fall through as unowned gaps. P1 holds regardless.
+
+## Accepted gaps
+
+Written down plainly, per sub-task 11. These are properties of the approach, not
+defects to be fixed later:
+
+- **Symlinked access paths.** The graph reasons about the path as written. A
+  symlink pointing outside a jail is invisible to it.
+- **Pattern-vs-pattern silence.** A rule glob against a command glob with no
+  concrete side yields no witness, so no deny. Accepted and expected.
+- **Dynamic paths.** `cat $TARGET` has no knowable value; it asks.
+- **Unenumerated secrets.** A rule can only protect paths someone named.
+
+## Prior art
+
+> **Not yet written.** This section is a placeholder for the issue author — a
+> comparison against existing shell-analysis approaches was scoped in #13 but
+> needs judgements about which prior work is genuinely comparable, which is the
+> author's call rather than something to assert here.
