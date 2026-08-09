@@ -196,6 +196,20 @@ pub enum Kind {
     Path,
     /// a nested command
     Cmd,
+    /// a **shell script**, as a single string: `bash -c '…'`, `eval '…'`.
+    ///
+    /// Distinct from [`Kind::Code`] on purpose. `code` says "this is source in
+    /// some language", which is all a rule needs in order to leave it alone.
+    /// `shell` additionally says "and this parser can read it", which is what
+    /// licenses re-parsing the string and grafting the result behind a `Spawns`
+    /// edge. Lowering `python3 -c 'open("/etc/passwd")'` as bash would
+    /// manufacture claims about a language the graph cannot parse, so the
+    /// interpreters keep `code` and only the shells get `shell`.
+    ///
+    /// Inferring this from the program name instead would reintroduce the
+    /// `SHELLS` table in `src/bash.rs` — one of the hand-maintained lists issue
+    /// #13 exists to delete.
+    Shell,
     // ── declared, not yet consumed ──
     /// a set of paths: a root taken with what is beneath it
     PathSet,
@@ -302,13 +316,24 @@ impl Maps {
                     program.name
                 ));
             }
-            // an `exec` effect on anything but a nested command is a map bug:
-            // the graph would have nothing to point the edge at
+            // an `exec` effect on anything the graph cannot point an edge at is
+            // a map bug. `cmd` names a program; `shell` names a script that is
+            // re-parsed into programs. Both end up with something executable.
+            let executable = |kind: Kind| matches!(kind, Kind::Cmd | Kind::Shell);
+            for (name, flag) in &program.flags {
+                if flag.effect.contains(&Effect::Exec) && !executable(flag.kind) {
+                    return Err(format!(
+                        "command map: `{label}` flag `{name}` gives an `exec` effect to a \
+                         `{:?}` argument — only `cmd` and `shell` can be executed",
+                        flag.kind
+                    ));
+                }
+            }
             for arg in &program.args {
-                if arg.effect.contains(&Effect::Exec) && arg.kind != Kind::Cmd {
+                if arg.effect.contains(&Effect::Exec) && !executable(arg.kind) {
                     return Err(format!(
                         "command map: `{label}` gives an `exec` effect to a `{:?}` argument — \
-                         only `cmd` can be executed",
+                         only `cmd` and `shell` can be executed",
                         arg.kind
                     ));
                 }
@@ -631,7 +656,33 @@ effect = ["write", "create"]
             "[[cmd]]\nname = \"x\"\n[[cmd.args]]\nslots = \"all\"\nkind = \"path\"\neffect = [\"exec\"]\n",
         )
         .expect_err("must reject");
-        assert!(err.contains("only `cmd` can be executed"), "{err}");
+        assert!(
+            err.contains("only `cmd` and `shell` can be executed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn exec_on_a_non_command_flag_is_rejected_too() {
+        // the flag side went unchecked until `shell` gave a flag an `exec`
+        // effect for the first time — `bash -c` — so a typo'd kind on a flag
+        // used to pass validation by omission
+        let err = Maps::parse(
+            "[[cmd]]\nname = \"x\"\n[cmd.flags]\n\"-c\" = { takes = true, kind = \"path\", effect = [\"exec\"] }\n",
+        )
+        .expect_err("must reject");
+        assert!(
+            err.contains("only `cmd` and `shell` can be executed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_shell_argument_may_be_executed() {
+        Maps::parse(
+            "[[cmd]]\nname = \"x\"\n[cmd.flags]\n\"-c\" = { takes = true, kind = \"shell\", effect = [\"exec\"] }\n",
+        )
+        .expect("shell is executable");
     }
 
     #[test]
