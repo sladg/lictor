@@ -1,0 +1,6 @@
+[[cmd]]
+name = "nohup"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

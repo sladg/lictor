@@ -1,0 +1,9 @@
+[[cmd]]
+name = "tail"
+[cmd.flags]
+"-n" = { takes = true }
+"-c" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

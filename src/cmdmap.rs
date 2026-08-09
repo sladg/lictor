@@ -28,13 +28,16 @@
 //! ## Trust
 //!
 //! Hand-written and reviewed only. There are no provenance tiers, and `--help`
-//! output is never consulted at runtime.
+//! output is never consulted at runtime. The recipes live in `recipes/`, one file
+//! per program; see `recipes/README.md` for the format and the review rule.
 
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// The shipped maps. Hand-written; see the file header for the review rule.
-pub const BUILTIN: &str = include_str!("cmdmap.toml");
+// `RECIPES: &[(&str, &str)]` — every `recipes/*.toml`, embedded at build time.
+// One file per program: `aws` and `kubectl` will each dwarf every current
+// recipe, and a single map file would not survive them.
+include!(concat!(env!("OUT_DIR"), "/recipes.rs"));
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Maps {
@@ -202,8 +205,36 @@ impl Maps {
         Ok(maps)
     }
 
+    /// Every shipped recipe, merged.
+    ///
+    /// Each file is parsed on its own so an error names the recipe it came
+    /// from — with one concatenated blob, a bad entry in `kubectl.toml` would
+    /// report a line number in a file nobody can open.
     pub fn builtin() -> Result<Self, String> {
-        Self::parse(BUILTIN)
+        let mut merged = Maps::default();
+        for (file, raw) in RECIPES {
+            let maps = Maps::parse(raw).map_err(|e| format!("recipes/{file}: {e}"))?;
+            merged.programs.extend(maps.programs);
+        }
+        merged.check_for_duplicates()?;
+        Ok(merged)
+    }
+
+    /// Two recipes claiming the same program (or the same subcommand of one)
+    /// means `lookup` silently picks whichever loaded first. Better to refuse.
+    fn check_for_duplicates(&self) -> Result<(), String> {
+        let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
+        for program in &self.programs {
+            let key = (program.name.as_str(), program.subcommand.as_deref());
+            if seen.contains(&key) {
+                return Err(match key.1 {
+                    Some(sub) => format!("recipes: `{} {sub}` is mapped twice", key.0),
+                    None => format!("recipes: `{}` is mapped twice", key.0),
+                });
+            }
+            seen.push(key);
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -308,13 +339,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_maps_parse_and_validate() {
-        let maps = Maps::builtin().expect("built-in maps are valid");
+    fn every_shipped_recipe_parses_and_validates() {
+        let maps = Maps::builtin().expect("shipped recipes are valid");
         assert!(
             maps.len() > 5,
             "expected a starter set of maps, got {}",
             maps.len()
         );
+    }
+
+    #[test]
+    fn every_recipe_file_contributes_at_least_one_entry() {
+        // a file that parses to nothing is a recipe someone wrote and the binary
+        // ignores
+        for (file, raw) in RECIPES {
+            let maps = Maps::parse(raw).unwrap_or_else(|e| panic!("recipes/{file}: {e}"));
+            assert!(
+                !maps.is_empty(),
+                "recipes/{file} defines no [[cmd]] entries"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recipe_filename_matches_the_program_it_maps() {
+        // `recipes/grep.toml` mapping `rg` would be findable by nobody
+        for (file, raw) in RECIPES {
+            let stem = file.trim_end_matches(".toml");
+            let maps = Maps::parse(raw).unwrap();
+            for program in &maps.programs {
+                assert_eq!(
+                    program.name, stem,
+                    "recipes/{file} maps `{}`, which belongs in recipes/{}.toml",
+                    program.name, program.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mapping_the_same_program_twice_is_rejected() {
+        let mut maps = Maps::parse("[[cmd]]\nname = \"rm\"\n").unwrap();
+        let extra = Maps::parse("[[cmd]]\nname = \"rm\"\n").unwrap();
+        maps.programs.extend(extra.programs);
+        let err = maps.check_for_duplicates().expect_err("must reject");
+        assert!(err.contains("mapped twice"), "{err}");
     }
 
     #[test]

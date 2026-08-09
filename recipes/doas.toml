@@ -1,0 +1,6 @@
+[[cmd]]
+name = "doas"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

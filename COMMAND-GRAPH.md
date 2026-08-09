@@ -167,8 +167,8 @@ convention, a rule matching on an unknown value asks rather than guesses.
 
 ## Argument maps (sub-task 5)
 
-`src/cmdmap.toml`, loaded by `src/cmdmap.rs`. What each argument *means* to each
-program: which slots are paths, which flags consume the next word, and what the
+`recipes/*.toml`, one file per program, embedded by `build.rs` and loaded by
+`src/cmdmap.rs`. What each argument *means* to each program: which slots are paths, which flags consume the next word, and what the
 program does to what it names.
 
 ```toml

@@ -1,0 +1,6 @@
+[[cmd]]
+name = "mkdir"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["create"]

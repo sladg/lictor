@@ -1,0 +1,15 @@
+[[cmd]]
+name = "rg"
+[cmd.flags]
+"-e" = { takes = true, kind = "regex" }
+"--regexp" = { takes = true, kind = "regex" }
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"-m" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]
+[[cmd.args]]
+slots = "first"
+kind = "regex"
+when = { without = ["-e", "--regexp", "-f"] }

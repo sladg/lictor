@@ -1,0 +1,11 @@
+# the destination is written and created; the sources are only read
+[[cmd]]
+name = "cp"
+[[cmd.args]]
+slots = "except-last"
+kind = "path"
+effect = ["read"]
+[[cmd.args]]
+slots = "last"
+kind = "path"
+effect = ["write", "create"]

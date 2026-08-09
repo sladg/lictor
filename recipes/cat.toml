@@ -1,0 +1,6 @@
+[[cmd]]
+name = "cat"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

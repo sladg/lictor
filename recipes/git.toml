@@ -1,0 +1,29 @@
+[[cmd]]
+name = "git"
+subcommand = "rm"
+[cmd.flags]
+"--cached" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["delete"]
+
+[[cmd]]
+name = "git"
+subcommand = "mv"
+[[cmd.args]]
+slots = "except-last"
+kind = "path"
+effect = ["read", "delete"]
+[[cmd.args]]
+slots = "last"
+kind = "path"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "git"
+subcommand = "add"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

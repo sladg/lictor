@@ -1,0 +1,6 @@
+[[cmd]]
+name = "unlink"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["delete"]

@@ -1,0 +1,6 @@
+[[cmd]]
+name = "timeout"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

@@ -1,0 +1,6 @@
+[[cmd]]
+name = "wc"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]
