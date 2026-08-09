@@ -451,7 +451,7 @@ impl Graph {
     // `self` counts toward the total, so this three-argument method trips a
     // threshold of 3.
     #[allow(clippy::too_many_arguments)]
-    fn link(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {
+    pub(crate) fn link(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {
         self.edges.push(Edge { from, to, kind });
     }
 }
@@ -1015,6 +1015,200 @@ fn resolve_text(node: TsNode, source: &str) -> Option<String> {
             Some(parts.join(""))
         }
         _ => None,
+    }
+}
+
+// ── applying argument maps (sub-task 5) ──
+
+/// Lower `source`, then let the maps say what each argument means.
+///
+/// Kept separate from [`lower`] on purpose: the lowering stays a faithful,
+/// opinion-free view of the syntax, and every claim about *meaning* enters here,
+/// from a reviewed map. A caller with no maps gets exactly the stage-1 graph.
+pub fn lower_with_maps(source: &str, maps: &crate::cmdmap::Maps) -> Graph {
+    let mut graph = lower(source);
+    apply_maps(&mut graph, maps);
+    graph
+}
+
+/// Attach reference edges to every command the maps know about.
+///
+/// Three things happen per command, in order, because each depends on the last:
+///
+/// 1. **Flag arguments are bound.** A flag the map says consumes the next word
+///    gets a `Takes` edge to it, and that word stops being a positional. This
+///    has to come first: it changes the slot numbers everything else is keyed
+///    to. `grep -e pat file` has *one* positional, not two.
+/// 2. **Positionals are matched to slots** and turned into reference edges.
+/// 3. **A wrapper's payload is followed.** `sudo grep -e x f` applies grep's map
+///    to the words after `sudo`, so the inner program's arguments mean what
+///    *it* says they mean.
+pub fn apply_maps(graph: &mut Graph, maps: &crate::cmdmap::Maps) {
+    let commands: Vec<NodeId> = graph.commands().map(|(id, _)| id).collect();
+    for id in commands {
+        let Node::Command(cmd) = &graph.nodes[id] else {
+            continue;
+        };
+        let Some(name) = cmd.name.clone() else {
+            continue;
+        };
+        let words = ordered_words(graph, id);
+        apply_program(graph, id, &name, &words, maps);
+    }
+}
+
+/// A command's flags and values in source order — the sequence a map is written
+/// against.
+fn ordered_words(graph: &Graph, command: NodeId) -> Vec<(NodeId, bool)> {
+    let mut out: Vec<(NodeId, bool, usize)> = Vec::new();
+    for edge in graph.edges_from(command) {
+        let is_flag = match edge.kind {
+            EdgeKind::Has => true,
+            // `NAME=val` prefixes are not arguments and never occupy a slot
+            EdgeKind::Arg(n) if n != usize::MAX => false,
+            _ => continue,
+        };
+        let start = graph.nodes[edge.to]
+            .spans()
+            .first()
+            .map_or(usize::MAX, |s| s.start);
+        out.push((edge.to, is_flag, start));
+    }
+    out.sort_by_key(|(_, _, start)| *start);
+    out.into_iter().map(|(id, flag, _)| (id, flag)).collect()
+}
+
+// graph, the command being mapped, its name, its words and the maps: five
+// unrelated inputs to one traversal, with no two travelling together
+#[allow(clippy::too_many_arguments)]
+fn apply_program(
+    graph: &mut Graph,
+    command: NodeId,
+    name: &str,
+    words: &[(NodeId, bool)],
+    maps: &crate::cmdmap::Maps,
+) {
+    let first_positional = words
+        .iter()
+        .find(|(_, is_flag)| !is_flag)
+        .and_then(|(id, _)| match &graph.nodes[*id] {
+            Node::Value(v) => v.text.clone(),
+            _ => None,
+        });
+    let Some(program) = maps.lookup(name, first_positional.as_deref()) else {
+        // no map, no claims — the inverted default
+        return;
+    };
+
+    // 1. bind flag arguments, which is what makes the slot numbers below mean
+    //    anything
+    let mut positionals: Vec<NodeId> = Vec::new();
+    let mut pending_flag: Option<NodeId> = None;
+    for (id, is_flag) in words {
+        if let Some(flag) = pending_flag.take() {
+            graph.link(flag, *id, EdgeKind::Takes);
+            if let Some(spec) = flag_spec(graph, program, flag) {
+                emit_effects(graph, command, *id, spec.kind, &spec.effect);
+            }
+            continue;
+        }
+        if *is_flag {
+            let takes = flag_spec(graph, program, *id).is_some_and(|f| f.takes);
+            if takes {
+                pending_flag = Some(*id);
+            }
+            continue;
+        }
+        positionals.push(*id);
+    }
+
+    // 2. a subcommand occupies slot 0 without being an argument to anything
+    let offset = usize::from(program.subcommand.is_some());
+    let slotted: Vec<NodeId> = positionals.iter().skip(offset).copied().collect();
+
+    // 3. the payload of a wrapper is another program, mapped by its own rules
+    if let Some(nested) = program.nested_command()
+        && let Some((payload_name, rest)) = payload(graph, &slotted)
+    {
+        if nested.effect.contains(&crate::cmdmap::Effect::Exec) {
+            graph.link(command, slotted[0], EdgeKind::Execs);
+        }
+        // reference edges from the inner program land on the OUTER command node:
+        // there is no node for the payload yet, and "what does this command line
+        // delete?" is the question rules actually ask
+        let inner: Vec<(NodeId, bool)> = rest
+            .iter()
+            .map(|id| (*id, matches!(&graph.nodes[*id], Node::Flag(_))))
+            .collect();
+        apply_program(graph, command, &payload_name, &inner, maps);
+        return;
+    }
+
+    // the flags actually present, which is what a `when` guard is checked
+    // against
+    let present: Vec<String> = words
+        .iter()
+        .filter(|(_, is_flag)| *is_flag)
+        .filter_map(|(id, _)| match &graph.nodes[*id] {
+            Node::Flag(f) => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let total = slotted.len();
+    for (slot, value) in slotted.iter().enumerate() {
+        let Some(arg) = program.arg_for(slot, total, &present) else {
+            continue;
+        };
+        emit_effects(graph, command, *value, arg.kind, &arg.effect);
+    }
+}
+
+/// The payload of a wrapper: its program name, and the words that follow.
+fn payload(graph: &Graph, slotted: &[NodeId]) -> Option<(String, Vec<NodeId>)> {
+    let first = *slotted.first()?;
+    let Node::Value(value) = &graph.nodes[first] else {
+        return None;
+    };
+    let name = value.text.clone()?;
+    Some((name, slotted[1..].to_vec()))
+}
+
+fn flag_spec<'a>(
+    graph: &Graph,
+    program: &'a crate::cmdmap::Program,
+    flag: NodeId,
+) -> Option<&'a crate::cmdmap::Flag> {
+    let Node::Flag(node) = &graph.nodes[flag] else {
+        return None;
+    };
+    program.flags.get(&node.name)
+}
+
+// the same: a target, what it is, and what happens to it
+#[allow(clippy::too_many_arguments)]
+fn emit_effects(
+    graph: &mut Graph,
+    command: NodeId,
+    value: NodeId,
+    kind: crate::cmdmap::Kind,
+    effects: &[crate::cmdmap::Effect],
+) {
+    use crate::cmdmap::Effect;
+    // only kinds that name something the graph can point at produce edges; the
+    // rest are recorded in the map for later stages
+    if !kind.is_path() {
+        return;
+    }
+    for effect in effects {
+        let edge = match effect {
+            Effect::Read => EdgeKind::Reads,
+            Effect::Write => EdgeKind::Writes,
+            Effect::Delete => EdgeKind::Deletes,
+            Effect::Create => EdgeKind::Creates,
+            // exec is checked against `cmd`, never a path
+            Effect::Exec => continue,
+        };
+        graph.link(command, value, edge);
     }
 }
 

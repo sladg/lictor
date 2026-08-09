@@ -3,7 +3,7 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-tasks 1, 2 and 3 complete.** The graph IR and emitter exist and are
+Status: **sub-tasks 1, 2, 3 and 5 complete.** The graph IR and emitter exist and are
 still internal — nothing in `src/graph.rs` is wired into the engine. Sub-task 2
 (heredoc re-parenting) is the one behaviour change so far, and it landed in
 `bash.rs` as well as the graph because that is where today's rules read
@@ -164,6 +164,60 @@ graph LR
 The string word owns two disjoint stretches; the bytes between them belong to
 `id`. The value is `dynamic`, so its text is `None` — per the existing
 convention, a rule matching on an unknown value asks rather than guesses.
+
+## Argument maps (sub-task 5)
+
+`src/cmdmap.toml`, loaded by `src/cmdmap.rs`. What each argument *means* to each
+program: which slots are paths, which flags consume the next word, and what the
+program does to what it names.
+
+```toml
+[[cmd]]
+name = "mv"
+[[cmd.args]]
+slots  = "except-last"
+kind   = "path"
+effect = ["read", "delete"]   # a set: mv's source is both
+[[cmd.args]]
+slots  = "last"
+kind   = "path"
+effect = ["write", "create"]
+```
+
+| field | values |
+|---|---|
+| `slots` | `all` · `first` · `last` · `except-last` · `rest` · a number — counted **after** flag arguments are removed |
+| `kind` | `none` · `path` · `cmd` (produce edges today) · `pathset` `glob` `regex` `code` `url` `host` `container` (accepted, consumed later) |
+| `effect` | `read` · `write` · `delete` · `create` · `exec` — a set |
+| `when` | `{ with = [...], without = [...] }` — guards an entry on the flags present |
+
+Deliberately not Turing-complete: slots, kinds and effects, and nothing else.
+
+**`takes` is why the maps exist.** Whether `-e` consumes the next word decides
+every slot number after it. `grep -e PATTERN file` has *one* positional, not two,
+and guessing from a leading dash is how `sed -n '/needle/p'` came to be denied.
+
+**`when` is not decoration.** `grep PATTERN file` and `grep -e PATTERN file`
+disagree about what slot 0 is. Without a guard, grep's map is wrong in one
+direction or the other — either the pattern is read as a path (#4's false
+positive) or a real file loses its read edge. This was found by building the map
+without `when` first and watching `README.md` lose its edge.
+
+**Wrappers reach their payload.** `sudo rm -rf x` applies rm's map to the words
+after `sudo`, so the effects are rm's. Stage 1 could not say this at all, which
+is the gap the P2 gate surfaced. Reference edges land on the outer command node,
+because "what does this command line delete?" is the question rules ask.
+
+### What is deferred
+
+The issue's format also lists `[cmd.kv]` (`dd if=/of=`) and richer slot binding.
+Those are not implemented. `pathset`, `glob`, `regex`, `code`, `url`, `host` and
+`container` parse and validate but produce no edges — `pathset` needs sub-task 6's
+`selects()` and the glob∩glob matcher.
+
+Nothing about a wrapper's payload creates a `Command` node yet, so a rewrite
+still cannot target the inner program. That needs the payload lowered as its own
+command.
 
 ## Settled decisions
 
