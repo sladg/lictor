@@ -1,0 +1,45 @@
+name = "[[edit]] rules gate content, not just paths"
+
+# The non-Bash path: `tool` + `input` carries any tool call, so Edit and Write
+# cases read the same way Bash ones do.
+
+[config]
+[[config.edit]]
+paths   = ["**/*.ts", "**/*.tsx"]
+pattern = "as (any|never|unknown)"
+action  = "deny"
+hint    = "No type assertions."
+
+[[config.edit]]
+paths  = ["**/.env*"]
+action = "ask"
+hint   = "Editing env files."
+
+[[config.edit]]
+pattern = "TODO"
+action  = "warn"
+hint    = "Leftover TODO."
+
+[[case]]
+name  = "a type assertion in a matched path is denied"
+tool  = "Edit"
+input = { file_path = "/repo/src/a.ts", old_string = "x", new_string = "y as any" }
+expect = { decision = "deny", reason = "No type assertions." }
+
+[[case]]
+name  = "the same content in an unmatched path is not the rule's business"
+tool  = "Edit"
+input = { file_path = "/repo/src/a.rs", old_string = "x", new_string = "y as any" }
+expect = { decision = "none", no_hint = "No type assertions." }
+
+[[case]]
+name  = "writing an env file asks"
+tool  = "Write"
+input = { file_path = "/repo/.env.local", content = "KEY=1" }
+expect = { decision = "ask", reason = "Editing env files." }
+
+[[case]]
+name  = "a warn rule hints without blocking"
+tool  = "Edit"
+input = { file_path = "/repo/src/a.rs", old_string = "x", new_string = "// TODO: later" }
+expect = { hint = "Leftover TODO." }
