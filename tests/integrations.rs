@@ -74,8 +74,7 @@ fn run(
     input: Value,
     response: Option<Value>,
 ) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("policy parses");
-    config.finalize().expect("catalogs expand");
+    let config = lictor::config::from_toml(policy, None).expect("policy parses");
     let hook: HookInput = serde_json::from_value(json!({
         "hook_event_name": event,
         "tool_name": tool,
@@ -284,8 +283,7 @@ const DEFAULT_POLICY: &str = include_str!("../src/default.toml");
 const PROJECT: &str = "/Users/nobody/project";
 
 fn pre_with_cwd(tool: &str, input: Value, cwd: &str) -> Option<Value> {
-    let mut config: Config = toml::from_str(DEFAULT_POLICY).expect("default policy parses");
-    config.finalize().expect("catalogs expand");
+    let config = lictor::config::from_toml(DEFAULT_POLICY, None).expect("default policy parses");
     let hook: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
