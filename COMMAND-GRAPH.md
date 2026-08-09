@@ -3,7 +3,7 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-tasks 1, 2, 3 and 5 complete.** The graph IR and emitter exist and are
+Status: **sub-tasks 1, 2, 3, 5 and 6 complete.** The graph IR and emitter exist and are
 still internal — nothing in `src/graph.rs` is wired into the engine. Sub-task 2
 (heredoc re-parenting) is the one behaviour change so far, and it landed in
 `bash.rs` as well as the graph because that is where today's rules read
@@ -232,6 +232,61 @@ Those are not implemented. `pathset`, `glob`, `regex`, `code`, `url`, `host` and
 Nothing about a wrapper's payload creates a `Command` node yet, so a rewrite
 still cannot target the inner program. That needs the payload lowered as its own
 command.
+
+## PathSet and the glob∩glob matcher (sub-task 6)
+
+`src/globs.rs`. Answers "can these two patterns both match the same path?", and
+when they can, **produces one**.
+
+The concrete path is the point. A deny requires a **witness**, not a claim of
+overlap: intersection alone would fire `rm -rf .` against almost any rule anyone
+would write, and a witness is also the thing you can show the person being told
+no.
+
+```rust
+PathSet::under("build").witness_against("build/**/*.o")   // Some("build/a.o")
+PathSet::under("build").witness_against("/etc/**")        // None -> no deny
+```
+
+`selects(S, P)`: under a root, matching every include, matching no exclude —
+exclude wins, because that is what carving a hole means. No filesystem access
+and no automata construction: a memoised recursion over the two token lists, the
+product construction without building the product.
+
+### The gate
+
+`tests/glob_differential.rs`, with `globset` as the oracle. A witness is
+**self-verifying** — globset can be asked directly whether both patterns match
+it — so the positive half needs no reference implementation of intersection.
+
+| check | scale |
+|---|---|
+| every witness matched by both patterns | 218 |
+| known-intersecting pairs never called disjoint | 266 |
+| the same, with patterns generated from each path | 727 |
+| disjoint verdicts surviving a counterexample search | 358 |
+
+A false **disjoint** is a missed deny; a false **intersects** is at worst a
+spurious one. So most of the gate constructs pairs that are known to intersect
+*by construction* — take a path, derive patterns that provably match it, insist
+every pair finds a witness — rather than trusting a hand-written list of what
+ought to overlap.
+
+### Two things that would have made the gate lie
+
+**globset's `*` crosses `/` by default.** `/etc/*` matches `/etc/a/b` unless
+`literal_separator(true)` is set. Comparing against the default would have
+disagreed everywhere for reasons unrelated to the code.
+`the_oracle_uses_the_semantics_we_claim` pins it.
+
+**A trailing `**` needs at least one segment.** globset matches `/etc/**`
+against `/etc/a` but *not* against `/etc`, while `a/**/b` does match `a/b`.
+Encoding that as "zero-or-more, then exactly one segment" at parse time keeps the
+rule in one place. This was found by the gate, not by reading docs.
+
+The pattern generator carries its own self-check, which caught a bug in the
+generator itself (`/*.pem` for a single-segment path) before it could produce a
+bogus assertion.
 
 ## Settled decisions
 

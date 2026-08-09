@@ -7,6 +7,7 @@ pub mod config;
 pub mod constants;
 pub mod content;
 pub mod engine;
+pub mod globs;
 pub mod graph;
 pub mod hook;
 pub mod minify;

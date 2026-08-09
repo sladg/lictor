@@ -21,6 +21,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 # so it needs the same grammar the library parses with — same versions, already
 # in the lockfile, no new supply chain
 [dev-dependencies]
+globset = "0.4"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 
