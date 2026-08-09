@@ -1,0 +1,41 @@
+name  = "piped_into catches a pipeline the per-command allows cannot see"
+issue = 5
+
+# Two allow rules that are individually fine but must not combine. Neither
+# `pnpm run build` nor `head` is dangerous alone; truncating a build log is the
+# thing worth denying, and only the pipeline shows it.
+
+[config]
+[[config.bash]]
+match  = "pnpm run *"
+action = "allow"
+
+[[config.bash]]
+match  = "head*"
+action = "allow"
+
+[[config.bash]]
+match      = "pnpm run *"
+piped_into = "head*"
+action     = "deny"
+reason     = "don't truncate a build log — read the full output"
+
+[[case]]
+name    = "the pipeline is denied"
+command = "pnpm run build | head -5"
+expect  = { decision = "deny", reason = "read the full output" }
+
+[[case]]
+name    = "the left-hand side alone is still allowed"
+command = "pnpm run build"
+expect  = { decision = "allow" }
+
+[[case]]
+name    = "the right-hand side alone is still allowed"
+command = "head -5 out.txt"
+expect  = { decision = "allow" }
+
+[[case]]
+name    = "order matters — piped_into is not symmetric"
+command = "head -5 out.txt | pnpm run build"
+expect  = { decision = "allow" }

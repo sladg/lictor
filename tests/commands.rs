@@ -565,39 +565,6 @@ fn bash_unquoted_heredoc_substitution_is_caught() {
 }
 
 #[test]
-fn bash_rewrite_single_command_allows() {
-    let output = bash("grep -rn foo src");
-    assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
-    assert_eq!(updated_command(&output), Some("rg -rn foo src".into()));
-}
-
-#[test]
-fn bash_rewrite_in_chain_with_unvetted_sibling_asks() {
-    let output = bash("make build && grep foo out.log");
-    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
-    assert_eq!(
-        updated_command(&output),
-        Some("make build && rg foo out.log".into())
-    );
-}
-
-#[test]
-fn bash_rewrite_wrapped_command_keeps_wrapper() {
-    let output = bash("sudo grep foo /var/log/x");
-    assert_eq!(
-        updated_command(&output),
-        Some("sudo rg foo /var/log/x".into())
-    );
-}
-
-#[test]
-fn bash_rewrite_inside_nested_shell_string_asks_without_edit() {
-    let output = bash("bash -c 'grep foo bar'");
-    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
-    assert_eq!(updated_command(&output), None);
-}
-
-#[test]
 fn bash_allow_rule_auto_approves() {
     let output = bash("git status --short");
     assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
@@ -2440,52 +2407,4 @@ fn path_check_ignores_resolved_programs() {
             "expected no decision for: {command}\ngot: {output:?}"
         );
     }
-}
-
-// issue #5 end-to-end: two allow rules that are individually fine but must not
-// combine — `piped_into` catches the pipeline the per-command allows can't see
-const PIPED_INTO_POLICY: &str = r#"
-[[bash]]
-match = "pnpm run *"
-action = "allow"
-
-[[bash]]
-match = "head*"
-action = "allow"
-
-[[bash]]
-match = "pnpm run *"
-piped_into = "head*"
-action = "deny"
-reason = "don't truncate a build log — read the full output"
-"#;
-
-#[test]
-fn piped_into_denies_the_pipeline_but_not_its_parts() {
-    let output = run_with(
-        PIPED_INTO_POLICY,
-        "PreToolUse",
-        "Bash",
-        json!({"command": "pnpm run build | head -5"}),
-        None,
-    );
-    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
-
-    let output = run_with(
-        PIPED_INTO_POLICY,
-        "PreToolUse",
-        "Bash",
-        json!({"command": "pnpm run build"}),
-        None,
-    );
-    assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
-
-    let output = run_with(
-        PIPED_INTO_POLICY,
-        "PreToolUse",
-        "Bash",
-        json!({"command": "head -5 out.txt"}),
-        None,
-    );
-    assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
 }

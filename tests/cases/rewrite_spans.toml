@@ -1,0 +1,52 @@
+name  = "rewrite preserves the arguments a wildcard matched"
+issue = 7
+
+# `rewrite` used to be byte-span surgery over the whole matched range, so
+# `grep -n TODO x` came back as `rg TODO x` — the flag silently eaten. These are
+# golden assertions on the exact emitted command.
+
+[config]
+[[config.bash]]
+match   = "grep*"
+action  = "rewrite"
+rewrite = "rg"
+
+# `make build` deliberately has NO rule — it is the unvetted sibling that keeps
+# the chain at `ask` while the rewrite still applies to the arm that matched
+
+[[case]]
+name    = "flag survives the rewrite"
+command = "grep -n TODO src/main.rs"
+expect  = { decision = "allow", command = "rg -n TODO src/main.rs" }
+
+[[case]]
+name    = "pattern and path survive the rewrite"
+command = "grep -rn foo src"
+expect  = { decision = "allow", command = "rg -rn foo src" }
+
+[[case]]
+name    = "only the program word is replaced, not the whole match"
+command = "grep TODO src/main.rs"
+expect  = { command = "rg TODO src/main.rs" }
+
+[[case]]
+name    = "a wrapper is kept and the inner program rewritten"
+command = "sudo grep foo /var/log/x"
+expect  = { command = "sudo rg foo /var/log/x" }
+
+[[case]]
+name    = "rewriting one arm of a chain leaves the other arm alone"
+command = "make build && grep foo out.log"
+expect  = { decision = "ask", command = "make build && rg foo out.log" }
+
+[[case]]
+# the inner command's spans index into the OUTER source, so splicing there
+# would write into the middle of the enclosing `find` line
+name    = "find -exec payload is not spliced"
+command = "find . -exec grep -n x {} \\;"
+expect  = { command = "<unchanged>" }
+
+[[case]]
+name    = "a payload inside a nested shell string is not edited"
+command = "bash -c 'grep foo bar'"
+expect  = { decision = "ask", command = "<unchanged>" }
