@@ -124,7 +124,12 @@ fn resolve_config(
 // `check -- <cmd...>`: run one command through the same PreToolUse -> exec ->
 // PostToolUse pipeline the hooks use, narrating decisions on stderr. The
 // model-visible output (post minify/spill) lands on stdout; exit code propagates.
-fn check_command(args: Vec<String>, mode: Option<String>, config_path: Option<String>, explain: bool) {
+fn check_command(
+    args: Vec<String>,
+    mode: Option<String>,
+    config_path: Option<String>,
+    explain: bool,
+) {
     if args.is_empty() {
         eprintln!("lictor: check -- needs a command, e.g. `lictor check -- git commit -m x`");
         std::process::exit(1);
@@ -137,8 +142,7 @@ fn check_command(args: Vec<String>, mode: Option<String>, config_path: Option<St
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(String::from));
-    let mut config = match resolve_config(cwd.as_deref(), mode.as_deref(), config_path.as_deref())
-    {
+    let mut config = match resolve_config(cwd.as_deref(), mode.as_deref(), config_path.as_deref()) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("lictor: config error: {error}");

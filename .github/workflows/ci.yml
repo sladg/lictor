@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# a second push to a PR makes the first run irrelevant
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: fmt + clippy + build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version and components; rustup on the
+      # runner honours it, so there is no version to keep in sync here
+      - name: Show toolchain
+        run: rustc --version && cargo --version && cargo fmt --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `make ci` is the same gate contributors run locally — one definition,
+      # so CI and a local run cannot disagree about what passing means
+      - run: make ci
