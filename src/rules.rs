@@ -16,10 +16,48 @@ pub struct CompiledBashRule<'a> {
     patterns: Vec<Pattern>,
     contains: Vec<Regex>,
     only: Vec<Regex>,
-    piped_into: Option<Pattern>,
-    with: Vec<Pattern>,
-    // "only" is the sole recognized value today, so this collapses to a bool
-    position_only: bool,
+    // every structural predicate on the rule, `piped_into` / `with` / `position`
+    // included: they compile to graph queries here and are not evaluated
+    // separately anywhere. ALL must hold.
+    graph: Vec<GraphQuery>,
+}
+
+/// Which way a query walks the chain, starting from the matched command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    /// `--conn-->` — later stages
+    Downstream,
+    /// `<--conn--` — earlier stages
+    Upstream,
+    /// `<--conn-->` — either side
+    Either,
+}
+
+/// Which connectors a step is allowed to cross.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnFilter {
+    Only(Connector),
+    Any,
+}
+
+/// One traversal: walk out from the matched command and ask whether anything
+/// reached matches.
+///
+/// This is the single implementation issue #13's sub-task 9 asks for. Before it,
+/// `piped_into`, `with` and `position` were three separate walks over the same
+/// structure, each with its own idea of what "the next command" means — which is
+/// how `piped_into` came to miss `a && b | c` (see [`reachable`]).
+struct GraphQuery {
+    dir: Dir,
+    conn: ConnFilter,
+    /// `+`: keep stepping while the connector still matches, instead of taking
+    /// exactly one step
+    transitive: bool,
+    /// alternatives, OR'd — a comma-separated list in the written form
+    patterns: Vec<Pattern>,
+    /// `!`: the query must find nothing. `Unknown` stays `Unknown` — a
+    /// neighbour we cannot read is no more disprovable than it was provable.
+    negated: bool,
 }
 
 fn compile_pattern(source: &str) -> Result<Pattern, String> {
@@ -59,36 +97,14 @@ pub fn compile_bash_rules(config: &Config) -> Result<Vec<CompiledBashRule<'_>>, 
                 .map(|g| glob_to_regex(g))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
-            let piped_into = rule
-                .piped_into
-                .as_deref()
-                .map(compile_pattern)
-                .transpose()
-                .map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
-            let with = rule
-                .with
-                .iter()
-                .map(|s| compile_pattern(s))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
-            let position_only = match rule.position.as_deref() {
-                None => false,
-                Some("only") => true,
-                Some(other) => {
-                    return Err(format!(
-                        "bash rule '{}': unknown position '{other}' (only 'only' is supported)",
-                        rule.pattern
-                    ));
-                }
-            };
+            let graph =
+                compile_graph(rule).map_err(|e| format!("bash rule '{}': {e}", rule.pattern))?;
             Ok(CompiledBashRule {
                 rule,
                 patterns,
                 contains,
                 only,
-                piped_into,
-                with,
-                position_only,
+                graph,
             })
         })
         .collect()
@@ -111,6 +127,144 @@ pub fn glob_to_regex(glob: &str) -> Result<Regex, String> {
     }
     pattern.push('$');
     Regex::new(&pattern).map_err(|e| e.to_string())
+}
+
+/// Every structural predicate on one rule, as graph queries.
+///
+/// `piped_into`, `with` and `position` are kept as config spellings — they read
+/// better than an arrow for the three cases they cover — but they are compiled
+/// here into the same [`GraphQuery`] the written form produces, so there is one
+/// traversal to get right and one place a bug in it can live.
+fn compile_graph(rule: &BashRule) -> Result<Vec<GraphQuery>, String> {
+    let mut out = rule
+        .graph
+        .iter()
+        .map(|q| compile_graph_query(q))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(glob) = rule.piped_into.as_deref() {
+        out.push(graph_query(
+            "--pipe-->",
+            vec![compile_pattern(glob)?],
+            false,
+        )?);
+    }
+    if !rule.with.is_empty() {
+        let patterns = rule
+            .with
+            .iter()
+            .map(|s| compile_pattern(s))
+            .collect::<Result<Vec<_>, _>>()?;
+        out.push(graph_query("<--any+-->", patterns, false)?);
+    }
+    match rule.position.as_deref() {
+        None => {}
+        // "standalone" is "nothing else in this chain", which is the negation of
+        // the `with`-shaped query with a pattern that matches any command
+        Some("only") => out.push(graph_query(
+            "<--any+-->",
+            vec![compile_pattern("*")?],
+            true,
+        )?),
+        Some(other) => {
+            return Err(format!(
+                "unknown position '{other}' (only 'only' is supported)"
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `[!]<arrow> <pattern>[, <pattern>…]`
+fn compile_graph_query(source: &str) -> Result<GraphQuery, String> {
+    let source = source.trim();
+    let (negated, rest) = match source.strip_prefix('!') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, source),
+    };
+    let (arrow, targets) = rest.split_once(char::is_whitespace).ok_or_else(|| {
+        format!("graph query '{source}': expected `<arrow> <pattern>`, e.g. `--pipe--> head*`")
+    })?;
+    let patterns = split_alternatives(targets)
+        .iter()
+        .map(|p| compile_pattern(p))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("graph query '{source}': {e}"))?;
+    if patterns.is_empty() {
+        return Err(format!(
+            "graph query '{source}': no pattern after the arrow"
+        ));
+    }
+    graph_query(arrow, patterns, negated)
+}
+
+/// The arrow half of a query: direction, which connectors it may cross, and
+/// whether it steps once or as far as the connector holds.
+fn graph_query(arrow: &str, patterns: Vec<Pattern>, negated: bool) -> Result<GraphQuery, String> {
+    let upstream = arrow.starts_with('<');
+    let body = arrow.strip_prefix('<').unwrap_or(arrow);
+    let downstream = body.ends_with('>');
+    let body = body.strip_suffix('>').unwrap_or(body);
+    let dir = match (upstream, downstream) {
+        (true, true) => Dir::Either,
+        (true, false) => Dir::Upstream,
+        (false, true) => Dir::Downstream,
+        (false, false) => {
+            return Err(format!(
+                "graph arrow '{arrow}' points nowhere — write `--pipe-->`, `<--pipe--` or `<--pipe-->`"
+            ));
+        }
+    };
+    let name = body
+        .strip_prefix("--")
+        .and_then(|b| b.strip_suffix("--"))
+        .ok_or_else(|| format!("unparseable graph arrow '{arrow}'"))?;
+    let (name, transitive) = match name.strip_suffix('+') {
+        Some(name) => (name, true),
+        None => (name, false),
+    };
+    let conn = match name {
+        "pipe" => ConnFilter::Only(Connector::Pipe),
+        "and" => ConnFilter::Only(Connector::And),
+        "or" => ConnFilter::Only(Connector::Or),
+        "seq" => ConnFilter::Only(Connector::Seq),
+        "any" => ConnFilter::Any,
+        other => {
+            return Err(format!(
+                "unknown connector '{other}' in graph arrow '{arrow}' (pipe, and, or, seq, any)"
+            ));
+        }
+    };
+    Ok(GraphQuery {
+        dir,
+        conn,
+        transitive,
+        patterns,
+        negated,
+    })
+}
+
+// `,` separates alternatives; `\,` is a literal comma, the same escape
+// `glob_to_regex` already understands, so a genuine comma in a word
+// (`curl -H a\,b`) still reaches the glob compiler intact
+fn split_alternatives(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                current.push('\\');
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            ',' => out.push(std::mem::take(&mut current)),
+            c => current.push(c),
+        }
+    }
+    out.push(current);
+    out.retain(|s| !s.trim().is_empty());
+    out.iter().map(|s| s.trim().to_string()).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -204,40 +358,90 @@ fn match_only(only: &[Regex], args: &[Word]) -> Match {
     if unknown { Match::Unknown } else { Match::Yes }
 }
 
-// adjacency: the command immediately after this one in the same pipeline.
-// only meaningful for Connector::Pipe — `&&`/`||`/standalone have no "next
-// stage", so they never satisfy `piped_into`
-fn match_piped_into(pattern: &Pattern, commands: &[Command], command: &Command) -> Match {
-    if command.connector != Connector::Pipe {
-        return Match::No;
+// The connector joining position `at - 1` to position `at` in `group`. This is
+// what `Command::connector` holds for every member of a chain except the first,
+// which instead borrows the connector on its right (see `graph::Graph::groups`)
+// — so position 0 answers `None` here and the walk below reads it as "there is
+// nothing before me", which is exactly right.
+fn connector_at(commands: &[Command], group: usize, at: usize) -> Option<Connector> {
+    if at == 0 {
+        return None;
     }
-    let next = command.position + 1;
-    if next >= command.group_len {
-        return Match::No;
-    }
-    let mut best = Match::No;
-    for candidate in commands
+    commands
         .iter()
-        .filter(|c| c.group == command.group && c.position == next)
-    {
-        best = best.max(match_prefix(pattern, candidate));
-    }
-    best
+        .find(|c| c.group == group && c.position == at)
+        .map(|c| c.connector)
 }
 
-// any of `patterns` matching any OTHER command sharing this command's group
-// (pipeline or `&&`/`||` chain) — order-independent, unlike `piped_into`
-fn match_with(patterns: &[Pattern], commands: &[Command], command: &Command) -> Match {
-    let mut best = Match::No;
-    for candidate in commands
-        .iter()
-        .filter(|c| c.group == command.group && c.position != command.position)
-    {
-        for pattern in patterns {
-            best = best.max(match_prefix(pattern, candidate));
+fn crosses(filter: ConnFilter, connector: Option<Connector>) -> bool {
+    match (filter, connector) {
+        // Standalone is the absence of a connector, not a kind of one
+        (_, None) | (_, Some(Connector::Standalone)) => false,
+        (ConnFilter::Any, Some(_)) => true,
+        (ConnFilter::Only(want), Some(got)) => want == got,
+    }
+}
+
+/// Positions this query reaches from `command`, in its chain.
+///
+/// A step is taken only across a connector the query accepts, so `--pipe+-->`
+/// from `a` in `a | b && c | d` stops at `b`: the `&&` is not a pipe and the
+/// walk does not jump it.
+///
+/// Reading the connector **between** two stages, rather than the one the
+/// starting command happens to carry, is what fixes `piped_into` on
+/// `a && b | c`. The old check asked whether `b`'s own connector was a pipe; it
+/// is `&&`, the one joining `b` to what came *before* it, so the rule silently
+/// missed a pipeline that is plainly there.
+fn reachable(query: &GraphQuery, commands: &[Command], command: &Command) -> Vec<usize> {
+    let (group, len) = (command.group, command.group_len);
+    let mut out = Vec::new();
+    if query.dir != Dir::Upstream {
+        let mut at = command.position;
+        while at + 1 < len && crosses(query.conn, connector_at(commands, group, at + 1)) {
+            at += 1;
+            out.push(at);
+            if !query.transitive {
+                break;
+            }
         }
     }
-    best
+    if query.dir != Dir::Downstream {
+        let mut at = command.position;
+        while at > 0 && crosses(query.conn, connector_at(commands, group, at)) {
+            at -= 1;
+            out.push(at);
+            if !query.transitive {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn match_graph(query: &GraphQuery, commands: &[Command], command: &Command) -> Match {
+    let mut best = Match::No;
+    for position in reachable(query, commands, command) {
+        // one position can hold several variants of the same site (`sudo rm` and
+        // the wrapper-stripped `rm`); any of them matching is a hit
+        for candidate in commands
+            .iter()
+            .filter(|c| c.group == command.group && c.position == position)
+        {
+            for pattern in &query.patterns {
+                best = best.max(match_prefix(pattern, candidate));
+            }
+        }
+    }
+    if query.negated {
+        match best {
+            Match::Yes => Match::No,
+            Match::No => Match::Yes,
+            Match::Unknown => Match::Unknown,
+        }
+    } else {
+        best
+    }
 }
 
 pub fn match_command(rule: &CompiledBashRule, commands: &[Command], ci: usize) -> Match {
@@ -251,32 +455,14 @@ pub fn match_command(rule: &CompiledBashRule, commands: &[Command], ci: usize) -
         }
         let contains = match_contains(&rule.contains, command, match_raw);
         let only = match_only(&rule.only, &command.words[pattern.words.len()..]);
-        let piped = match &rule.piped_into {
-            Some(p) => match_piped_into(p, commands, command),
-            None => Match::Yes,
-        };
-        let with = if rule.with.is_empty() {
-            Match::Yes
-        } else {
-            match_with(&rule.with, commands, command)
-        };
-        let position = if rule.position_only {
-            if command.connector == Connector::Standalone {
-                Match::Yes
-            } else {
-                Match::No
-            }
-        } else {
-            Match::Yes
-        };
-        best = best.max(
-            prefix
-                .min(contains)
-                .min(only)
-                .min(piped)
-                .min(with)
-                .min(position),
-        );
+        // every structural predicate the rule carries must hold
+        let graph = rule
+            .graph
+            .iter()
+            .map(|q| match_graph(q, commands, command))
+            .min()
+            .unwrap_or(Match::Yes);
+        best = best.max(prefix.min(contains).min(only).min(graph));
     }
     best
 }
@@ -781,11 +967,27 @@ mod tests {
     // against the first command site extracted from `command` (the one named
     // in the issue #5 test matrix's "command" column)
     fn eval_predicate(predicate_toml: &str, command: &str) -> Match {
+        eval_predicate_at(predicate_toml, command, 0)
+    }
+
+    fn eval_predicate_at(predicate_toml: &str, command: &str, ci: usize) -> Match {
         let policy = format!("[[bash]]\nmatch = \"*\"\naction = \"deny\"\n{predicate_toml}\n");
         let config: Config = toml::from_str(&policy).expect("test policy parses");
         let compiled = compile_bash_rules(&config).expect("rule compiles");
         let extraction = crate::bash::extract(command);
-        match_command(&compiled[0], &extraction.commands, 0)
+        match_command(&compiled[0], &extraction.commands, ci)
+    }
+
+    // the graph query is asked about a MIDDLE stage in several tests below, and
+    // the extraction's index order is an implementation detail (variants, payload
+    // commands); addressing by program name keeps the tests about the traversal
+    fn eval_predicate_on(predicate_toml: &str, command: &str, program: &str) -> Match {
+        let ci = crate::bash::extract(command)
+            .commands
+            .iter()
+            .position(|c| c.words.first().and_then(|w| w.text.as_deref()) == Some(program))
+            .unwrap_or_else(|| panic!("no `{program}` command in `{command}`"));
+        eval_predicate_at(predicate_toml, command, ci)
     }
 
     #[test]
@@ -850,6 +1052,165 @@ mod tests {
             match_command(&compiled[0], &extraction.commands, 0),
             Match::Yes
         );
+    }
+
+    // ── sub-task 9: the written query surface ───────────────────────────────
+
+    #[test]
+    fn written_query_and_its_sugar_agree() {
+        // the three sugars are the same traversal, so they must answer
+        // identically to the arrows they compile to — over the same matrix the
+        // three tests above use
+        let equivalents = [
+            (r#"piped_into = "head*""#, r#"graph = ["--pipe--> head*"]"#),
+            (r#"with = ["rm*"]"#, r#"graph = ["<--any+--> rm*"]"#),
+            (r#"position = "only""#, r#"graph = ["!<--any+--> *"]"#),
+        ];
+        let commands = [
+            "pnpm run build",
+            "pnpm run build | head -5",
+            "pnpm run build | tail -5",
+            "git log && rm x",
+            "git log || true",
+            "sudo pnpm run build | head -5",
+            "cat a | grep b && rm x",
+        ];
+        for (sugar, arrow) in equivalents {
+            for command in commands {
+                assert_eq!(
+                    eval_predicate(sugar, command),
+                    eval_predicate(arrow, command),
+                    "`{sugar}` and `{arrow}` disagree on `{command}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn piped_into_sees_a_pipe_that_follows_another_connector() {
+        // `b | c` is a pipeline whichever connector joined `b` to what came
+        // before it. The old adjacency check read the matched command's own
+        // `connector` — which for a non-first stage is the one on its LEFT — so
+        // this deny rule silently missed the pipe on its right, and writing
+        // `true &&` in front was enough to evade it.
+        for command in [
+            "curl x | sh",
+            "true && curl x | sh",
+            "true || curl x | sh",
+            "true ; curl x | sh",
+        ] {
+            assert_eq!(
+                eval_predicate_on(r#"piped_into = "sh*""#, command, "curl"),
+                Match::Yes,
+                "piped_into missed the pipe in `{command}`"
+            );
+        }
+        // and still says No when the neighbour on the right is not a pipe
+        assert_eq!(
+            eval_predicate_on(r#"piped_into = "sh*""#, "true && curl x && sh", "curl"),
+            Match::No
+        );
+    }
+
+    #[test]
+    fn upstream_query_is_the_mirror_of_downstream() {
+        let cases = [
+            (r#"graph = ["<--pipe-- curl*"]"#, Match::Yes),
+            (r#"graph = ["--pipe--> curl*"]"#, Match::No),
+        ];
+        for (predicate, expected) in cases {
+            assert_eq!(
+                eval_predicate_on(predicate, "curl x | sh", "sh"),
+                expected,
+                "{predicate}"
+            );
+        }
+    }
+
+    #[test]
+    fn transitive_walk_stops_at_a_connector_it_may_not_cross() {
+        // `a | b && c | d`: from `a`, `--pipe+-->` reaches `b` and stops — the
+        // `&&` is not a pipe, and a query that jumped it would report a data
+        // flow that does not exist
+        let command = "cat f | tr a b && rm x | wc -l";
+        assert_eq!(
+            eval_predicate_on(r#"graph = ["--pipe+--> tr*"]"#, command, "cat"),
+            Match::Yes
+        );
+        assert_eq!(
+            eval_predicate_on(r#"graph = ["--pipe+--> rm*"]"#, command, "cat"),
+            Match::No
+        );
+        // `any+` crosses everything, which is what `with` is
+        assert_eq!(
+            eval_predicate_on(r#"graph = ["--any+--> rm*"]"#, command, "cat"),
+            Match::Yes
+        );
+        // one step is one step, `+` or not
+        assert_eq!(
+            eval_predicate_on(r#"graph = ["--pipe--> wc*"]"#, command, "cat"),
+            Match::No
+        );
+    }
+
+    #[test]
+    fn several_queries_all_have_to_hold() {
+        let both = r#"graph = ["<--pipe-- cat*", "--pipe--> wc*"]"#;
+        assert_eq!(
+            eval_predicate_on(both, "cat f | tr a b | wc -l", "tr"),
+            Match::Yes
+        );
+        assert_eq!(
+            eval_predicate_on(both, "cat f | tr a b | head -1", "tr"),
+            Match::No
+        );
+    }
+
+    #[test]
+    fn comma_separates_alternatives_within_one_query() {
+        for (command, expected) in [
+            ("git log && rm x", Match::Yes),
+            ("git log && dd if=/dev/zero of=x", Match::Yes),
+            ("git log && true", Match::No),
+        ] {
+            assert_eq!(
+                eval_predicate(r#"graph = ["<--any+--> rm*, dd*"]"#, command),
+                expected,
+                "alternatives for `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dynamic_neighbour_is_unknown_negated_or_not() {
+        // fail-closed, the `contains`/`only` convention: a stage we cannot read
+        // neither proves nor disproves the query
+        assert_eq!(
+            eval_predicate(r#"graph = ["--pipe--> head*"]"#, "pnpm run build | $CMD"),
+            Match::Unknown
+        );
+        assert_eq!(
+            eval_predicate(r#"graph = ["!--pipe--> head*"]"#, "pnpm run build | $CMD"),
+            Match::Unknown
+        );
+    }
+
+    #[test]
+    fn malformed_queries_are_compile_errors() {
+        for bad in [
+            r#"graph = ["--pipe-- head*"]"#,   // points nowhere
+            r#"graph = ["--pipes--> head*"]"#, // unknown connector
+            r#"graph = ["--pipe-->"]"#,        // no pattern
+            r#"graph = ["head*"]"#,            // no arrow
+            r#"graph = ["~~pipe~~> head*"]"#,  // not an arrow at all
+        ] {
+            let policy = format!("[[bash]]\nmatch = \"*\"\naction = \"deny\"\n{bad}\n");
+            let config: Config = toml::from_str(&policy).expect("test policy parses");
+            assert!(
+                compile_bash_rules(&config).is_err(),
+                "`{bad}` should not compile"
+            );
+        }
     }
 
     #[test]

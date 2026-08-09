@@ -3,7 +3,7 @@
 Design notes for the bash command IR — issue #13. This document lands with
 sub-task 1 and is updated as later sub-tasks land.
 
-Status: **sub-tasks 1, 2, 3, 4, 5 and 6 complete.** The graph is what every
+Status: **sub-tasks 1, 2, 3, 4, 5, 6 and 9 complete.** The graph is what every
 extraction is now built alongside, and the structural predicates read it;
 `settings.jail_paths` is the one opt-in consumer for path identity, and that
 default is unchanged. Sub-task 2 (heredoc re-parenting) is the one behaviour
@@ -537,6 +537,54 @@ What has **not** moved: words, variants (wrapper-stripped, flag-normalized),
 synthetic re-parses (`bash -c`), and the non-structural analyses — obfuscation,
 dangerous env, device writes, function names. Those are still `bash.rs`'s, and
 migrate one consumer at a time.
+
+## One traversal, three spellings (sub-task 9)
+
+Sub-task 4 made the *structure* one thing. The predicates reading it were still
+three: `piped_into` walked forward one step, `with` scanned the whole group, and
+`position = "only"` asked a command about its own connector. Three walks over one
+model, each with its own idea of what "the next command" is.
+
+They are now one query, written as an arrow:
+
+    --pipe-->     the next stage, if a pipe joins them
+    <--pipe--     the previous stage
+    <--pipe-->    either neighbour
+    --pipe+-->    every later stage reachable without leaving the pipe
+    <--any+-->    everything else in the chain
+
+`pipe`/`and`/`or`/`seq`/`any` select the connector, `+` makes the step repeat
+while it still matches, `,` separates alternatives, `!` negates, and a rule's
+entries are ANDed. The three older fields are kept as config spellings — they
+read better than an arrow for the cases they cover — but they compile into this,
+so there is one traversal to get right:
+
+    piped_into = "head*"     ->  --pipe--> head*
+    with = ["rm*", "dd*"]    ->  <--any+--> rm*, dd*
+    position = "only"        ->  !<--any+--> *
+
+Collapsing them fixed a third structural bug, of the same family as the two
+sub-task 4 took out:
+
+    true && curl x | sh      `piped_into` read the MATCHED command's own
+                             connector, which for a non-first stage is the one on
+                             its LEFT. `curl` carries `&&`, so the rule missed the
+                             pipe on its right, and a leading `true &&` was an
+                             evasion
+
+The walk now reads the connector *between* two stages, which is the only thing
+that can answer "is this piped into that". `--pipe+-->` stops at the first
+connector it may not cross, so a query never claims a data flow the shell does
+not have.
+
+A negated query holds `Unknown` rather than flipping it. "I could not read the
+neighbour" is not "the neighbour was not there", in either direction — the same
+fail-closed convention as `contains` and `only`.
+
+The arrow surface is a predicate on `[[bash]]` (`graph = [...]`) rather than a
+`[[graph]]` section of its own: a traversal needs a command to start from, and
+`match` is that command. A separate section would have had to restate `match`,
+`action`, `contains`, `only`, `modes` and the retry fields to say anything.
 
 ## What is still deferred
 
