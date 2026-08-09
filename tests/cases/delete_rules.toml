@@ -1,0 +1,93 @@
+name  = "[[delete]] gates removals specifically, not every mention of a path"
+issue = 1
+
+# `[[path]]` fires on any command that merely *names* a path, so "never delete
+# src/migrations" could previously only be written as a blunt deny on `rm` — which
+# also blocks `rm` everywhere else, and still misses `unlink`.
+
+[config]
+[[config.delete]]
+match  = ["**/src/migrations/**"]
+action = "deny"
+hint   = "migration files must not be deleted; revert them instead"
+
+[[config.delete]]
+match  = ["**/*.lock"]
+action = "ask"
+
+[[case]]
+name    = "rm of a protected path is denied"
+command = "rm src/migrations/001_init.sql"
+cwd     = "/repo"
+expect  = { decision = "deny", reason = "must not be deleted" }
+
+[[case]]
+name    = "rm -rf of a protected directory is denied"
+command = "rm -rf src/migrations"
+cwd     = "/repo"
+expect  = { decision = "deny", reason = "must not be deleted" }
+
+[[case]]
+# the whole point: [[path]] could not express this without also blocking reads
+name    = "reading the same path is not a deletion"
+command = "cat src/migrations/001_init.sql"
+cwd     = "/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "unlink counts as deleting"
+command = "unlink src/migrations/001_init.sql"
+cwd     = "/repo"
+expect  = { decision = "deny", reason = "must not be deleted" }
+
+[[case]]
+name    = "git rm counts as deleting"
+command = "git rm src/migrations/001_init.sql"
+cwd     = "/repo"
+expect  = { decision = "deny", reason = "must not be deleted" }
+
+[[case]]
+# --cached leaves the file on disk, so it is not a deletion
+name    = "git rm --cached does not"
+command = "git rm --cached src/migrations/001_init.sql"
+cwd     = "/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "a second rule with a softer action still applies"
+command = "rm Cargo.lock"
+cwd     = "/repo"
+expect  = { decision = "ask" }
+
+[[case]]
+name    = "an unmatched deletion is nobody's business"
+command = "rm target/debug/junk"
+cwd     = "/repo"
+expect  = { decision = "none" }
+
+[[case]]
+# a dynamic word means the targets are unknowable, so abstain rather than guess
+name    = "a dynamic target abstains"
+command = "rm $TARGET"
+cwd     = "/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "a deletion inside a nested shell still counts"
+command = "bash -c 'rm src/migrations/001_init.sql'"
+cwd     = "/repo"
+expect  = { decision = "deny", reason = "must not be deleted" }
+
+[[case]]
+name  = "a Delete-shaped tool call is gated too"
+tool  = "Delete"
+input = { file_path = "src/migrations/001_init.sql" }
+cwd   = "/repo"
+expect = { decision = "deny", reason = "must not be deleted" }
+
+[[case]]
+name  = "a Delete of an unmatched path is not"
+tool  = "Delete"
+input = { file_path = "src/main.rs" }
+cwd   = "/repo"
+expect = { decision = "none" }

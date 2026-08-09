@@ -1,0 +1,64 @@
+name = "the four [[edit]] pattern axes, and how they differ"
+
+# `changed_pattern` shipped with no test coverage at all; `removed_pattern` had
+# only retry-focused ones. The two are easy to confuse, and the difference is the
+# whole reason both exist, so pin it directly.
+
+[config]
+[[config.edit]]
+paths           = ["**/*.rs"]
+removed_pattern = '(?m)^///'
+action          = "warn"
+hint            = "rust doc-comments (///) must not be removed"
+
+[[config.edit]]
+paths           = ["**/*.spec.ts"]
+changed_pattern = '"[^"]*"'
+action          = "warn"
+hint            = "test expectations must not be edited in place"
+
+[[case]]
+name  = "removed_pattern: the last match disappearing fires it"
+tool  = "Edit"
+input = { file_path = "src/lib.rs", old_string = "/// docs\nfn a() {}", new_string = "fn a() {}" }
+expect = { hint = "doc-comments" }
+
+[[case]]
+name  = "removed_pattern: a surviving match keeps it quiet"
+tool  = "Edit"
+input = { file_path = "src/lib.rs", old_string = "/// docs\nfn a() {}", new_string = "/// docs\nfn a(x: u8) {}" }
+expect = { decision = "none", no_hint = "doc-comments" }
+
+[[case]]
+# the distinction that justifies having both: one doc-comment removed while
+# another remains leaves a match, so `removed_pattern` stays silent
+name  = "removed_pattern: asks whether ANY match survives, not each one"
+tool  = "Edit"
+input = { file_path = "src/lib.rs", old_string = "/// a\nfn a() {}\n/// b\nfn b() {}", new_string = "fn a() {}\n/// b\nfn b() {}" }
+expect = { no_hint = "doc-comments" }
+
+[[case]]
+name  = "changed_pattern: an in-place edit fires it"
+tool  = "Edit"
+input = { file_path = "x.spec.ts", old_string = 'expect(v).toBe("ok")', new_string = 'expect(v).toBe("fine")' }
+expect = { hint = "edited in place" }
+
+[[case]]
+# the mirror of the case above: `changed_pattern` checks each match
+# individually, so "ok" vanishing fires even though "keep" still matches
+name  = "changed_pattern: checks each match individually"
+tool  = "Edit"
+input = { file_path = "x.spec.ts", old_string = 'a("ok"); b("keep")', new_string = 'a("changed"); b("keep")' }
+expect = { hint = "edited in place" }
+
+[[case]]
+name  = "changed_pattern: a pure addition keeps every old match, so it is silent"
+tool  = "Edit"
+input = { file_path = "x.spec.ts", old_string = 'a("ok")', new_string = 'a("ok"); b("new")' }
+expect = { decision = "none", no_hint = "edited in place" }
+
+[[case]]
+name  = "changed_pattern: Write has no prior content, so it can never fire"
+tool  = "Write"
+input = { file_path = "x.spec.ts", content = 'a("anything")' }
+expect = { no_hint = "edited in place" }

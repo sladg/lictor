@@ -32,6 +32,7 @@ deny  >  skip  >  ask  >  warn  >  rewrite  >  allow
 | [catalogs](catalogs.md) | named command groups — gate ~150 commands with one line |
 | [edit rules](edit-rules.md) | gate file edits by path + what's added / removed / missing / changed in place |
 | [path rules](path-rules.md) | your own dir policy, matched against every path a command touches |
+| [delete rules](delete-rules.md) | gate what a command *removes*, not every path it names |
 | [web rules](web.md) | domain/URL policy for curl/wget/WebFetch — allow, deny, or proxy-rewrite |
 | [agent rules](agent.md) | regex over subagent prompts (gate) and outputs (hint) |
 | [retries](retries.md) | deny once then allow the resubmit; quiet a repeated hint |

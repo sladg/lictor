@@ -245,6 +245,8 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
     });
     let path_rules = modules::path_rules::compile(config)?;
     modules::path_rules::plan(&path_rules, &module_ctx, &mut plan);
+    let delete_rules = modules::delete_rules::compile(config)?;
+    modules::delete_rules::plan(&delete_rules, &module_ctx, &mut plan);
     let command = if plan.edits.is_empty() {
         original.to_string()
     } else {
@@ -372,6 +374,12 @@ fn pre_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, St
 }
 
 fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, String> {
+    // A delete-shaped call names a path and carries no content, so it cannot go
+    // through the edit-rule machinery: an `[[edit]]` rule scoped only by `paths`
+    // would fire on a deletion it never meant to cover.
+    if input.tool_name == "Delete" {
+        return pre_delete(input, config);
+    }
     let Some((path, pairs)) = content::target_of(&input.tool_name, &input.tool_input) else {
         return Ok(None);
     };
@@ -488,6 +496,40 @@ fn pre_content(input: &HookInput, config: &Config) -> Result<Option<HookOutput>,
     output.hook_specific_output.permission_decision_reason = outcome.reason;
     if !outcome.hints.is_empty() {
         output.hook_specific_output.additional_context = Some(outcome.hints.join("\n"));
+    }
+    Ok(Some(output))
+}
+
+// A `Delete`-shaped tool call: one already-known path, judged by [[delete]]
+// rules. Claude Code does not currently expose such a tool; wiring it here means
+// the rule block covers a deletion however it arrives, rather than only the ones
+// that happen to come through Bash.
+fn pre_delete(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, String> {
+    let rules = modules::delete_rules::compile(config)?;
+    let (Some(path), Some(cwd)) = (
+        input.tool_input.get("file_path").and_then(Value::as_str),
+        input.cwd.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let Some((action, message)) = modules::delete_rules::check(&rules, path, cwd) else {
+        return Ok(None);
+    };
+    let mut output = HookOutput::new(&input.hook_event_name);
+    let decision = match action {
+        Action::Deny => Some("deny"),
+        Action::Ask => Some("ask"),
+        Action::Warn => None,
+        Action::Allow | Action::Log | Action::Rewrite | Action::Skip => return Ok(None),
+    };
+    write_audit(config, input, path, decision, &[], &[]);
+    match decision {
+        Some(d) => {
+            output.hook_specific_output.permission_decision = Some(d.to_string());
+            output.hook_specific_output.permission_decision_reason = Some(message);
+        }
+        // warn reaches the model without blocking, same as everywhere else
+        None => output.hook_specific_output.additional_context = Some(message),
     }
     Ok(Some(output))
 }

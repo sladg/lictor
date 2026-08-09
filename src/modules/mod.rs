@@ -10,6 +10,7 @@
 // allow once its retry_count is spent within retry_window.
 // One module per file, tests included.
 pub mod activate;
+pub mod delete_rules;
 pub mod git_wrap;
 pub mod jail;
 pub mod path_check;

@@ -82,9 +82,12 @@ fn jaccard(a: &[u64], b: &[u64]) -> f64 {
     shared as f64 / (a.len() + b.len() - shared) as f64
 }
 
-// literal path args of `rm [flags]` / `git rm [flags]`; --cached keeps the
-// file so it does not count as a deletion
-pub(super) fn deletion_targets(command: &Command) -> Vec<String> {
+// Literal path args of a command that removes files: `rm`, `unlink`, `rmdir`
+// and `git rm`. `--cached` keeps the file, so it does not count as a deletion.
+//
+// Shared with `[[delete]]` rules rather than duplicated, so the two consumers
+// cannot drift on what counts as deleting something.
+pub(crate) fn deletion_targets(command: &Command) -> Vec<String> {
     let words: Vec<&str> = command
         .words
         .iter()
@@ -94,7 +97,7 @@ pub(super) fn deletion_targets(command: &Command) -> Vec<String> {
         return Vec::new(); // dynamic word somewhere; don't guess
     }
     let args = match words.split_first() {
-        Some((&first, rest)) if basename(first) == "rm" => rest,
+        Some((&first, rest)) if matches!(basename(first), "rm" | "unlink" | "rmdir") => rest,
         Some((&first, rest))
             if basename(first) == "git" && rest.first().is_some_and(|w| *w == "rm") =>
         {

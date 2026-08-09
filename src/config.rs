@@ -313,6 +313,12 @@ pub struct Config {
     pub edit: Vec<EditRule>,
     #[serde(default)]
     pub path: Vec<PathRule>,
+    // `[[delete]]`: the same glob-list shape as `[[path]]`, but scoped to paths a
+    // command actually removes. `[[path]]` fires on any command that merely
+    // names a path, so "never delete src/migrations" could previously only be
+    // written as a blunt deny on `rm`.
+    #[serde(default)]
+    pub delete: Vec<PathRule>,
     #[serde(default)]
     pub web: Vec<WebRule>,
     #[serde(default)]
@@ -347,6 +353,7 @@ impl Config {
         self.bash.extend(other.bash);
         self.edit.extend(other.edit);
         self.path.extend(other.path);
+        self.delete.extend(other.delete);
         self.web.extend(other.web);
         self.agent.extend(other.agent);
         self.minify.extend(other.minify);
@@ -600,6 +607,7 @@ impl Config {
                 }
             }
         }
+        crate::modules::delete_rules::validate(&self.delete)?;
         for rule in &self.web {
             if rule.domains.is_empty() && rule.paths.is_empty() {
                 return Err("web rule needs `domains` and/or `match` globs".to_string());
