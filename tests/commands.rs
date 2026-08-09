@@ -2441,3 +2441,51 @@ fn path_check_ignores_resolved_programs() {
         );
     }
 }
+
+// issue #5 end-to-end: two allow rules that are individually fine but must not
+// combine — `piped_into` catches the pipeline the per-command allows can't see
+const PIPED_INTO_POLICY: &str = r#"
+[[bash]]
+match = "pnpm run *"
+action = "allow"
+
+[[bash]]
+match = "head*"
+action = "allow"
+
+[[bash]]
+match = "pnpm run *"
+piped_into = "head*"
+action = "deny"
+reason = "don't truncate a build log — read the full output"
+"#;
+
+#[test]
+fn piped_into_denies_the_pipeline_but_not_its_parts() {
+    let output = run_with(
+        PIPED_INTO_POLICY,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "pnpm run build | head -5"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+
+    let output = run_with(
+        PIPED_INTO_POLICY,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "pnpm run build"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
+
+    let output = run_with(
+        PIPED_INTO_POLICY,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "head -5 out.txt"}),
+        None,
+    );
+    assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");
+}

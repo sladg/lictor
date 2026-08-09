@@ -61,6 +61,16 @@ pub struct BashRule {
     // action varies — `modes = { plan = "allow", auto = "deny" }`
     #[serde(default)]
     pub modes: HashMap<String, Action>,
+    // adjacency: matches only if the NEXT command in the same pipeline matches this glob
+    #[serde(default)]
+    pub piped_into: Option<String>,
+    // matches if ANY of these globs matches ANY other command in the same pipeline/chain
+    #[serde(default)]
+    pub with: Vec<String>,
+    // structural constraint on this command's spot in its pipeline/chain.
+    // only "only" is recognized today — matches a standalone invocation
+    #[serde(default)]
+    pub position: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -697,6 +707,10 @@ impl Config {
                         retry_window: None,
                         // catalog-level modes already resolved in apply_mode
                         modes: HashMap::new(),
+                        // pipeline predicates aren't expressible in catalogs yet
+                        piped_into: None,
+                        with: Vec::new(),
+                        position: None,
                     });
                 }
                 if has_minify {
