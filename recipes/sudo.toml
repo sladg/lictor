@@ -1,0 +1,13 @@
+#
+# This is what makes `sudo grep …` reach the grep rules. Stage 1 had no way to
+# say it, so `sudo` was one command with `grep` as an argument.
+[[cmd]]
+name = "sudo"
+[cmd.flags]
+"-u" = { takes = true }
+"-g" = { takes = true }
+"-C" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

@@ -1,0 +1,14 @@
+# ssh's remote command runs on ANOTHER machine, so `ssh host cat /etc/hosts` must
+# not be read as touching this one — issue #4 listed it explicitly. Only the
+# local files ssh itself opens are mapped; the positionals stay silent until the
+# `host` kind carries locality.
+[[cmd]]
+name = "ssh"
+[cmd.flags]
+"-i" = { takes = true, kind = "path", effect = ["read"] }
+"-F" = { takes = true, kind = "path", effect = ["read"] }
+"-o" = { takes = true }
+"-p" = { takes = true }
+"-l" = { takes = true }
+"-L" = { takes = true }
+"-R" = { takes = true }

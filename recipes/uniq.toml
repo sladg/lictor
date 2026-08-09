@@ -1,0 +1,11 @@
+# uniq takes at most an input then an output file
+[[cmd]]
+name = "uniq"
+[cmd.flags]
+"-f" = { takes = true }
+"-s" = { takes = true }
+"-w" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

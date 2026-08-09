@@ -1,0 +1,9 @@
+[[cmd]]
+name = "wget"
+[cmd.flags]
+"-O" = { takes = true, kind = "path", effect = ["write", "create"] }
+"--output-document" = { takes = true, kind = "path", effect = ["write", "create"] }
+"-P" = { takes = true, kind = "path", effect = ["write"] }
+[[cmd.args]]
+slots = "all"
+kind = "url"

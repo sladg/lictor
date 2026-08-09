@@ -1,0 +1,13 @@
+[[cmd]]
+name = "awk"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"-v" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]
+[[cmd.args]]
+slots = "first"
+kind = "code"
+when = { without = ["-f"] }

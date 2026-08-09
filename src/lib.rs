@@ -2,6 +2,7 @@ pub mod agent;
 pub mod audit;
 pub mod bash;
 pub mod catalogs;
+pub mod cmdmap;
 pub mod config;
 pub mod constants;
 pub mod content;

@@ -1,0 +1,30 @@
+# DELIBERATELY CONSERVATIVE.
+#
+# kubectl's positionals are cluster objects, and the paths after `exec ... --`
+# live inside a container, not on this machine. Issue #4's original report was
+# exactly that:
+#
+#   kubectl -n ns exec pod -c c -- grep -c x /etc/config/config.yaml
+#     -> "System path outside the repo"
+#
+# So only the flags that are unambiguously LOCAL files are mapped. Positionals
+# are left unmapped on purpose: silence about a container path is correct, and
+# claiming one is the bug this whole design exists to remove. Modelling the
+# remote side needs the `container` kind, which does not produce edges yet.
+[[cmd]]
+name = "kubectl"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--filename" = { takes = true, kind = "path", effect = ["read"] }
+"-k" = { takes = true, kind = "path", effect = ["read"] }
+"--kustomize" = { takes = true, kind = "path", effect = ["read"] }
+"--kubeconfig" = { takes = true, kind = "path", effect = ["read"] }
+"-n" = { takes = true }
+"--namespace" = { takes = true }
+"-c" = { takes = true }
+"--container" = { takes = true }
+"-o" = { takes = true }
+"--output" = { takes = true }
+"--context" = { takes = true }
+"-l" = { takes = true }
+"--selector" = { takes = true }

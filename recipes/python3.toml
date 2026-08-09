@@ -1,0 +1,10 @@
+[[cmd]]
+name = "python3"
+[cmd.flags]
+"-c" = { takes = true, kind = "code" }
+"-m" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read"]
+when = { without = ["-c", "-m"] }

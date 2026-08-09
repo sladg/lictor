@@ -1,0 +1,13 @@
+[[cmd]]
+name = "sort"
+[cmd.flags]
+"-o" = { takes = true, kind = "path", effect = ["write", "create"] }
+"--output" = { takes = true, kind = "path", effect = ["write", "create"] }
+"-k" = { takes = true }
+"-t" = { takes = true }
+"-S" = { takes = true }
+"-T" = { takes = true, kind = "path" }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]

@@ -1,0 +1,13 @@
+# Same reasoning as kubectl: a container's paths are not this machine's, so only
+# unambiguously local flags are mapped and positionals are left silent.
+[[cmd]]
+name = "docker"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--file" = { takes = true, kind = "path", effect = ["read"] }
+"--env-file" = { takes = true, kind = "path", effect = ["read"] }
+"-v" = { takes = true }
+"--volume" = { takes = true }
+"-e" = { takes = true }
+"--name" = { takes = true }
+"-p" = { takes = true }

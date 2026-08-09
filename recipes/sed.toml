@@ -1,0 +1,18 @@
+# sed's script is program text, not a path — `sed -n '/needle/p' README.md`
+# denied on `/needle/p` is the exact false positive #4 reported.
+[[cmd]]
+name = "sed"
+[cmd.flags]
+"-e" = { takes = true, kind = "code" }
+"--expression" = { takes = true, kind = "code" }
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--file" = { takes = true, kind = "path", effect = ["read"] }
+"-i" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]
+[[cmd.args]]
+slots = "first"
+kind = "code"
+when = { without = ["-e", "--expression", "-f", "--file"] }

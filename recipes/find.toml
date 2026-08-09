@@ -1,0 +1,26 @@
+# `-name`/`-path`/`-regex` take GLOBS, not paths. Without that, `find . -name
+# '/etc/*'` reads the pattern as a filesystem reference — the issue #4 shape.
+#
+# Only the first root is mapped: find's grammar is `find [roots...] [expression]`
+# and the expression starts at the first predicate, which `slots` cannot express.
+# One root covers the overwhelmingly common `find . -name x`; more would need
+# sub-task 6.
+[[cmd]]
+name = "find"
+[cmd.flags]
+"-name" = { takes = true, kind = "glob" }
+"-iname" = { takes = true, kind = "glob" }
+"-path" = { takes = true, kind = "glob" }
+"-ipath" = { takes = true, kind = "glob" }
+"-regex" = { takes = true, kind = "regex" }
+"-newer" = { takes = true, kind = "path", effect = ["read"] }
+"-maxdepth" = { takes = true }
+"-mindepth" = { takes = true }
+"-type" = { takes = true }
+"-size" = { takes = true }
+"-mtime" = { takes = true }
+"-perm" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read"]

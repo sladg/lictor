@@ -1,0 +1,11 @@
+# slot 0 is the mode (`u+x`, `0644`), not a path — mapping it as one would flag
+# every chmod as touching a file called `0644`
+[[cmd]]
+name = "chmod"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["write"]
+[[cmd.args]]
+slots = "first"
+kind = "none"

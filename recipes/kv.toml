@@ -1,0 +1,117 @@
+# https://github.com/AmrSaber/KV — a key/value store.
+#
+# Almost nothing kv takes is a filesystem path. Its arguments are KEYS, values
+# and database names, and a key is free-form: `kv get config/db/password` or
+# `kv set /etc/thing v` name nothing on disk. Without this recipe those read as
+# paths — the issue #4 shape, on the third most-used command in the corpus
+# (6,715 invocations, 5.4%).
+#
+# So the useful thing this recipe does is say `none`, deliberately and per
+# subcommand, rather than leave the program unmapped and rely on that meaning the
+# same thing. It also pins which flags consume the next word, which is what keeps
+# `--db mydb get k` from reading `mydb` as the subcommand.
+#
+# `--password` takes its value with `=` (`--password=secret`) or prompts
+# interactively, so it does NOT consume the following word. Marking it `takes`
+# would swallow the next argument and shift every slot after it.
+
+[[cmd]]
+name = "kv"
+[cmd.flags]
+"--db" = { takes = true }
+"--output" = { takes = true }
+"--expires-after" = { takes = true }
+"--password" = { takes = false }
+"--prune" = { takes = false }
+"--stdout" = { takes = false }
+"--stdin" = { takes = false }
+
+# `kv set <key> <value>` — a value can be anything, including something
+# path-shaped that is only ever stored as text
+[[cmd]]
+name = "kv"
+subcommand = "set"
+[cmd.flags]
+"--expires-after" = { takes = true }
+"--password" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+[[cmd]]
+name = "kv"
+subcommand = "get"
+[cmd.flags]
+"--password" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+[[cmd]]
+name = "kv"
+subcommand = "list"
+[cmd.flags]
+"--output" = { takes = true }
+
+[[cmd]]
+name = "kv"
+subcommand = "lock"
+[cmd.flags]
+"--password" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+[[cmd]]
+name = "kv"
+subcommand = "unlock"
+[cmd.flags]
+"--password" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+# `kv copy <source-key@db> <target-key@db>` — both are keys, not files
+[[cmd]]
+name = "kv"
+subcommand = "copy"
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+[[cmd]]
+name = "kv"
+subcommand = "move"
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+# `kv history list <key>` / `kv history revert <key>`
+[[cmd]]
+name = "kv"
+subcommand = "history"
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+[[cmd]]
+name = "kv"
+subcommand = "info"
+
+# `kv db …` deliberately claims nothing.
+#
+# One of its forms does take a real path — `kv db set directory <db-name>
+# <path>` — but this format matches a single subcommand level, so `db set
+# directory` is not expressible: the entry would have to guess a slot number that
+# is only correct for that one form and wrong for `db ls`, `db rm`, `db backup`
+# and `db restore`. Claiming a path at a slot that means something else in four
+# other forms is worse than saying nothing.
+#
+# Nested subcommands are noted as a format gap in COMMAND-GRAPH.md.
+[[cmd]]
+name = "kv"
+subcommand = "db"
+[cmd.flags]
+"--prune" = { takes = false }
+"--stdout" = { takes = false }
+"--stdin" = { takes = false }

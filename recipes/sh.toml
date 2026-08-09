@@ -1,0 +1,12 @@
+# `-c` carries a script. Reading it as a path is how an inline payload gets
+# mistaken for a filesystem reference.
+[[cmd]]
+name = "sh"
+[cmd.flags]
+"-c" = { takes = true, kind = "code" }
+"-o" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read"]
+when = { without = ["-c"] }

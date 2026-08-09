@@ -1,0 +1,11 @@
+[[cmd]]
+name = "xargs"
+[cmd.flags]
+"-n" = { takes = true }
+"-I" = { takes = true }
+"-P" = { takes = true }
+"-a" = { takes = true, kind = "path", effect = ["read"] }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

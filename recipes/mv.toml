@@ -1,0 +1,12 @@
+# a move both reads AND deletes its source — the case that makes `effect` a set
+# rather than a single value
+[[cmd]]
+name = "mv"
+[[cmd.args]]
+slots = "except-last"
+kind = "path"
+effect = ["read", "delete"]
+[[cmd.args]]
+slots = "last"
+kind = "path"
+effect = ["write", "create"]

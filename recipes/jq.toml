@@ -1,0 +1,20 @@
+# jq's filter is program text. `jq '.items[] | .metadata.name' f.json` would read
+# the filter as a path without this — the same shape as sed and awk in issue #4.
+[[cmd]]
+name = "jq"
+[cmd.flags]
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--from-file" = { takes = true, kind = "path", effect = ["read"] }
+"--arg" = { takes = true }
+"--argjson" = { takes = true }
+"--slurpfile" = { takes = true, kind = "path", effect = ["read"] }
+"--rawfile" = { takes = true, kind = "path", effect = ["read"] }
+"--indent" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]
+[[cmd.args]]
+slots = "first"
+kind = "code"
+when = { without = ["-f", "--from-file"] }

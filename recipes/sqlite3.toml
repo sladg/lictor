@@ -1,0 +1,7 @@
+# slot 0 is the database file; anything after it is SQL, not a path
+[[cmd]]
+name = "sqlite3"
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read", "write"]

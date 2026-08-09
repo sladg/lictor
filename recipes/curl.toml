@@ -1,0 +1,15 @@
+[[cmd]]
+name = "curl"
+[cmd.flags]
+"-o" = { takes = true, kind = "path", effect = ["write", "create"] }
+"--output" = { takes = true, kind = "path", effect = ["write", "create"] }
+"-d" = { takes = true }
+"--data" = { takes = true }
+"-H" = { takes = true }
+"--header" = { takes = true }
+"-X" = { takes = true }
+"-u" = { takes = true }
+"--cacert" = { takes = true, kind = "path", effect = ["read"] }
+[[cmd.args]]
+slots = "all"
+kind = "url"

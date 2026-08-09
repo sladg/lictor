@@ -1,0 +1,10 @@
+[[cmd]]
+name = "ln"
+[[cmd.args]]
+slots = "except-last"
+kind = "path"
+effect = ["read"]
+[[cmd.args]]
+slots = "last"
+kind = "path"
+effect = ["create"]

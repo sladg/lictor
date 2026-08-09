@@ -1,0 +1,11 @@
+# scp mixes local and remote paths in the same positional list (`scp a.txt
+# host:/tmp/`), and nothing here can tell them apart yet. Only ssh's own local
+# files are mapped; the transfer arguments stay silent rather than claiming a
+# remote path is local.
+[[cmd]]
+name = "scp"
+[cmd.flags]
+"-i" = { takes = true, kind = "path", effect = ["read"] }
+"-F" = { takes = true, kind = "path", effect = ["read"] }
+"-o" = { takes = true }
+"-P" = { takes = true }

@@ -1,0 +1,11 @@
+[[cmd]]
+name = "perl"
+[cmd.flags]
+"-e" = { takes = true, kind = "code" }
+"-E" = { takes = true, kind = "code" }
+"-I" = { takes = true, kind = "path" }
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read"]
+when = { without = ["-e", "-E"] }

@@ -1,0 +1,23 @@
+# `-e` and `-f` are the reason this program needs a map at all: without one,
+# `grep -e /needle/ file` reads as two positionals and the pattern looks like a
+# path. That is issue #4.
+[[cmd]]
+name = "grep"
+[cmd.flags]
+"-e" = { takes = true, kind = "regex" }
+"--regexp" = { takes = true, kind = "regex" }
+"-f" = { takes = true, kind = "path", effect = ["read"] }
+"--file" = { takes = true, kind = "path", effect = ["read"] }
+"-m" = { takes = true }
+"--max-count" = { takes = true }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["read"]
+# later entries win, so slot 0 is the pattern rather than a path -- but ONLY when
+# the pattern was not already given by a flag, or the first file would be read as
+# a pattern and lose its edge
+[[cmd.args]]
+slots = "first"
+kind = "regex"
+when = { without = ["-e", "--regexp", "-f", "--file"] }

@@ -1,0 +1,6 @@
+[[cmd]]
+name = "touch"
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["create", "write"]
