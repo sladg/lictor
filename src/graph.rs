@@ -301,6 +301,113 @@ impl Graph {
         out
     }
 
+    /// Everything the graph claims about the command, with node ids and byte
+    /// offsets removed.
+    ///
+    /// This is the equivalence **P2** needs. An edit moves every span after it,
+    /// and a re-parse renumbers every node, so comparing either would make the
+    /// property trivially false while saying nothing about whether the edit was
+    /// sound. Commands are identified by their ordinal instead, which survives
+    /// both.
+    ///
+    /// Sorted, so it compares as a set: the order edges happen to be inserted in
+    /// is an implementation detail, while the ordinals already carry the
+    /// ordering that matters.
+    pub fn fingerprint(&self) -> Vec<String> {
+        let ordinal: HashMap<NodeId, usize> = self
+            .commands()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        let name_of = |id: NodeId| match self.node(id) {
+            Node::Flag(f) => f.name.clone(),
+            Node::Value(v) => v.text.clone().unwrap_or_else(|| "<dynamic>".into()),
+            Node::Command(c) => c.name.clone().unwrap_or_else(|| "<dynamic>".into()),
+            Node::Heredoc(h) => format!("<<{}{}", if h.quoted { "'" } else { "" }, h.delimiter),
+            Node::Stream(s) => format!("{:?}", s.kind),
+            Node::Connector(c) => format!("{:?}", c.kind),
+            Node::PathSet(_) => "<pathset>".into(),
+        };
+        let mut out = Vec::new();
+        for (i, (id, cmd)) in self.commands().enumerate() {
+            out.push(format!(
+                "cmd[{i}] name={} priv={:?}",
+                cmd.name.as_deref().unwrap_or("<dynamic>"),
+                cmd.privilege
+            ));
+            for edge in self.edges_from(id) {
+                match edge.kind {
+                    EdgeKind::Has => {
+                        out.push(format!("cmd[{i}] flag={}", name_of(edge.to)));
+                        // a flag's bound argument belongs with the flag
+                        for bound in self
+                            .edges_from(edge.to)
+                            .filter(|e| e.kind == EdgeKind::Takes)
+                        {
+                            out.push(format!(
+                                "cmd[{i}] flag={} takes={}",
+                                name_of(edge.to),
+                                name_of(bound.to)
+                            ));
+                        }
+                    }
+                    EdgeKind::Arg(n) => {
+                        let slot = if n == usize::MAX {
+                            "env".to_string()
+                        } else {
+                            n.to_string()
+                        };
+                        out.push(format!("cmd[{i}] arg[{slot}]={}", name_of(edge.to)));
+                    }
+                    EdgeKind::Flow(kind) => out.push(format!(
+                        "cmd[{i}] --{kind:?}--> cmd[{}]",
+                        ordinal.get(&edge.to).map_or("?".into(), |o| o.to_string())
+                    )),
+                    EdgeKind::Spawns => out.push(format!(
+                        "cmd[{i}] spawns cmd[{}]",
+                        ordinal.get(&edge.to).map_or("?".into(), |o| o.to_string())
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        // streams and heredocs point AT their command, so they are walked from
+        // the other end
+        for edge in self.edges.iter().filter(|e| e.kind == EdgeKind::On) {
+            out.push(format!(
+                "cmd[{}] on={}",
+                ordinal.get(&edge.to).map_or("?".into(), |o| o.to_string()),
+                name_of(edge.from)
+            ));
+        }
+        // a value spawning a command (`echo "$(id)"`) is not reachable from a
+        // command's own edges
+        for edge in self.edges.iter().filter(|e| e.kind == EdgeKind::Spawns) {
+            if !matches!(self.node(edge.from), Node::Command(_)) {
+                out.push(format!(
+                    "value spawns cmd[{}]",
+                    ordinal.get(&edge.to).map_or("?".into(), |o| o.to_string())
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The segments this node owns — the bytes an edit to it would replace.
+    ///
+    /// Distinct from [`Node::spans`], which for a `Command` is the union of its
+    /// name *and* its arguments (a summary for reporting). Only the name is
+    /// owned, so an editor asking "can I replace this node with one token?"
+    /// must ask here.
+    pub fn owned_spans(&self, id: NodeId) -> Vec<Span> {
+        self.segments
+            .iter()
+            .filter(|(_, owner)| *owner == id)
+            .map(|(span, _)| *span)
+            .collect()
+    }
+
     /// Which node owns the segment at `span`, if any. The addressing step an
     /// edit needs: locate the node, then hand its id to [`Graph::emit_with`].
     pub fn segment_owner(&self, span: Span) -> Option<NodeId> {
