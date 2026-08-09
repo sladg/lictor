@@ -1,0 +1,61 @@
+name  = "a command references the program it runs, when that program is a pathname"
+issue = 13
+
+# The jail walks the WORDS of each command and skips word 0, so the program has
+# never been looked at under either path source: `/tmp/exploit.sh` ran
+# unremarked. The graph is the first thing able to say "this command executes
+# that file".
+#
+# This needs no recipe, for the same reason a redirect does not: the inverted
+# default exists because "what does this word mean to *this program*" is
+# unknowable without a map, and the program word is not a program's argument.
+#
+# The `/` test is not the shape heuristic returning. `looks_like_path` used
+# shape as a substitute for meaning — whether `sed -n '/needle/p'` names a file
+# depends on sed. Here the shell's own rule is written down: a command name
+# containing a slash is executed as a pathname, one without is searched for on
+# PATH (POSIX XCU 2.9.1.1).
+
+[[case]]
+name    = "an absolute program is executed by pathname"
+command = "/tmp/exploit.sh"
+expect  = { commands = ["/tmp/exploit.sh"], local = ["execs /tmp/exploit.sh"] }
+
+[[case]]
+name    = "so is a relative one"
+command = "./deploy.sh --prod"
+expect  = { local = ["execs ./deploy.sh"] }
+
+[[case]]
+# the assertion that keeps this from being a flood: a name with no slash names
+# no file, so it mints nothing at all
+name    = "a bare name is resolved through PATH and claims nothing"
+command = "npm run build"
+expect  = { commands = ["npm"], local = [] }
+
+[[case]]
+name    = "and a mapped program still claims only its arguments"
+command = "cat notes.txt"
+expect  = { local = ["reads notes.txt"] }
+
+[[case]]
+# the payload already carries an `Execs` edge from the wrapper that spawned it,
+# and owns no bytes — the span test is what stops a second, duplicate claim
+name    = "a wrapper's payload is claimed once, not twice"
+command = "sudo /tmp/exploit.sh"
+expect  = { commands = [
+  "sudo !root",
+  "/tmp/exploit.sh !root",
+], local = ["execs /tmp/exploit.sh"] }
+
+[[case]]
+name    = "a program run on another machine is not a local reference"
+command = "ssh host /tmp/exploit.sh"
+expect  = { local = [], remote = ["execs /tmp/exploit.sh"] }
+
+[[case]]
+# composes with the script graft: the shell is a bare name, the script it runs
+# is a pathname
+name    = "a pathname inside a -c script is claimed too"
+command = "bash -c '/tmp/exploit.sh'"
+expect  = { local = ["execs /tmp/exploit.sh"] }

@@ -387,6 +387,19 @@ fn effect_of(kind: EdgeKind) -> Option<crate::cmdmap::Effect> {
     }
 }
 
+/// A [`Reference`] placed on this machine: the same claim, plus where the path
+/// actually points once the working directory in effect has been applied.
+///
+/// A type rather than an optional field on `Reference`, so that a caller cannot
+/// hold an unresolved one and silently skip it. `reference.path` stays as
+/// written — `npm` and `./npm` resolve alike, and only the written form says
+/// whether the shell searches `PATH`.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub reference: Reference,
+    pub absolute: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Graph {
     pub source: String,
@@ -769,18 +782,53 @@ impl Graph {
         out
     }
 
-    /// The paths this command line references **on this machine** — the
-    /// question the jail and `[[path]]` rules ask.
-    pub fn referenced_paths(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .references()
+    /// Every reference, with each path resolved against the working directory in
+    /// effect **where that reference appears**.
+    ///
+    /// The whole query: callers ask once and filter [`Reference`] by their own
+    /// policy, rather than the graph growing an accessor per caller.
+    ///
+    /// `cd` needs no special machinery — it is a command like any other, its
+    /// recipe says slot 0 is a path, and [`Graph::commands`] is already in source
+    /// order.
+    ///
+    /// `resolve` maps `(path, base)` to an absolute path. A parameter because
+    /// expanding `~` needs the environment: the graph says what is referenced
+    /// from where, the caller says what that means on this machine.
+    pub fn resolved_references(
+        &self,
+        base: &str,
+        resolve: &dyn Fn(&str, &str) -> String,
+    ) -> Vec<Resolved> {
+        let references = self.references();
+        let mut cwd_at: HashMap<NodeId, String> = HashMap::new();
+        let mut cwd = base.to_string();
+        for (id, command) in self.commands() {
+            cwd_at.insert(id, cwd.clone());
+            if command.name.as_deref().map(basename) != Some("cd") {
+                continue;
+            }
+            // `cd`'s own argument resolves against the base BEFORE it runs,
+            // which is why that is recorded above first. A dynamic target or
+            // `cd -` yields no reference here, so the base simply freezes.
+            if let Some(target) = references
+                .iter()
+                .find(|r| r.command == id && r.locality == Locality::Local)
+            {
+                cwd = resolve(&target.path, &cwd);
+            }
+        }
+        references
             .into_iter()
-            .filter(|r| r.locality == Locality::Local && r.effect != crate::cmdmap::Effect::Exec)
-            .map(|r| r.path)
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+            .map(|reference| {
+                let at = cwd_at.get(&reference.command).map_or(base, |s| s.as_str());
+                let absolute = resolve(&reference.path, at);
+                Resolved {
+                    reference,
+                    absolute,
+                }
+            })
+            .collect()
     }
 
     /// Byte count covered by owned segments — the completeness half of P1.
@@ -1601,6 +1649,9 @@ pub fn lower_with_maps(source: &str, maps: &crate::cmdmap::Maps) -> Graph {
 ///    *it* says they mean.
 pub fn apply_maps(graph: &mut Graph, maps: &crate::cmdmap::Maps) {
     apply_maps_at(graph, &Mapping { maps, depth: 0 });
+    // after the traversal, so a command grafted in from a `-c` script during it
+    // is covered by the same single pass
+    apply_programs(graph);
 }
 
 /// The recipes plus how deep the re-parse already is — they travel together
@@ -1679,6 +1730,32 @@ fn apply_redirects(graph: &mut Graph) {
         for effect in effects {
             graph.link(command, target, *effect);
         }
+    }
+}
+
+/// Every command references the program it runs, when that program is named by
+/// a pathname.
+///
+/// Needs no recipe, like `apply_redirects`: the program word is not a program's
+/// argument, it is what the shell resolves and executes whatever the program is.
+///
+/// The `/` test is the shell's rule, not the shape heuristic returning — a name
+/// containing a slash is executed as a pathname, one without is searched for on
+/// `PATH` (POSIX XCU 2.9.1.1). `looks_like_path` was wrong because shape stood
+/// in for *meaning*, which only a recipe can give; nothing is being guessed
+/// here, which is also why a bare `npm` mints nothing.
+///
+/// A wrapper's payload (`sudo /tmp/x.sh`) already has an `Execs` edge and owns
+/// no bytes — the span test is what tells it from a command written in source.
+fn apply_programs(graph: &mut Graph) {
+    let named: Vec<NodeId> = graph
+        .commands()
+        .filter(|(_, cmd)| cmd.name.as_deref().is_some_and(|n| n.contains('/')))
+        .map(|(id, _)| id)
+        .filter(|id| !graph.owned_spans(*id).is_empty())
+        .collect();
+    for id in named {
+        graph.link(id, id, EdgeKind::Execs);
     }
 }
 

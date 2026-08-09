@@ -89,56 +89,38 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     let roots = roots(config, cwd, &home);
     let source = config.jail_paths();
 
-    // Only the "is this word a path?" question moves to the graph. Resolution
-    // stays exactly where it is: `walk_words` tracks `cd` across a chain, expands
-    // `~`, collapses `..` and handles nested shells, and none of that is a
-    // heuristic worth replacing. Swapping the predicate alone is the whole of
-    // sub-task 8's idea.
-    let heuristic = |text: &str| {
-        let candidate = path_candidate(text);
-        looks_like_path(candidate).then(|| candidate.to_string())
-    };
-    let graph_paths = (source != JailPaths::Heuristic).then(|| referenced_paths(extraction));
-    let from_graph = |text: &str| {
-        let candidate = path_candidate(text);
-        graph_paths
-            .as_ref()
-            .is_some_and(|known| known.iter().any(|p| p == candidate))
-            .then(|| candidate.to_string())
-    };
-
-    // Paths the graph knows about that `walk_words` never visits.
-    //
-    // The walk iterates the WORDS of each command, and a redirect target is not
-    // one: `echo x >> /etc/hosts` has no argument naming that file, so the jail
-    // never looked at it (#29). The graph does model it — a redirect is shell
-    // syntax that writes a file whatever the program is — and letting the old
-    // extractor's word list bound what the graph may say would keep the bug.
-    //
-    // These resolve against the base cwd rather than the cd-tracked one: a bare
-    // path list carries no position, so there is nothing to track it against.
-    // Absolute targets, which is what a jail escape looks like, are unaffected.
-    let unvisited = |seen: &[String], candidate_of: &dyn Fn(&str) -> Option<String>| {
-        let Some(known) = graph_paths.as_ref() else {
-            return Vec::new();
+    // guess a path from the word's shape; `walk_words` tracks `cd` as it goes
+    let by_shape = || {
+        let guess = |text: &str| {
+            let candidate = path_candidate(text);
+            looks_like_path(candidate).then(|| candidate.to_string())
         };
-        known
-            .iter()
-            .filter(|path| candidate_of(path).is_some() && !seen.iter().any(|s| s == *path))
-            .map(|path| normalize(path, cwd, &home))
+        walk_words(extraction, cwd, &home, true, guess)
+            .into_iter()
+            .map(|(_, resolved)| resolved)
             .collect::<Vec<String>>()
     };
 
-    let decide = |candidate_of: &dyn Fn(&str) -> Option<String>| {
+    // take the paths from the recipes, keeping only what this jail is about
+    let by_graph = || {
+        extraction
+            .graph
+            .resolved_references(cwd, &|path, base| normalize(path, base, &home))
+            .into_iter()
+            .filter(|r| !r.reference.locality.is_remote())
+            // a program with no `/` is found on PATH and names no file; with one
+            // the shell executes it as a pathname (POSIX XCU 2.9.1.1). Bin
+            // directories get no exemption — staying in the project is the point.
+            .filter(|r| {
+                r.reference.effect != crate::cmdmap::Effect::Exec || r.reference.path.contains('/')
+            })
+            .map(|r| r.absolute)
+            .collect::<Vec<String>>()
+    };
+
+    let outside = |paths: Vec<String>| {
         let mut found: Vec<String> = Vec::new();
-        let mut seen: Vec<String> = Vec::new();
-        for (candidate, resolved) in walk_words(extraction, cwd, &home, true, candidate_of) {
-            seen.push(candidate);
-            if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
-                found.push(resolved);
-            }
-        }
-        for resolved in unvisited(&seen, candidate_of) {
+        for resolved in paths {
             if !is_trusted(&roots, &resolved) && !found.contains(&resolved) {
                 found.push(resolved);
             }
@@ -146,30 +128,19 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
         found
     };
 
+    // Each source only lists paths; the trust check, the dedupe and the order
+    // are shared, so the two cannot drift and `compare` compares like with like.
     match source {
-        // the heuristic has no path list of its own, so `unvisited` finds
-        // nothing for it and the default is untouched
-        JailPaths::Heuristic => decide(&heuristic),
-        JailPaths::Graph => decide(&from_graph),
-        // decide with the heuristic, but record what the graph would have said —
-        // so the switch can be judged against real usage before it changes any
-        // decision
+        JailPaths::Heuristic => outside(by_shape()),
+        JailPaths::Graph => outside(by_graph()),
+        // record what the graph would have said, decide with the heuristic —
+        // measuring the switch must not be the switch
         JailPaths::Compare => {
-            let old = decide(&heuristic);
-            let new = decide(&from_graph);
-            report_disagreement(extraction, &old, &new);
+            let old = outside(by_shape());
+            report_disagreement(extraction, &old, &outside(by_graph()));
             old
         }
     }
-}
-
-/// The paths the recipes say this command references.
-///
-/// Sub-task 4: the extraction carries its own graph, lowered from the same tree
-/// this walk read. This used to re-parse the source, because the graph and
-/// `bash::Extraction` were two views of two parses.
-fn referenced_paths(extraction: &Extraction) -> Vec<String> {
-    extraction.graph.referenced_paths()
 }
 
 /// Log where the two sources disagree, without acting on it.

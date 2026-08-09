@@ -120,7 +120,12 @@ fn the_extraction_carries_the_graph_it_was_parsed_from() {
         "the extraction must carry a lowered graph"
     );
     assert_eq!(
-        extraction.graph.referenced_paths(),
+        extraction
+            .graph
+            .references()
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
         ["/etc/passwd"],
         "and the recipes must have been applied to it"
     );
@@ -289,4 +294,22 @@ fn an_interpreter_payload_is_still_not_re_parsed_as_shell() {
     let payload = "python3 -c 'open(\"/etc/passwd\")'";
     assert_eq!(violations("graph", payload), Vec::<String>::new());
     assert_eq!(violations("heuristic", payload), Vec::<String>::new());
+}
+
+#[test]
+fn a_program_run_from_outside_the_jail_is_an_escape() {
+    // A hole that predates the graph entirely: `walk_words` skips word 0, so
+    // the jail has never looked at the program under EITHER source. Asserting
+    // the heuristic finds nothing is the point — this is the graph getting
+    // ahead of it, not the graph catching up.
+    for escape in ["/tmp/exploit.sh", "../../etc/evil.sh", "/tmp/x/../evil.sh"] {
+        assert!(
+            violations("heuristic", escape).is_empty(),
+            "the heuristic started catching {escape:?} — this test is measuring the wrong thing now"
+        );
+        assert!(
+            !violations("graph", escape).is_empty(),
+            "the graph source sees no program in {escape:?}"
+        );
+    }
 }
