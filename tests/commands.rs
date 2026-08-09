@@ -3,7 +3,6 @@
 // test, not a signature that grew by accident.
 #![allow(clippy::too_many_arguments)]
 
-use lictor::config::Config;
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
 use serde_json::{Value, json};
@@ -155,7 +154,6 @@ fn run_with(
     tool_input: Value,
     tool_response: Option<Value>,
 ) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": event,
         "tool_name": tool,
@@ -163,9 +161,10 @@ fn run_with(
         "tool_response": tool_response,
     }))
     .unwrap();
-    // mirror run_hook: a config error fails closed on PreToolUse
-    let output = match config.finalize() {
-        Ok(()) => evaluate(&input, &config),
+    // mirror run_hook: built the way the binary builds it, and a config error
+    // fails closed on PreToolUse
+    let output = match lictor::config::from_toml(policy, None) {
+        Ok(config) => evaluate(&input, &config),
         Err(error) if event == "PreToolUse" => Some(lictor::engine::error_output(event, &error)),
         Err(_) => None,
     };
@@ -177,8 +176,7 @@ fn run(event: &str, tool: &str, tool_input: Value, tool_response: Option<Value>)
 
 // run with a fully-specified input value (needed for `error`/`cwd` fields); returns additionalContext
 fn run_ctx(policy: &str, input_value: Value) -> Option<String> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
-    config.finalize().expect("catalogs expand");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let input: HookInput = serde_json::from_value(input_value).unwrap();
     evaluate(&input, &config)?
         .hook_specific_output
@@ -1551,8 +1549,7 @@ fn spill_not_triggered_below_threshold() {
 
 // full hookSpecificOutput for an input that needs a cwd (module git probes)
 fn run_at(policy: &str, command: &str, cwd: &std::path::Path) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -1647,16 +1644,14 @@ fn module_rewritten_command_still_gated() {
 
 #[test]
 fn module_unknown_name_fails_config() {
-    let mut config: Config = toml::from_str("[modules]\ngit-cp = \"rewrite\"").unwrap();
-    let err = config.finalize().unwrap_err();
+    let err = lictor::config::from_toml("[modules]\ngit-cp = \"rewrite\"", None).unwrap_err();
     assert!(err.contains("unknown module"), "{err}");
 }
 
 // --- spill_seconds: slow commands cache their output in kv ---
 
 fn run_post_bash(policy: &str, stdout: &str, duration_ms: Option<u64>) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
@@ -1716,8 +1711,7 @@ fn strikes_policy(dir: &std::path::Path) -> String {
 }
 
 fn run_session(policy: &str, event: &str, command: &str, session: &str) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let mut value = json!({
         "hook_event_name": event,
         "tool_name": "Bash",
@@ -1792,8 +1786,7 @@ fn run_retry(
     session: &str,
     cwd: &std::path::Path,
 ) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
@@ -2086,8 +2079,7 @@ fn run_in(
     tool: &str,
     tool_input: Value,
 ) -> Option<Value> {
-    let mut config: Config = toml::from_str(policy).expect("test policy parses");
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
@@ -2189,8 +2181,7 @@ fn recreate_warn_mode_hints() {
 
 #[test]
 fn recreate_rejects_unsupported_setting() {
-    let mut config: Config = toml::from_str("[modules]\ngit-mv = \"deny\"").unwrap();
-    let err = config.finalize().unwrap_err();
+    let err = lictor::config::from_toml("[modules]\ngit-mv = \"deny\"", None).unwrap_err();
     assert!(err.contains("does not support"), "{err}");
 }
 

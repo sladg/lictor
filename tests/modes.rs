@@ -1,4 +1,3 @@
-use lictor::config::Config;
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
 use serde_json::{Value, json};
@@ -6,9 +5,7 @@ use serde_json::{Value, json};
 // mirrors run_with in tests/commands.rs, but resolves a [modes.<mode>] overlay
 // (Config::apply_mode) before finalizing, the way config::load does for real hooks
 fn run(policy: &str, mode: Option<&str>, command: &str) -> Option<Value> {
-    let config: Config = toml::from_str(policy).expect("test policy parses");
-    let mut config = config.apply_mode(mode);
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, mode).expect("test policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",

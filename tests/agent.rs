@@ -1,12 +1,9 @@
-use lictor::config::Config;
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
 use serde_json::{Value, json};
 
 fn run(policy: &str, input: Value) -> Option<Value> {
-    let config: Config = toml::from_str(policy).expect("test policy parses");
-    let mut config = config.apply_mode(None);
-    config.finalize().expect("config finalizes");
+    let config = lictor::config::from_toml(policy, None).expect("test policy parses");
     let hook: HookInput = serde_json::from_value(input).unwrap();
     evaluate(&hook, &config).map(|o| serde_json::to_value(o).unwrap()["hookSpecificOutput"].take())
 }

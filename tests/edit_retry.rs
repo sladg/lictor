@@ -14,9 +14,7 @@ use serde_json::{Value, json};
 fn config_with_state(toml: &str, state_dir: &std::path::Path) -> Config {
     let log = state_dir.join("audit.jsonl");
     let merged = format!("[settings]\nlog_file = \"{}\"\n\n{toml}", log.display());
-    let mut config: Config = toml::from_str(&merged).expect("config parses");
-    config.finalize().expect("catalogs expand");
-    config
+    lictor::config::from_toml(&merged, None).expect("config parses")
 }
 
 fn edit_input(session: &str, path: &str, old: &str, new: &str) -> HookInput {

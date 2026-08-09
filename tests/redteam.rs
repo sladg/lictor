@@ -5,14 +5,12 @@
 //!   * known gaps (`#[ignore]`) — a bypass still open today. Each asserts the SAFE
 //!     outcome, so `cargo test -- --ignored` is the live backlog: un-ignore to fix.
 
-use lictor::config::Config;
 use lictor::engine::evaluate;
 use lictor::hook::HookInput;
 use serde_json::json;
 
 fn decide(policy: &str, command: &str, cwd: &str) -> Option<String> {
-    let mut config: Config = toml::from_str(policy).expect("policy parses");
-    config.finalize().expect("catalogs expand");
+    let config = lictor::config::from_toml(policy, None).expect("policy parses");
     let input: HookInput = serde_json::from_value(json!({
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",

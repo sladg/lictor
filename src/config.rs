@@ -777,9 +777,76 @@ pub fn load(cwd: Option<&str>, mode: Option<&str>) -> Result<Config, String> {
 // `XDG_CONFIG_HOME` dance
 pub fn load_from(path: &Path, mode: Option<&str>) -> Result<Config, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let parsed: Config = toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+    from_toml(&raw, mode).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Build a config from TOML text the way the binary does: defaults merged in,
+/// mode applied, finalized.
+///
+/// Exists so tests stop deserializing straight into `Config` and calling
+/// `finalize`. That skips `Config::default().merge(..)`, which means a field the
+/// parser accepts but `merge` forgets to carry looks correct under test and is
+/// silently dropped in production — exactly what happened to `[[delete]]`, where
+/// 42 passing cases hid a rule block the real binary ignored entirely.
+pub fn from_toml(raw: &str, mode: Option<&str>) -> Result<Config, String> {
+    let parsed: Config = toml::from_str(raw).map_err(|e| e.to_string())?;
     let mut config = Config::default().merge(parsed);
     config = config.apply_mode(mode);
     config.finalize()?;
     Ok(config)
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    // `merge` carries each rule block by hand, so adding a block and forgetting
+    // a line here means the parser accepts the config and the binary ignores it
+    // — silently, and invisibly to any test that deserializes straight into
+    // `Config`. That is exactly how `[[delete]]` shipped broken.
+    //
+    // Add a row when you add a block.
+    #[test]
+    fn merge_carries_every_rule_block() {
+        let policy = r#"
+[[bash]]
+match = "true*"
+action = "allow"
+
+[[edit]]
+paths = ["**/*.rs"]
+action = "warn"
+hint = "x"
+
+[[path]]
+match = ["/nowhere/**"]
+action = "warn"
+
+[[delete]]
+match = ["/nowhere/**"]
+action = "warn"
+
+[[web]]
+domains = ["example.com"]
+action = "allow"
+
+[[agent]]
+pattern = "nothing-matches-this"
+on = "prompt"
+action = "warn"
+
+[[minify]]
+match = "true*"
+max_lines = 5
+"#;
+        let config = from_toml(policy, None).expect("policy parses");
+        // each of these is a separate `extend` line in `merge`
+        assert_eq!(config.bash.len(), 1, "bash block dropped by merge");
+        assert_eq!(config.edit.len(), 1, "edit block dropped by merge");
+        assert_eq!(config.path.len(), 1, "path block dropped by merge");
+        assert_eq!(config.delete.len(), 1, "delete block dropped by merge");
+        assert_eq!(config.web.len(), 1, "web block dropped by merge");
+        assert_eq!(config.agent.len(), 1, "agent block dropped by merge");
+        assert_eq!(config.minify.len(), 1, "minify block dropped by merge");
+    }
 }
