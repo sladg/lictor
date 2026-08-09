@@ -371,6 +371,14 @@ pub struct Reference {
     pub locality: Locality,
     /// the path as written — the whole word, `s3://bucket/key` included
     pub path: String,
+    /// the same path made absolute against the working directory in effect where
+    /// it appears, once [`Graph::resolved_references`] has been asked for it.
+    ///
+    /// `None` from [`Graph::references`], which reports what the command line
+    /// says and nothing about this machine. Both forms are kept because they
+    /// answer different questions: `npm` and `./npm` resolve to the same file,
+    /// and only the written form says whether the shell would search `PATH`.
+    pub resolved: Option<String>,
     /// the split form, when this names something on another machine
     pub remote: Option<RemoteRef>,
 }
@@ -763,50 +771,64 @@ impl Graph {
                 effect,
                 locality: here.or(locality),
                 path,
+                resolved: None,
                 remote,
             });
         }
         out
     }
 
-    /// The **programs** this command line runs from a pathname, on this machine.
+    /// Every reference, with each path resolved against the working directory in
+    /// effect **where that reference appears**.
     ///
-    /// Separate from [`Graph::referenced_paths`], which deliberately drops
-    /// `Exec` references, because the two answer different questions and a
-    /// caller may want different roots for each: a file a command *reads* and
-    /// the program it *runs* are not interchangeable.
+    /// This is the whole query. A consumer asks once and filters the
+    /// [`Reference`] facts by its own policy, rather than the graph growing an
+    /// accessor per caller — `referenced_paths` and `executed_programs` were two
+    /// such accessors, and having two of them is what let the jail acquire three
+    /// different ways of learning about a path, one of which quietly disagreed
+    /// with the others.
     ///
-    /// Only pathnames — a word with no `/` is resolved through `PATH` and names
-    /// no file, so `npm run build` contributes nothing here while
-    /// `/tmp/exploit.sh` does.
-    pub fn executed_programs(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .references()
+    /// `cd` needs no special machinery: it is a command like any other, its
+    /// recipe says slot 0 is a path, and [`Graph::commands`] is already in source
+    /// order. Tracking the base is a traversal of what the graph knows, not a
+    /// second walk over the words.
+    ///
+    /// `resolve` maps `(path, base)` to an absolute path. It is a parameter
+    /// because expanding `~` needs the environment and the graph stays free of
+    /// it — the graph says *what is referenced from where*, the caller says what
+    /// that means on this machine.
+    pub fn resolved_references(
+        &self,
+        base: &str,
+        resolve: &dyn Fn(&str, &str) -> String,
+    ) -> Vec<Reference> {
+        let references = self.references();
+        let mut cwd_at: HashMap<NodeId, String> = HashMap::new();
+        let mut cwd = base.to_string();
+        for (id, command) in self.commands() {
+            cwd_at.insert(id, cwd.clone());
+            if command.name.as_deref().map(basename) != Some("cd") {
+                continue;
+            }
+            // `cd`'s own argument resolves against the base in effect BEFORE it
+            // runs, so it is recorded above first. A dynamic target or `cd -`
+            // has no knowable result: freeze rather than guess, which is never
+            // worse than the always-the-original-cwd behaviour it replaces.
+            if let Some(target) = references
+                .iter()
+                .find(|r| r.command == id && r.locality == Locality::Local)
+            {
+                cwd = resolve(&target.path, &cwd);
+            }
+        }
+        references
             .into_iter()
-            .filter(|r| {
-                r.locality == Locality::Local
-                    && r.effect == crate::cmdmap::Effect::Exec
-                    && r.path.contains('/')
+            .map(|mut reference| {
+                let at = cwd_at.get(&reference.command).map_or(base, |s| s.as_str());
+                reference.resolved = Some(resolve(&reference.path, at));
+                reference
             })
-            .map(|r| r.path)
-            .collect();
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    /// The paths this command line references **on this machine** — the
-    /// question the jail and `[[path]]` rules ask.
-    pub fn referenced_paths(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .references()
-            .into_iter()
-            .filter(|r| r.locality == Locality::Local && r.effect != crate::cmdmap::Effect::Exec)
-            .map(|r| r.path)
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+            .collect()
     }
 
     /// Byte count covered by owned segments — the completeness half of P1.
