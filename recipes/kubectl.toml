@@ -1,16 +1,23 @@
-# DELIBERATELY CONSERVATIVE.
+# Issue #24. `container` names the machine a payload runs on, same job `host`
+# does for ssh — see recipes/ssh.toml and COMMAND-GRAPH.md's "A command runs
+# somewhere too". `kubectl exec pod -c c -- grep -c x /etc/config.yaml` says
+# slot 0 is a container and the rest is a command; those two facts together
+# already mean the command runs there, which is what makes `grep`'s own read
+# edge on `/etc/config.yaml` exist AND land as remote. Issue #4's original
+# report is `tests/graph_cases/issue_4_false_positives.toml`'s pinned case:
+# still nothing **local**, because that path never was on this machine — it is
+# now said out loud instead of by omission.
 #
-# kubectl's positionals are cluster objects, and the paths after `exec ... --`
-# live inside a container, not on this machine. Issue #4's original report was
-# exactly that:
+# `kubectl cp` mixes local and remote paths in one positional list, the same
+# shape as `scp` and `aws s3 cp` — see recipes/scp.toml. The word itself carries
+# locality (a `pod:` or `ns/pod:` prefix), so one pair of entries covers both
+# directions.
 #
-#   kubectl -n ns exec pod -c c -- grep -c x /etc/config/config.yaml
-#     -> "System path outside the repo"
-#
-# So only the flags that are unambiguously LOCAL files are mapped. Positionals
-# are left unmapped on purpose: silence about a container path is correct, and
-# claiming one is the bug this whole design exists to remove. Modelling the
-# remote side needs the `container` kind, which does not produce edges yet.
+# Every other subcommand's positionals name a resource type and/or a resource
+# name — `pod`, `deploy/web`, `configmap/x` — never a path on this machine, so
+# they are typed `none` rather than left silently unmapped. That is the
+# difference between "nobody has looked at this yet" and "this was looked at
+# and is not a path".
 [[cmd]]
 name = "kubectl"
 [cmd.flags]
@@ -28,3 +35,169 @@ name = "kubectl"
 "--context" = { takes = true }
 "-l" = { takes = true }
 "--selector" = { takes = true }
+
+# `kubectl exec POD -- COMMAND...` — 425 invocations. The container is the
+# machine, the rest of the line is the payload, and `--` (when present) is the
+# POSIX end-of-options marker separating kubectl's own flags from the payload's,
+# not part of it — `src/graph.rs`'s `apply_program` skips a literal `--` at the
+# payload boundary for exactly this shape.
+[[cmd]]
+name = "kubectl"
+subcommand = "exec"
+[cmd.flags]
+"-i" = { takes = false }
+"--stdin" = { takes = false }
+"-t" = { takes = false }
+"--tty" = { takes = false }
+[[cmd.args]]
+slots = "first"
+kind = "container"
+[[cmd.args]]
+# the payload starts after the pod; `rest` would take the pod name itself as
+# the program to run
+slots = "1+"
+kind = "cmd"
+effect = ["exec"]
+
+# `kubectl get TYPE [NAME...]` — 2733 invocations, the most common form. Every
+# positional is a resource type or name.
+[[cmd]]
+name = "kubectl"
+subcommand = "get"
+[cmd.flags]
+"-A" = { takes = false }
+"--all-namespaces" = { takes = false }
+"--allow-missing-template-keys" = { takes = false }
+"--chunk-size" = { takes = true }
+"--field-selector" = { takes = true }
+"--ignore-not-found" = { takes = false }
+"-L" = { takes = true }
+"--label-columns" = { takes = true }
+"--no-headers" = { takes = false }
+"--output-watch-events" = { takes = false }
+"--raw" = { takes = true, kind = "url" }
+"-R" = { takes = false }
+"--recursive" = { takes = false }
+"--server-print" = { takes = false }
+"--show-kind" = { takes = false }
+"--show-labels" = { takes = false }
+"--show-managed-fields" = { takes = false }
+"--sort-by" = { takes = true }
+"--subresource" = { takes = true }
+"--template" = { takes = true }
+"-w" = { takes = false }
+"--watch" = { takes = false }
+"--watch-only" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+# `kubectl logs POD [-c CONTAINER]` — 369 invocations. `-f` means "follow" here,
+# not `--filename`: it takes no value, unlike the global `-f`, so it has to
+# shadow the bare entry's mapping or `--since=1h` (or whatever comes after `-f`)
+# would be swallowed as its argument.
+[[cmd]]
+name = "kubectl"
+subcommand = "logs"
+[cmd.flags]
+"-f" = { takes = false }
+"--follow" = { takes = false }
+"--all-containers" = { takes = false }
+"--ignore-errors" = { takes = false }
+"-p" = { takes = false }
+"--previous" = { takes = false }
+"--prefix" = { takes = false }
+"--since" = { takes = true }
+"--since-time" = { takes = true }
+"--tail" = { takes = true }
+"--timestamps" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+# `kubectl apply -f FILE` — 107 invocations. The path already comes from the
+# global `-f`/`-k`; apply takes no plain positional in normal use.
+[[cmd]]
+name = "kubectl"
+subcommand = "apply"
+[cmd.flags]
+"--all" = { takes = false }
+"--allow-missing-template-keys" = { takes = false }
+# optional-value flags (`--dry-run=client`, `--cascade=orphan`) bind through
+# the `=` form the lowering already handles without a map; the space-separated
+# form is not accepted by kubectl's own flag parser either, so these never
+# consume a following word
+"--cascade" = { takes = false }
+"--dry-run" = { takes = false }
+"--field-manager" = { takes = true }
+"--force" = { takes = false }
+"--force-conflicts" = { takes = false }
+"--grace-period" = { takes = true }
+"--openapi-patch" = { takes = false }
+"--overwrite" = { takes = false }
+"--prune" = { takes = false }
+"--server-side" = { takes = false }
+"--timeout" = { takes = true }
+"--wait" = { takes = false }
+
+# `kubectl delete TYPE NAME` — 88 invocations, or `-f FILE` via the global flag.
+[[cmd]]
+name = "kubectl"
+subcommand = "delete"
+[cmd.flags]
+"--all" = { takes = false }
+"-A" = { takes = false }
+"--all-namespaces" = { takes = false }
+"--cascade" = { takes = false }
+"--dry-run" = { takes = false }
+"--field-selector" = { takes = true }
+"--force" = { takes = false }
+"--grace-period" = { takes = true }
+"--ignore-not-found" = { takes = false }
+"--now" = { takes = false }
+"-R" = { takes = false }
+"--recursive" = { takes = false }
+"--timeout" = { takes = true }
+"--wait" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+# `kubectl top pod|node [NAME]` — 113 invocations. `top pod` vs `top node` is a
+# second subcommand level this format cannot key on yet (see COMMAND-GRAPH.md's
+# "Known format gaps"), so both share this entry; either way the positionals
+# are resource identifiers, not paths.
+[[cmd]]
+name = "kubectl"
+subcommand = "top"
+[cmd.flags]
+"-A" = { takes = false }
+"--all-namespaces" = { takes = false }
+"--containers" = { takes = false }
+"--no-headers" = { takes = false }
+"--sort-by" = { takes = true }
+"--use-protocol-buffers" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+# `kubectl cp SRC DST` — the same shape as `scp a.txt host:/tmp/`: local and
+# remote paths share one positional list, told apart by a `pod:`/`ns/pod:`
+# prefix on the word itself.
+#
+#   kubectl cp ./build pod:/app         reads ./build, says nothing about /app
+#   kubectl cp pod:/app ./build         writes ./build, says nothing about /app
+[[cmd]]
+name = "kubectl"
+subcommand = "cp"
+[cmd.flags]
+"--no-preserve" = { takes = false }
+"--retries" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "pathset"
+effect = ["read"]
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+effect = ["write", "create"]

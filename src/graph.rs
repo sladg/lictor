@@ -1751,8 +1751,21 @@ fn apply_program(
 
     // 3. the payload of a wrapper is another program, running under its own map
     //    and — for `ssh` and friends — on another machine
+    //
+    // A literal `--` at the payload boundary is the POSIX end-of-options
+    // marker, not part of the payload — `kubectl exec pod -- cat /etc/config`
+    // and `sudo -- rm -rf /` both use it to separate the wrapper's own flags
+    // from the command that follows. It still occupies a positional slot, so
+    // skip it before reading the slot after it as the program word (#24).
+    let payload_at = program
+        .nested_command()
+        .and_then(|nested| nested.slots.payload_start())
+        .map(|at| match slotted.get(at) {
+            Some(&(id, _)) if value_text(graph, id).as_deref() == Some("--") => at + 1,
+            _ => at,
+        });
     if let Some(nested) = program.nested_command()
-        && let Some(at) = nested.slots.payload_start()
+        && let Some(at) = payload_at
         && let Some(&(program_word, index)) = slotted.get(at)
         && let Some(payload_name) = value_text(graph, program_word)
     {

@@ -85,3 +85,45 @@ expect  = { commands = [
 name    = "the host is not mistaken for the program"
 command = "ssh build-box uptime"
 expect  = { commands = ["ssh", "uptime @build-box"], local = [] }
+
+# ── kubectl exec, where a literal `--` sits at the payload boundary (#24) ──
+#
+# `--` is the POSIX end-of-options marker separating kubectl's own flags from
+# the payload's. It still occupies a positional slot, so the payload-boundary
+# lookup has to skip it — otherwise `1+` would hand `grep` the word `--` as its
+# program name instead of `grep` itself.
+
+[[case]]
+name    = "kubectl exec runs its payload in the pod it names"
+command = "kubectl exec pod -- grep -c img /etc/config/config.yaml"
+expect  = { commands = ["kubectl", "grep @pod"], local = [], remote = [
+  "execs grep",
+  "reads /etc/config/config.yaml",
+] }
+
+[[case]]
+name    = "kubectl exec's own flags do not become the payload's"
+command = "kubectl -n ns exec pod -c app -- cat /etc/hosts"
+expect  = { commands = ["kubectl", "cat @pod"], local = [], remote = [
+  "execs cat",
+  "reads /etc/hosts",
+] }
+
+[[case]]
+# `--` is optional when the payload takes no flags of its own — real kubectl
+# accepts both spellings, and so does the recipe
+name    = "kubectl exec without a `--` still finds its payload"
+command = "kubectl exec pod cat /etc/hosts"
+expect  = { commands = ["kubectl", "cat @pod"], local = [], remote = [
+  "execs cat",
+  "reads /etc/hosts",
+] }
+
+[[case]]
+name    = "and a sudo payload is remote all the way down, the same as ssh"
+command = "kubectl exec pod -- sudo cat /etc/shadow"
+expect  = { commands = [
+  "kubectl",
+  "sudo @pod !root",
+  "cat @pod !root",
+], local = [], remote = ["execs sudo", "execs cat", "reads /etc/shadow"] }

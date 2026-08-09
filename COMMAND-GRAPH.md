@@ -8,7 +8,8 @@ extraction is now built alongside, and the structural predicates read it;
 `settings.jail_paths` is the one opt-in consumer for path identity, and that
 default is unchanged. Sub-task 2 (heredoc re-parenting) is the one behaviour
 change so far, and it landed in `bash.rs` as well as the graph because that is
-where today's rules read structure; it closes #12.
+where today's rules read structure; it closes #12. #24, a sub-task 5 follow-up,
+gives `kubectl` a full map — see *`--` is not part of the payload* below.
 
 Behaviour of the graph is pinned by `tests/graph_cases/*.toml` — a command and
 what the graph should claim about it, as data. Read those first; they are the
@@ -301,6 +302,39 @@ which is how `tests/graph_cases/edits.toml` rewrites the inner program of
 `sudo grep foo /var/log/x`. That was the "a rewrite cannot target the inner
 program" gap this file used to list under *deferred*.
 
+### `--` is not part of the payload (sub-task 5 follow-up, #24)
+
+`kubectl exec pod -c c -- grep -c x /etc/config.yaml` has the same wrapper
+shape as `ssh host cat /etc/hosts`, with one twist: a literal `--` can sit
+between the machine and the payload. It is the POSIX end-of-options marker —
+kubectl's own flag parser stops reading its own flags there — and it occupies
+a positional slot like any other word, which is exactly what stood between
+`container` and an edge: `1+` would find `--` at the payload boundary and try
+to run a program called `--`.
+
+`apply_program` now checks the word at the payload boundary and, if it reads
+literally `--`, resolves the payload one slot later instead. This is not a
+kubectl special case — it sits in the same code path every `kind = "cmd"`
+recipe shares, so `sudo -- rm -rf /` and `xargs -- rm` get the same fix for
+free. `--` is optional (`kubectl exec pod cat /etc/hosts` works too, and so
+does the recipe), so the check only fires when the word is actually there.
+
+With that fixed, `recipes/kubectl.toml` gives `exec`'s pod its `container`
+kind and its payload a `cmd` entry, the same pair `ssh` uses for `host`. Issue
+#4's opening report is now the pinned case in
+`tests/graph_cases/issue_4_false_positives.toml`: the config file really is
+read — the `remote` list says so — and `local` is still empty, which is the
+fact #4 actually needed. `kubectl cp` needed no new mechanism at all: it is
+the same local/remote positional list as `scp` and `aws s3 cp`, resolved by
+`locality_of` off the word alone (`recipes/kubectl.toml`). `get`, `logs`,
+`describe`, `delete` and `top` take no path-shaped positional in normal use,
+so their arguments are typed `kind = "none"` — a decision, not an omission —
+while the paths they really do open (`-f`, `-k`, `--kubeconfig`) already flow
+through the flags mapped at the top of the file. `logs`' own `-f` means
+"follow", not `--filename`, so it overrides the bare entry's mapping rather
+than inheriting it — the one place a subcommand's flag needed to *disagree*
+with the global one, not just add to it.
+
 ### A redirect is a reference
 
 `echo hi > /etc/passwd` produced nothing (#29). The redirect was one opaque node
@@ -357,11 +391,11 @@ first for its flags, and subcommand entries inherit them.
 ### What is deferred
 
 The issue's format also lists `[cmd.kv]` (`dd if=/of=`) and richer slot binding.
-Those are not implemented. `glob`, `regex`, `code`, `url`, `host` and `container`
-parse and validate but produce no edges of their own. `host` and `container` do
-have a job: naming the machine a payload command runs on. What `container` still
-cannot reach is `kubectl exec pod -- cat /etc/config`, where the `--` separator
-occupies a positional slot and shifts every number after it — see #24.
+Those are not implemented. `glob`, `regex`, `code` and `url` parse and validate
+but produce no edges of their own — declared vocabulary with no consumer yet.
+`host` and `container` are consumed: naming the machine a payload command runs
+on, which is what makes `ssh` and, since #24, `kubectl exec` reach their
+payload's reference edges (see *`--` is not part of the payload* above).
 
 ## PathSet and the glob∩glob matcher (sub-task 6)
 

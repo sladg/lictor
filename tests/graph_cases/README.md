@@ -43,9 +43,11 @@ A **path set** renders with `/**` when it reaches beneath its root, so
 ## An empty list is an assertion
 
 `local = []` means *this command claims nothing about this machine*, which is
-most of what the recipes exist to get right — `aws s3 rm s3://bucket/key` and
-`kubectl exec pod -- cat /etc/config` are both silence, for different reasons.
-An **omitted** field asserts nothing at all.
+most of what the recipes exist to get right — `aws s3 rm s3://bucket/key`
+deletes a key, and `kubectl exec pod -- cat /etc/config` reads a file, and
+neither one is here. Both still show up in `remote`, because "somewhere else"
+and "does not happen" are different claims. An **omitted** field asserts
+nothing at all.
 
 ## `edit` — P2 as data
 

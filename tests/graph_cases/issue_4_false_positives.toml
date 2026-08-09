@@ -44,11 +44,15 @@ command = "chmod 0644 src/main.rs"
 expect  = { local = ["writes src/main.rs"] }
 
 [[case]]
-# the opening report of #4, verbatim. The path is inside a container, and
-# kubectl's positionals are deliberately unmapped — see recipes/kubectl.toml
-name    = "a path inside a container is claimed by nobody"
+# the opening report of #4, verbatim. #24 gives `exec` a map: the container is
+# the machine, `grep` is its payload, and the config file really is read — on
+# the far side. `local` is still empty, which is the fact #4 actually needed.
+name    = "a path inside a container is claimed by nobody, locally"
 command = "kubectl -n ns exec pod -c c -- grep -c img /etc/config/config.yaml"
-expect  = { local = [], remote = [] }
+expect  = { local = [], remote = ["execs grep", "reads /etc/config/config.yaml"], commands = [
+  "kubectl",
+  "grep @pod",
+] }
 
 [[case]]
 name    = "the local file kubectl really does open is still claimed"
