@@ -4,8 +4,12 @@
 VERSION := $(shell grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 TAP_REPO := git@github.com:sladg/homebrew-tap.git
 
-# the docs bundle, assembled the same way by `llms` and `llms-check`
-LLMS = { cat README.md; find docs -name '*.md' | sort | xargs cat; }
+# the docs bundle, assembled the same way by `llms` and `llms-check`.
+# LC_ALL=C because sort's collation is locale-dependent: en_US.UTF-8 folds case
+# and orders `README.md` among the lowercase names, while C puts it first. Without
+# this the file's contents depend on who ran `make llms`, and the check below
+# fails for whoever has the other locale.
+LLMS = { cat README.md; find docs -name '*.md' | LC_ALL=C sort | xargs cat; }
 
 # one-shot gate: format check + strict clippy + build + tests + docs freshness.
 # `.github/workflows/ci.yml` runs exactly this, so a local run and CI cannot
