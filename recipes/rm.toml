@@ -1,6 +1,9 @@
 [[cmd]]
 name = "rm"
+# `rm build` names a file; `rm -r build` names a tree. A rule about
+# `build/**/*.o` has to be able to tell those apart.
 [[cmd.args]]
 slots = "all"
-kind = "path"
+kind = "pathset"
 effect = ["delete"]
+recursive_with = ["-r", "-R", "--recursive", "-rf", "-fr"]

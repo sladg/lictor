@@ -15,6 +15,16 @@ fn refs(src: &str) -> Vec<String> {
         Node::Value(v) => v.text.clone().unwrap_or_else(|| "<dynamic>".into()),
         Node::Flag(f) => f.name.clone(),
         Node::Command(c) => c.name.clone().unwrap_or_else(|| "<dynamic>".into()),
+        // a set renders as its root, with `/**` when it reaches beneath it, so
+        // an assertion shows whether recursion was picked up
+        Node::PathSet(p) => {
+            let root = p.set.roots.join(",");
+            if p.set.recursive {
+                format!("{root}/**")
+            } else {
+                root
+            }
+        }
         _ => "?".into(),
     };
     g.edges
@@ -91,7 +101,7 @@ fn the_remote_and_container_reports_from_issue_4_stay_silent() {
 fn a_first_argument_that_is_program_text_is_not_a_path() {
     // the #4 shape, across every program that has it
     assert_eq!(refs("jq '.items[] | .name' out.json"), ["reads out.json"]);
-    assert_eq!(refs("find . -name '/etc/*'"), ["reads ."]);
+    assert_eq!(refs("find . -name '/etc/*'"), ["reads ./**"]);
     assert!(refs("sh -c 'rm -rf /tmp/x'").is_empty());
     // chmod's slot 0 is a mode, not a file called `0644`
     assert_eq!(refs("chmod 0644 src/main.rs"), ["writes src/main.rs"]);
@@ -171,7 +181,10 @@ fn trailing_slot_binding_splits_sources_from_the_destination() {
 fn a_wrapper_reaches_the_program_it_runs() {
     // The gap P2 surfaced: stage 1 lowered `sudo rm -rf x` as one command with
     // `rm` as an argument, so rm's own map was never consulted.
-    assert_eq!(refs("sudo rm -rf /etc/x"), ["execs rm", "deletes /etc/x"]);
+    assert_eq!(
+        refs("sudo rm -rf /etc/x"),
+        ["execs rm", "deletes /etc/x/**"]
+    );
     assert_eq!(refs("env cat notes.txt"), ["execs cat", "reads notes.txt"]);
     assert_eq!(
         refs("xargs rm build/out"),
@@ -183,6 +196,41 @@ fn a_wrapper_reaches_the_program_it_runs() {
         refs("sudo -u root rm /etc/x"),
         ["execs rm", "deletes /etc/x"]
     );
+}
+
+#[test]
+fn a_wrapper_hands_its_payload_the_whole_line_including_flags() {
+    // The payload used to be built from positionals only, which silently dropped
+    // every flag: `sudo rm -rf x` lost the `-rf` and `sudo grep -e pat file`
+    // bound nothing at all. The sharp case is a flag carrying a path —
+    // `grep -f list` — where losing the binding also loses a real read edge.
+    // the wrapped form adds `execs`, and is otherwise identical
+    assert_eq!(
+        refs("sudo grep -e pat file.rs"),
+        ["execs grep", "reads file.rs"]
+    );
+    assert_eq!(refs("grep -e pat file.rs"), ["reads file.rs"]);
+    assert_eq!(bindings("sudo grep -e pat file.rs"), ["-e=pat"]);
+    assert_eq!(
+        refs("sudo grep -f list.txt src.rs"),
+        ["execs grep", "reads list.txt", "reads src.rs"]
+    );
+    // and the recursion flag survives the wrapper too
+    assert_eq!(refs("sudo rm -rf build"), ["execs rm", "deletes build/**"]);
+}
+
+#[test]
+fn a_recursive_flag_turns_a_path_into_a_tree() {
+    // `rm build` names a file; `rm -r build` names everything beneath it, and a
+    // rule about `build/**/*.o` has to be able to tell them apart
+    assert_eq!(refs("rm build"), ["deletes build"]);
+    assert_eq!(refs("rm -rf build"), ["deletes build/**"]);
+    assert_eq!(
+        refs("cp -r src dst"),
+        ["reads src/**", "writes dst", "creates dst"]
+    );
+    // find descends by definition, with no flag to look for
+    assert_eq!(refs("find . -name '*.rs'"), ["reads ./**"]);
 }
 
 #[test]
@@ -237,7 +285,7 @@ fn lowering_without_maps_still_produces_no_reference_edges() {
     )));
     // ...and with maps, the same source does make a claim, so the check above is
     // not passing for the wrong reason
-    assert_eq!(refs("rm -rf /etc/passwd"), ["deletes /etc/passwd"]);
+    assert_eq!(refs("rm -rf /etc/passwd"), ["deletes /etc/passwd/**"]);
 }
 
 #[test]

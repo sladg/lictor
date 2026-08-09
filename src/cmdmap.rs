@@ -84,6 +84,15 @@ pub struct Arg {
     /// only apply this entry when the flags present say so
     #[serde(default)]
     pub when: Option<When>,
+    /// this argument always names a tree, with no flag needed (`find` descends
+    /// by definition)
+    #[serde(default)]
+    pub recursive: bool,
+    /// flags that turn this argument from one path into everything beneath it.
+    /// `rm build` names a file; `rm -r build` names a tree, and a rule about
+    /// `build/**/*.o` has to be able to see the difference.
+    #[serde(default)]
+    pub recursive_with: Vec<String>,
 }
 
 /// A guard on an argument entry.
@@ -165,7 +174,7 @@ pub enum Kind {
     /// a nested command
     Cmd,
     // ── declared, not yet consumed ──
-    /// a set of paths (`find`'s roots, `rsync`'s trees) — sub-task 6
+    /// a set of paths: a root taken with what is beneath it
     PathSet,
     Glob,
     Regex,
@@ -178,7 +187,7 @@ pub enum Kind {
 impl Kind {
     /// Whether this kind names something on the filesystem today.
     pub fn is_path(self) -> bool {
-        self == Kind::Path
+        matches!(self, Kind::Path | Kind::PathSet)
     }
 }
 
@@ -253,6 +262,13 @@ impl Maps {
                     return Err(format!(
                         "command map: `{label}` gives an `exec` effect to a `{:?}` argument — \
                          only `cmd` can be executed",
+                        arg.kind
+                    ));
+                }
+                if (arg.recursive || !arg.recursive_with.is_empty()) && arg.kind != Kind::PathSet {
+                    return Err(format!(
+                        "command map: `{label}` marks a `{:?}` argument recursive — \
+                         only `pathset` can be",
                         arg.kind
                     ));
                 }

@@ -176,16 +176,16 @@ pub struct ConnectorNode {
     pub kind: Connector,
 }
 
-/// A set of paths named by one argument. Populated in sub-task 6, together with
-/// `selects()` and the glob∩glob matcher. Present here so the node vocabulary
-/// is complete and callers can match exhaustively.
+/// A set of paths named by one argument — `rm -rf build` is not one path, it is
+/// everything beneath it.
+///
+/// Wraps [`crate::globs::PathSet`] rather than restating its fields: the same
+/// four values declared in two places is how the two drift, and asking "does
+/// this set contain anything the rule cares about?" is `globs`' job.
 #[derive(Debug, Clone)]
 pub struct PathSetNode {
     pub spans: Vec<Span>,
-    pub roots: Vec<String>,
-    pub recursive: bool,
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
+    pub set: crate::globs::PathSet,
 }
 
 #[derive(Debug, Clone)]
@@ -1107,8 +1107,12 @@ fn apply_program(
     // 1. bind flag arguments, which is what makes the slot numbers below mean
     //    anything
     let mut positionals: Vec<NodeId> = Vec::new();
+    // where the first positional sits in `words`, so a wrapper's payload can be
+    // taken as the REST OF THE LINE rather than as the positionals alone —
+    // `sudo grep -e pat file` must hand grep its `-e`, not just `pat` and `file`
+    let mut payload_start: Option<usize> = None;
     let mut pending_flag: Option<NodeId> = None;
-    for (id, is_flag) in words {
+    for (index, (id, is_flag)) in words.iter().enumerate() {
         if let Some(flag) = pending_flag.take() {
             graph.link(flag, *id, EdgeKind::Takes);
             if let Some(spec) = flag_spec(graph, program, flag)
@@ -1129,6 +1133,9 @@ fn apply_program(
             }
             continue;
         }
+        if payload_start.is_none() {
+            payload_start = Some(index);
+        }
         positionals.push(*id);
     }
 
@@ -1138,18 +1145,21 @@ fn apply_program(
 
     // 3. the payload of a wrapper is another program, mapped by its own rules
     if let Some(nested) = program.nested_command()
-        && let Some((payload_name, rest)) = payload(graph, &slotted)
+        && let Some(start) = payload_start
+        && let Some((payload_name, _)) = payload(graph, &slotted)
     {
         if nested.effect.contains(&crate::cmdmap::Effect::Exec) {
             graph.link(command, slotted[0], EdgeKind::Execs);
         }
-        // reference edges from the inner program land on the OUTER command node:
-        // there is no node for the payload yet, and "what does this command line
-        // delete?" is the question rules actually ask
-        let inner: Vec<(NodeId, bool)> = rest
-            .iter()
-            .map(|id| (*id, matches!(&graph.nodes[*id], Node::Flag(_))))
-            .collect();
+        // The payload is everything after the program word, IN SOURCE ORDER and
+        // including flags. Taking only the positionals dropped them: `sudo rm -rf
+        // x` lost the `-rf`, and `sudo grep -e pat file` never bound `-e` at all,
+        // so a flag carrying a path (`grep -f list`) lost its read edge too.
+        //
+        // Reference edges still land on the OUTER command node: there is no node
+        // for the payload yet, and "what does this command line delete?" is the
+        // question rules actually ask.
+        let inner: Vec<(NodeId, bool)> = words[start + 1..].to_vec();
         apply_program(graph, command, &payload_name, &inner, maps);
         return;
     }
@@ -1169,7 +1179,20 @@ fn apply_program(
         let Some(arg) = program.arg_for(slot, total, &present) else {
             continue;
         };
-        emit_effects(graph, command, *value, arg.kind, &arg.effect);
+        let target = match arg.kind {
+            // a set is its own node: the effects point at everything beneath the
+            // root, not at the word that named it
+            crate::cmdmap::Kind::PathSet => {
+                let recursive = arg.recursive
+                    || arg
+                        .recursive_with
+                        .iter()
+                        .any(|flag| present.iter().any(|p| p == flag));
+                path_set_node(graph, *value, recursive).unwrap_or(*value)
+            }
+            _ => *value,
+        };
+        emit_effects(graph, command, target, arg.kind, &arg.effect);
     }
 }
 
@@ -1199,6 +1222,24 @@ fn first_positional_after_flags(
         }
     }
     None
+}
+
+/// A `PathSet` node for the path `value` names, sharing its spans so an edit
+/// still knows which bytes to touch.
+fn path_set_node(graph: &mut Graph, value: NodeId, recursive: bool) -> Option<NodeId> {
+    let Node::Value(node) = &graph.nodes[value] else {
+        return None;
+    };
+    // a dynamic word names a set nobody can enumerate, so there is nothing to
+    // build a root from — the existing abstain-rather-than-guess convention
+    let root = node.text.clone()?;
+    let spans = node.spans.clone();
+    let set = crate::globs::PathSet {
+        roots: vec![root],
+        recursive,
+        ..Default::default()
+    };
+    Some(graph.push(Node::PathSet(PathSetNode { spans, set })))
 }
 
 /// The payload of a wrapper: its program name, and the words that follow.

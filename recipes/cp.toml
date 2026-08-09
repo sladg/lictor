@@ -3,8 +3,9 @@
 name = "cp"
 [[cmd.args]]
 slots = "except-last"
-kind = "path"
+kind = "pathset"
 effect = ["read"]
+recursive_with = ["-r", "-R", "--recursive", "-a", "--archive"]
 [[cmd.args]]
 slots = "last"
 kind = "path"

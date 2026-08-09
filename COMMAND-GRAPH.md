@@ -208,6 +208,19 @@ after `sudo`, so the effects are rm's. Stage 1 could not say this at all, which
 is the gap the P2 gate surfaced. Reference edges land on the outer command node,
 because "what does this command line delete?" is the question rules ask.
 
+### PathSets are populated from recipes
+
+`kind = "pathset"` builds a [`globs::PathSet`] instead of pointing at the word.
+`recursive_with` names the flags that turn one path into a tree; `recursive =
+true` is for arguments that always descend.
+
+    rm build        -> deletes build
+    rm -rf build    -> deletes build/**
+    find . -name x  -> reads ./**
+
+`PathSetNode` wraps `globs::PathSet` rather than restating its four fields — the
+same values declared twice is how the two drift.
+
 ### Known format gaps
 
 **Nested subcommands.** `subcommand` matches one level, so `kv db set directory
