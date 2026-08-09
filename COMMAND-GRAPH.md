@@ -328,6 +328,42 @@ heuristic source has no path list of its own, so the default is untouched, and
 `compare` will record the difference against real usage the way sub-task 8
 intended.
 
+### The program is a reference too
+
+The jail walks the *words* of each command and skips word 0, so it had never
+looked at the program at all — under either path source. `/tmp/exploit.sh` ran
+unremarked. This is not a graph regression being fixed; it is a hole older than
+#13 that the graph is the first thing able to close.
+
+**No recipe needed**, for the same reason a redirect needs none. The inverted
+default exists because "what does this word mean to *this program*" is
+unknowable without a map — and the program word is not a program's argument. It
+is what the shell resolves and executes, for every program, always.
+
+Nor is the `/` test the shape heuristic creeping back in. `looks_like_path` was
+wrong because it used shape as a substitute for **meaning**: whether
+`sed -n '/needle/p'` names a file depends on sed, and there was no map, so a
+leading slash stood in for an answer. Here the shell's own rule is written down —
+a command name containing a slash is executed as a pathname, one without is
+searched for on `PATH` (POSIX XCU 2.9.1.1). That is a quotation of the language,
+not a guess about intent, and it is why a bare `npm` claims nothing: it names no
+file.
+
+Two consequences worth stating plainly:
+
+- **Bin directories get no exemption.** `/usr/bin/git status` is a violation
+  inside a jail. Trusting `/usr/bin` would let a jailed agent run anything on the
+  system as long as it lived in a bin dir, and staying inside the project is the
+  entire point. The same tool invoked as `git status` is silent, and
+  `./node_modules/.bin/tsc` resolves inside the repo — making a tool reachable
+  one of those two ways is the user's job.
+- **`referenced_paths` was dropping exec references.** It filters `Effect::Exec`,
+  so even where the edge already existed — `sudo /tmp/exploit.sh` mints one from
+  its recipe — the jail never saw it. `executed_programs` is a separate accessor
+  rather than a widening of that filter, because a file a command *reads* and the
+  program it *runs* are different questions and a caller may want different roots
+  for each.
+
 ### A script argument is a nested parse
 
 `bash -c 'cat /etc/passwd'` claimed **nothing**. `code` produces no edges by

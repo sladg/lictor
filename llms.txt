@@ -853,6 +853,19 @@ frobnicate /etc/passwd          heuristic: flags it          graph: MISSES it
 
 Which trade is right depends on how much of what you actually run has a recipe. That is what `compare` is for: leave decisions on the heuristic, collect the disagreements against real usage, and switch when the evidence says to.
 
+### The program counts as well
+
+Under `graph`, the jail also looks at **what the command runs**, which it never did before — the word walk starts at the first argument, so a program invoked by path was unremarked under both sources.
+
+```
+/tmp/exploit.sh              flagged — the jail is about staying in the project
+./scripts/build.sh           silent — inside the project
+npm run build                silent — a bare name is found on PATH and names no file
+/usr/bin/git status          flagged — a bin directory is not an exemption
+```
+
+A name with **no slash** is resolved through `PATH` and names no file, so it can never be flagged. That is the supported way to use a tool from outside: make it reachable by bare name, keep it inside the project (`./node_modules/.bin/tsc`), or list it in `jail_allow`. Bin directories get no special treatment on purpose — trusting `/usr/bin` would let a jailed agent run anything on the system as long as it lived there.
+
 ## Config
 
 ```toml

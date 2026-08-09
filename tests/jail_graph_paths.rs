@@ -290,3 +290,89 @@ fn an_interpreter_payload_is_still_not_re_parsed_as_shell() {
     assert_eq!(violations("graph", payload), Vec::<String>::new());
     assert_eq!(violations("heuristic", payload), Vec::<String>::new());
 }
+
+#[test]
+fn a_program_run_from_outside_the_jail_is_an_escape() {
+    // A hole that predates the graph entirely: `walk_words` skips word 0, so
+    // the jail has never looked at the program under EITHER source. Asserting
+    // the heuristic finds nothing is the point — this is the graph getting
+    // ahead of it, not the graph catching up.
+    for escape in ["/tmp/exploit.sh", "../../etc/evil.sh", "/tmp/x/../evil.sh"] {
+        assert!(
+            violations("heuristic", escape).is_empty(),
+            "the heuristic started catching {escape:?} — this test is measuring the wrong thing now"
+        );
+        assert!(
+            !violations("graph", escape).is_empty(),
+            "the graph source sees no program in {escape:?}"
+        );
+    }
+}
+
+#[test]
+fn an_exec_reference_is_no_longer_dropped_on_the_floor() {
+    // A second, independent bug in the same area. For a WRAPPER the payload is
+    // word 1, so the heuristic sees it and the recipe already minted the
+    // `Execs` edge — but `referenced_paths` filters `Exec` out, so the graph
+    // source stayed silent about programs it had already identified.
+    //
+    // `executed_programs` is a separate accessor rather than a widening of
+    // `referenced_paths` because the two answer different questions: a file a
+    // command reads and the program it runs are not interchangeable.
+    for escape in [
+        "sudo /tmp/exploit.sh",
+        "env /tmp/exploit.sh",
+        "xargs /tmp/exploit.sh",
+        "nohup /tmp/exploit.sh",
+        // composes with the `-c` script graft
+        "bash -c '/tmp/exploit.sh'",
+    ] {
+        assert!(
+            !violations("graph", escape).is_empty(),
+            "the graph source sees no program in {escape:?}"
+        );
+    }
+}
+
+#[test]
+fn a_program_named_without_a_slash_claims_nothing() {
+    // The rule is the shell's own: a name containing a slash is executed as a
+    // pathname, one without is searched for on PATH. That is what keeps this
+    // from being a claim on every command ever run — and it is why making a
+    // tool reachable by bare name is the documented way to stay quiet.
+    for quiet in ["npm run build", "git status", "cargo test"] {
+        assert_eq!(
+            violations("graph", quiet),
+            Vec::<String>::new(),
+            "{quiet:?} should name no file"
+        );
+    }
+}
+
+#[test]
+fn a_bin_dir_is_not_special_to_the_jail() {
+    // Deliberate: staying inside the project is the whole point, so `/usr/bin`
+    // gets no exemption. Trusting bin dirs would let a jailed agent run
+    // anything on the system as long as it lived in one — and the same tool
+    // invoked as a bare name is silent, which is the supported way to have it.
+    assert!(!violations("graph", "/usr/bin/git status").is_empty());
+    assert!(violations("graph", "git status").is_empty());
+}
+
+#[test]
+fn a_program_inside_the_project_is_fine() {
+    // `./node_modules/.bin/tsc` is how a project makes a tool available to
+    // itself, and it resolves inside the repo — so the rule above costs it
+    // nothing.
+    for inside in [
+        "./node_modules/.bin/tsc",
+        "./scripts/build.sh",
+        "src/gen.py",
+    ] {
+        assert_eq!(
+            violations("graph", inside),
+            Vec::<String>::new(),
+            "{inside:?} is inside the project"
+        );
+    }
+}

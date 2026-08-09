@@ -769,6 +769,32 @@ impl Graph {
         out
     }
 
+    /// The **programs** this command line runs from a pathname, on this machine.
+    ///
+    /// Separate from [`Graph::referenced_paths`], which deliberately drops
+    /// `Exec` references, because the two answer different questions and a
+    /// caller may want different roots for each: a file a command *reads* and
+    /// the program it *runs* are not interchangeable.
+    ///
+    /// Only pathnames — a word with no `/` is resolved through `PATH` and names
+    /// no file, so `npm run build` contributes nothing here while
+    /// `/tmp/exploit.sh` does.
+    pub fn executed_programs(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .references()
+            .into_iter()
+            .filter(|r| {
+                r.locality == Locality::Local
+                    && r.effect == crate::cmdmap::Effect::Exec
+                    && r.path.contains('/')
+            })
+            .map(|r| r.path)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The paths this command line references **on this machine** — the
     /// question the jail and `[[path]]` rules ask.
     pub fn referenced_paths(&self) -> Vec<String> {
@@ -1601,6 +1627,9 @@ pub fn lower_with_maps(source: &str, maps: &crate::cmdmap::Maps) -> Graph {
 ///    *it* says they mean.
 pub fn apply_maps(graph: &mut Graph, maps: &crate::cmdmap::Maps) {
     apply_maps_at(graph, &Mapping { maps, depth: 0 });
+    // after the traversal, so a command grafted in from a `-c` script during it
+    // is covered by the same single pass
+    apply_programs(graph);
 }
 
 /// The recipes plus how deep the re-parse already is — they travel together
@@ -1679,6 +1708,39 @@ fn apply_redirects(graph: &mut Graph) {
         for effect in effects {
             graph.link(command, target, *effect);
         }
+    }
+}
+
+/// Every command references the program it runs, when that program is named by
+/// a pathname.
+///
+/// **This one needs no recipe either**, and for the same reason `apply_redirects`
+/// does not: the inverted default exists because "what does this word mean to
+/// *this program*" is unknowable without a map, and the program word is not a
+/// program's argument. It is what the shell resolves and executes, for every
+/// program, always.
+///
+/// Nor is the `/` test the shape heuristic creeping back. `looks_like_path` was
+/// wrong because it used shape as a substitute for *meaning* — whether
+/// `sed -n '/needle/p'` names a file depends on sed, and guessing from a leading
+/// slash is what #4 is about. Here the shell's own rule is written down: a
+/// command name containing a slash is executed as a pathname, and one without is
+/// searched for on `PATH` (POSIX XCU 2.9.1.1). That is a quotation of the
+/// language, not a guess about intent — which is also why a bare `npm` mints
+/// nothing: it names no file.
+///
+/// A payload minted by a wrapper (`sudo /tmp/x.sh`) already has an `Execs` edge
+/// from the command that spawned it, and owns no bytes; the span test is how
+/// those are told apart from a command written in the source.
+fn apply_programs(graph: &mut Graph) {
+    let named: Vec<NodeId> = graph
+        .commands()
+        .filter(|(_, cmd)| cmd.name.as_deref().is_some_and(|n| n.contains('/')))
+        .map(|(id, _)| id)
+        .filter(|id| !graph.owned_spans(*id).is_empty())
+        .collect();
+    for id in named {
+        graph.link(id, id, EdgeKind::Execs);
     }
 }
 
