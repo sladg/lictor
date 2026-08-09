@@ -10,6 +10,7 @@ pub struct CompiledEditRule<'a> {
     pattern: Option<Regex>,
     removed_pattern: Option<Regex>,
     required_pattern: Option<Regex>,
+    changed_pattern: Option<Regex>,
 }
 
 pub fn compile_edit_rules(config: &Config) -> Result<Vec<CompiledEditRule<'_>>, String> {
@@ -44,12 +45,19 @@ pub fn compile_edit_rules(config: &Config) -> Result<Vec<CompiledEditRule<'_>>, 
                 .map(Regex::new)
                 .transpose()
                 .map_err(|e| format!("edit rule required_pattern: {e}"))?;
+            let changed_pattern = rule
+                .changed_pattern
+                .as_deref()
+                .map(Regex::new)
+                .transpose()
+                .map_err(|e| format!("edit rule changed_pattern: {e}"))?;
             Ok(CompiledEditRule {
                 rule,
                 paths,
                 pattern,
                 removed_pattern,
                 required_pattern,
+                changed_pattern,
             })
         })
         .collect()
@@ -129,7 +137,16 @@ pub fn gate_content(
             Some(re) => !edits.iter().any(|(_, new)| re.is_match(new)),
             None => true,
         };
-        if !pattern_fires || !removed_fires || !required_fires {
+        // `changed_pattern`: fires when a text matched in old no longer appears
+        // verbatim in new (edited or removed); pure additions keep every old
+        // match and stay silent. None = always fires
+        let changed_fires = match &rule.changed_pattern {
+            Some(re) => edits
+                .iter()
+                .any(|(old, new)| re.find_iter(old).any(|m| !new.contains(m.as_str()))),
+            None => true,
+        };
+        if !pattern_fires || !removed_fires || !required_fires || !changed_fires {
             continue;
         }
         let message = rule.rule.hint.clone().unwrap_or_else(|| {
@@ -142,6 +159,8 @@ pub fn gate_content(
                         .map(|p| format!(" `{p}`"))
                         .unwrap_or_default()
                 )
+            } else if let Some(p) = rule.rule.changed_pattern.as_deref() {
+                format!("lictor: {path} edits content protected by `{p}`")
             } else {
                 format!(
                     "lictor: {path} matches edit rule{}",
@@ -162,6 +181,7 @@ pub fn gate_content(
                         .rule
                         .pattern
                         .clone()
+                        .or_else(|| rule.rule.changed_pattern.clone())
                         .unwrap_or_else(|| rule.rule.paths.join(","));
                     outcome.deny_retry = Some((key, n, w));
                 }
@@ -181,6 +201,7 @@ pub fn gate_content(
                         .removed_pattern
                         .clone()
                         .or_else(|| rule.rule.pattern.clone())
+                        .or_else(|| rule.rule.changed_pattern.clone())
                         .unwrap_or_else(|| rule.rule.paths.join(","));
                     outcome.hint_retry = Some((key, n, w, message));
                 }
@@ -572,6 +593,127 @@ hint = "lictor: include 'updated_at:' when editing markdown files"
         let out = gate(rules, "notes/post.md", &[(old, new)]);
         assert_eq!(out.hints.len(), 1);
         assert!(out.hints[0].contains("updated_at"));
+    }
+
+    // ── changed_pattern: per-match survival ───────────────────────────────────
+
+    const TEST_CONSULT: &str = r#"
+[[edit]]
+paths = ["**/*.test.ts", "**/*_test.go", "**/tests/**/*.rs"]
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "test expectation edited — consult the user"
+"#;
+
+    #[test]
+    fn changed_pattern_fires_on_value_swap() {
+        let old = r#"expect(greet()).toBe("hello")"#;
+        let new = r#"expect(greet()).toBe("goodbye")"#;
+        let out = gate(TEST_CONSULT, "src/api.test.ts", &[(old, new)]);
+        assert_eq!(out.decision, Some("deny"));
+        assert!(out.reason.as_deref().unwrap_or("").contains("consult"));
+    }
+
+    #[test]
+    fn changed_pattern_fires_on_match_removal() {
+        let old = r#"it("rejects empty", () => {})"#;
+        let out = gate(TEST_CONSULT, "src/api.test.ts", &[(old, "")]);
+        assert_eq!(out.decision, Some("deny"));
+    }
+
+    #[test]
+    fn changed_pattern_silent_on_pure_addition() {
+        // old matches survive verbatim; new content only adds — no fire
+        let old = r#"it("adds", () => {});"#;
+        let new = r#"it("adds", () => {});
+it("subtracts", () => {});"#;
+        let out = gate(TEST_CONSULT, "src/api.test.ts", &[(old, new)]);
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
+    fn changed_pattern_silent_on_write_without_prior_content() {
+        // Write sends old = "" — nothing matched, nothing can vanish
+        let out = gate(
+            TEST_CONSULT,
+            "src/new.test.ts",
+            &[("", r#"it("fresh", () => {})"#)],
+        );
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
+    fn changed_pattern_silent_when_no_match_in_old() {
+        // anchor-only edit (closing brace), no quoted string touched
+        let out = gate(TEST_CONSULT, "src/api.test.ts", &[("});", "});\n// x")]);
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
+    fn changed_pattern_respects_path_scope() {
+        let old = r#"label("hello")"#;
+        let new = r#"label("goodbye")"#;
+        // not a test file — rule does not apply
+        let out = gate(TEST_CONSULT, "src/ui.ts", &[(old, new)]);
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
+    fn changed_pattern_catches_single_comment_deletion_among_survivors() {
+        // the removed_pattern blind spot: one comment deleted, another remains.
+        // per-match survival still fires because THAT match text is gone.
+        let rules = r#"
+[[edit]]
+changed_pattern = '(?m)[ \t]*//[^\n]*'
+action = "warn"
+hint = "a comment was edited or removed"
+"#;
+        let old = "// keep me\nconst a = 1;\n// delete me\nconst b = 2;";
+        let new = "// keep me\nconst a = 1;\nconst b = 2;";
+        let out = gate(rules, "src/x.ts", &[(old, new)]);
+        assert_eq!(out.hints.len(), 1);
+    }
+
+    #[test]
+    fn changed_pattern_combines_with_pattern_condition() {
+        // both must hold: new content touches a #[test] block AND a string changed
+        let rules = r#"
+[[edit]]
+paths = ["**/*.rs"]
+pattern = '#\[test\]'
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "inline test expectation edited"
+"#;
+        let old = "#[test]\nfn t() { assert_eq!(f(), \"a\"); }";
+        let new = "#[test]\nfn t() { assert_eq!(f(), \"b\"); }";
+        let out = gate(rules, "src/lib.rs", &[(old, new)]);
+        assert_eq!(out.decision, Some("deny"));
+
+        // string swap in NON-test rust code: pattern condition fails, silent
+        let old = "fn label() -> &'static str { \"a\" }";
+        let new = "fn label() -> &'static str { \"b\" }";
+        let out = gate(rules, "src/lib.rs", &[(old, new)]);
+        assert!(out.decision.is_none());
+    }
+
+    #[test]
+    fn changed_pattern_deny_retry_key_derives_from_it() {
+        let rules = r#"
+[[edit]]
+paths = ["**/*.test.ts"]
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "consult first"
+retry_count = 1
+retry_window = 600
+"#;
+        let out = gate(rules, "src/api.test.ts", &[(r#"t("a")"#, r#"t("b")"#)]);
+        assert_eq!(out.decision, Some("deny"));
+        let (key, count, window) = out.deny_retry.expect("deny_retry set");
+        assert_eq!(key, r#""[^"]*""#);
+        assert_eq!(count, 1);
+        assert_eq!(window, 600);
     }
 
     #[test]

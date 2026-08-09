@@ -39,6 +39,7 @@ llms:
 	{ cat README.md; find docs -name '*.md' | sort | xargs cat; } > llms.txt
 
 release: ci llms
+	@git update-index -q --refresh
 	@git diff-index --quiet HEAD -- || { echo "working tree dirty — commit before releasing"; exit 1; }
 	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then echo "tag v$(VERSION) already exists — bump version in Cargo.toml first"; exit 1; fi
 	@printf "release lictor \033[1mv$(VERSION)\033[0m? (bump Cargo.toml first if wrong) [y/N] "; \

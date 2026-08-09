@@ -52,6 +52,30 @@ Edit: "it('rejects empty input', …)" block deleted   → deny: never delete te
 
 A `warn` doesn't block — the edit lands and the hint lands with it, so the agent restores the comment in its next edit or explains why it had to go. A `deny` blocks outright; the assertion never leaves the file.
 
+## Changed expectations, not just deleted ones
+
+`removed_pattern` can't see a value swap — `toBe("foo")` → `toBe("bar")` still matches the regex, so nothing fires. `changed_pattern` checks each old match individually: fire when *that exact text* is gone from the new content. Pair it with deny-then-allow so the first attempt gets the consult instruction and the resubmission (after consulting) passes:
+
+```toml
+[[edit]]
+paths = ["**/*.test.ts", "**/*.spec.ts", "**/*_test.go", "**/tests/**/*.rs"]
+changed_pattern = '"[^"]*"'
+action = "deny"
+hint = "Test expectation edited — tests are not made to pass blindly. Did the behaviour change, and is that wanted? Confirm with the user, then resubmit."
+retry_count = 1
+retry_window = 600
+```
+
+Adding a brand-new test never fires (old matches all survive); `Write` sends no prior content, so it never fires there either. The same trick closes `removed_pattern`'s blind spot on comments — deleting one comment while another survives:
+
+```toml
+[[edit]]
+paths = ["**/*.ts", "**/*.rs", "**/*.go"]
+changed_pattern = '(?m)[ \t]*//[^\n]*'
+action = "warn"
+hint = "A comment was edited or removed — restore it unless the user asked."
+```
+
 ## Variations
 
 Combine directions in one rule — both conditions must hold. This catches "replaced the real docs with a TODO placeholder":

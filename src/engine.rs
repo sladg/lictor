@@ -517,7 +517,7 @@ fn pre_web(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, Str
                 outcome.decision = Some("ask");
                 outcome.reason = Some(web::ask_message(rule, raw_url));
             }
-            // route through the configured proxy (pure.md-style) and auto-approve
+            // route through the configured proxy (PullMD-style) and auto-approve
             Some((Action::Rewrite, rule)) => {
                 if let Some(target) = web::rewrite_url(rule, raw_url) {
                     outcome.decision = Some("allow");

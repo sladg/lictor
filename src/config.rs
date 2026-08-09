@@ -73,6 +73,12 @@ pub struct EditRule {
     pub removed_pattern: Option<String>,
     #[serde(default)]
     pub required_pattern: Option<String>,
+    // per-match survival: every text this regex matches in the OLD content must
+    // appear verbatim in the NEW content — fires on in-place edits and removals
+    // of the matched text, never on pure additions (unlike removed_pattern,
+    // which only fires when NO match is left)
+    #[serde(default)]
+    pub changed_pattern: Option<String>,
     pub action: Action,
     #[serde(default)]
     pub hint: Option<String>,
@@ -115,7 +121,7 @@ pub struct WebRule {
     #[serde(default)]
     pub hint: Option<String>,
     // action = "rewrite" (WebFetch only): `{url}` expands to the original URL —
-    // e.g. "https://pure.md/{url}" routes Cloudflare-blocked pages via a
+    // e.g. "https://pullmd.example/api?url={url}" routes Cloudflare-blocked pages via a
     // markdown proxy instead of denying the fetch
     #[serde(default)]
     pub rewrite: Option<String>,
@@ -739,6 +745,18 @@ pub fn load(cwd: Option<&str>, mode: Option<&str>) -> Result<Config, String> {
             toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
         config = config.merge(parsed);
     }
+    config = config.apply_mode(mode);
+    config.finalize()?;
+    Ok(config)
+}
+
+// loads exactly one config file, bypassing XDG/ancestor-chain discovery — lets
+// a policy be tested in isolation (`lictor check --config <path>`) without the
+// `XDG_CONFIG_HOME` dance
+pub fn load_from(path: &Path, mode: Option<&str>) -> Result<Config, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let parsed: Config = toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut config = Config::default().merge(parsed);
     config = config.apply_mode(mode);
     config.finalize()?;
     Ok(config)

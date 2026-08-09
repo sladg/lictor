@@ -30,7 +30,7 @@ deny  >  skip  >  ask  >  warn  >  rewrite  >  allow
 | Doc | One-liner |
 |---|---|
 | [catalogs](catalogs.md) | named command groups — gate ~150 commands with one line |
-| [edit rules](edit-rules.md) | gate file edits by path + what's added / removed / missing |
+| [edit rules](edit-rules.md) | gate file edits by path + what's added / removed / missing / changed in place |
 | [path rules](path-rules.md) | your own dir policy, matched against every path a command touches |
 | [web rules](web.md) | domain/URL policy for curl/wget/WebFetch — allow, deny, or proxy-rewrite |
 | [agent rules](agent.md) | regex over subagent prompts (gate) and outputs (hint) |

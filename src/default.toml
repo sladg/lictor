@@ -135,7 +135,7 @@ ask = "deny"
 # [[web]]                         # WebFetch only: reroute Cloudflare-walled pages
 # domains = ["*.medium.com"]      # through a markdown proxy instead of failing
 # action = "rewrite"
-# rewrite = "https://pure.md/{url}"
+# rewrite = "https://pullmd.example/api?url={url}"
 
 # [[agent]]: regex rules for subagents (Task/Agent tool). on = "prompt" gates
 # before launch (deny/ask/warn); on = "output" hints next to the result.

@@ -19,7 +19,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Read a hook JSON event on stdin and emit the decision (how Claude Code calls it)
-    Hook,
+    Hook {
+        /// Load exactly this config file instead of the XDG/ancestor-chain discovery
+        #[arg(long)]
+        config: Option<String>,
+    },
     /// Validate every config file lictor can find; `check -- <cmd...>` runs a command
     /// through the full hook pipeline: prints the decision, asks y/N where the hook
     /// would prompt, executes, and shows the output the model would see (minify/spill
@@ -31,6 +35,13 @@ enum Cmd {
         /// Resolve config as if permission_mode were this value (e.g. auto, bypassPermissions)
         #[arg(long)]
         mode: Option<String>,
+        /// Load exactly this config file instead of the XDG/ancestor-chain discovery
+        #[arg(long)]
+        config: Option<String>,
+        /// Print the gate verdict and the final rewritten command, then exit —
+        /// no y/N prompt, no execution
+        #[arg(long)]
+        explain: bool,
     },
     /// Print the settings.json hooks snippet
     Init {
@@ -51,9 +62,15 @@ fn main() {
             use clap::CommandFactory;
             let _ = Cli::command().print_help();
         }
-        None | Some(Cmd::Hook) => run_hook(),
-        Some(Cmd::Check { command, mode }) if !command.is_empty() => check_command(command, mode),
-        Some(Cmd::Check { mode, .. }) => check(mode),
+        None => run_hook(None),
+        Some(Cmd::Hook { config }) => run_hook(config),
+        Some(Cmd::Check {
+            command,
+            mode,
+            config,
+            explain,
+        }) if !command.is_empty() => check_command(command, mode, config, explain),
+        Some(Cmd::Check { mode, config, .. }) => check(mode, config),
         Some(Cmd::Init { write }) => init(write),
         Some(Cmd::Gain) => gain(),
     }
@@ -90,10 +107,24 @@ fn quote(word: &str) -> String {
     }
 }
 
+// resolves config from `--config <path>` when given, else the normal
+// XDG/ancestor-chain discovery — the isolated path lets a policy be tested
+// without the `XDG_CONFIG_HOME` dance
+fn resolve_config(
+    cwd: Option<&str>,
+    mode: Option<&str>,
+    config_override: Option<&str>,
+) -> Result<config::Config, String> {
+    match config_override {
+        Some(path) => config::load_from(std::path::Path::new(path), mode),
+        None => config::load(cwd, mode),
+    }
+}
+
 // `check -- <cmd...>`: run one command through the same PreToolUse -> exec ->
 // PostToolUse pipeline the hooks use, narrating decisions on stderr. The
 // model-visible output (post minify/spill) lands on stdout; exit code propagates.
-fn check_command(args: Vec<String>, mode: Option<String>) {
+fn check_command(args: Vec<String>, mode: Option<String>, config_path: Option<String>, explain: bool) {
     if args.is_empty() {
         eprintln!("lictor: check -- needs a command, e.g. `lictor check -- git commit -m x`");
         std::process::exit(1);
@@ -106,7 +137,8 @@ fn check_command(args: Vec<String>, mode: Option<String>) {
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(String::from));
-    let mut config = match config::load(cwd.as_deref(), mode.as_deref()) {
+    let mut config = match resolve_config(cwd.as_deref(), mode.as_deref(), config_path.as_deref())
+    {
         Ok(config) => config,
         Err(error) => {
             eprintln!("lictor: config error: {error}");
@@ -150,6 +182,13 @@ fn check_command(args: Vec<String>, mode: Option<String>) {
             }
         }
         None => eprintln!("lictor: no opinion — the normal permission flow would decide"),
+    }
+    if explain {
+        println!("{final_command}");
+        std::process::exit(match decision.as_deref() {
+            Some("deny") => 1,
+            _ => 0,
+        });
     }
     match decision.as_deref() {
         Some("deny") => std::process::exit(1),
@@ -236,7 +275,7 @@ fn gain() {
     }
 }
 
-fn run_hook() {
+fn run_hook(config_path: Option<String>) {
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         return;
@@ -244,7 +283,11 @@ fn run_hook() {
     let Ok(input) = serde_json::from_str::<HookInput>(&raw) else {
         return;
     };
-    let output = match config::load(input.cwd.as_deref(), input.permission_mode.as_deref()) {
+    let output = match resolve_config(
+        input.cwd.as_deref(),
+        input.permission_mode.as_deref(),
+        config_path.as_deref(),
+    ) {
         Ok(config) => engine::evaluate(&input, &config),
         Err(error) if input.hook_event_name == "PreToolUse" => {
             Some(engine::error_output(&input.hook_event_name, &error))
@@ -256,47 +299,49 @@ fn run_hook() {
     }
 }
 
-fn check(mode: Option<String>) {
+fn check(mode: Option<String>, config_path: Option<String>) {
     let cwd = std::env::current_dir().ok();
     let cwd = cwd.as_ref().and_then(|p| p.to_str());
-    let mut found = false;
-    for path in config::config_paths(cwd) {
-        if !path.exists() {
-            continue;
-        }
-        found = true;
-        let loaded = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|raw| toml::from_str::<config::Config>(&raw).map_err(|e| e.to_string()))
-            .and_then(|config| {
-                rules::compile_bash_rules(&config)?;
-                content::compile_edit_rules(&config)?;
-                minify::compile_minify_rules(&config)?;
-                modules::path_rules::compile(&config)?;
-                web::compile(&config)?;
-                agent::compile(&config)?;
-                Ok(config)
-            });
-        match loaded {
-            Ok(config) => println!(
-                "ok       {} ({} bash, {} edit, {} path, {} web, {} minify rules)",
-                path.display(),
-                config.bash.len(),
-                config.edit.len(),
-                config.path.len(),
-                config.web.len(),
-                config.minify.len()
-            ),
-            Err(error) => {
-                println!("ERROR    {}: {error}", path.display());
-                std::process::exit(1);
+    if config_path.is_none() {
+        let mut found = false;
+        for path in config::config_paths(cwd) {
+            if !path.exists() {
+                continue;
+            }
+            found = true;
+            let loaded = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|raw| toml::from_str::<config::Config>(&raw).map_err(|e| e.to_string()))
+                .and_then(|config| {
+                    rules::compile_bash_rules(&config)?;
+                    content::compile_edit_rules(&config)?;
+                    minify::compile_minify_rules(&config)?;
+                    modules::path_rules::compile(&config)?;
+                    web::compile(&config)?;
+                    agent::compile(&config)?;
+                    Ok(config)
+                });
+            match loaded {
+                Ok(config) => println!(
+                    "ok       {} ({} bash, {} edit, {} path, {} web, {} minify rules)",
+                    path.display(),
+                    config.bash.len(),
+                    config.edit.len(),
+                    config.path.len(),
+                    config.web.len(),
+                    config.minify.len()
+                ),
+                Err(error) => {
+                    println!("ERROR    {}: {error}", path.display());
+                    std::process::exit(1);
+                }
             }
         }
+        if !found {
+            println!("no config files found (user config + ancestor lictor.toml chain)");
+        }
     }
-    if !found {
-        println!("no config files found (user config + ancestor lictor.toml chain)");
-    }
-    match config::load(cwd, mode.as_deref()) {
+    match resolve_config(cwd, mode.as_deref(), config_path.as_deref()) {
         Ok(config) => {
             if !config.activated_catalogs.is_empty() {
                 println!("catalogs {}", config.activated_catalogs.join(", "));
