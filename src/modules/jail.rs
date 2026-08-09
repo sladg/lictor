@@ -107,12 +107,14 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
             .graph
             .resolved_references(cwd, &|path, base| normalize(path, base, &home))
             .into_iter()
-            .filter(|r| !r.locality.is_remote())
+            .filter(|r| !r.reference.locality.is_remote())
             // a program with no `/` is found on PATH and names no file; with one
             // the shell executes it as a pathname (POSIX XCU 2.9.1.1). Bin
             // directories get no exemption — staying in the project is the point.
-            .filter(|r| r.effect != crate::cmdmap::Effect::Exec || r.path.contains('/'))
-            .filter_map(|r| r.resolved)
+            .filter(|r| {
+                r.reference.effect != crate::cmdmap::Effect::Exec || r.reference.path.contains('/')
+            })
+            .map(|r| r.absolute)
             .collect::<Vec<String>>()
     };
 
