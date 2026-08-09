@@ -371,13 +371,11 @@ pub struct Reference {
     pub locality: Locality,
     /// the path as written — the whole word, `s3://bucket/key` included
     pub path: String,
-    /// the same path made absolute against the working directory in effect where
-    /// it appears, once [`Graph::resolved_references`] has been asked for it.
+    /// the same path made absolute, from [`Graph::resolved_references`]; `None`
+    /// from [`Graph::references`], which says nothing about this machine.
     ///
-    /// `None` from [`Graph::references`], which reports what the command line
-    /// says and nothing about this machine. Both forms are kept because they
-    /// answer different questions: `npm` and `./npm` resolve to the same file,
-    /// and only the written form says whether the shell would search `PATH`.
+    /// Kept alongside `path` rather than replacing it: `npm` and `./npm` resolve
+    /// alike, and only the written form says whether the shell searches `PATH`.
     pub resolved: Option<String>,
     /// the split form, when this names something on another machine
     pub remote: Option<RemoteRef>,
@@ -781,22 +779,16 @@ impl Graph {
     /// Every reference, with each path resolved against the working directory in
     /// effect **where that reference appears**.
     ///
-    /// This is the whole query. A consumer asks once and filters the
-    /// [`Reference`] facts by its own policy, rather than the graph growing an
-    /// accessor per caller — `referenced_paths` and `executed_programs` were two
-    /// such accessors, and having two of them is what let the jail acquire three
-    /// different ways of learning about a path, one of which quietly disagreed
-    /// with the others.
+    /// The whole query: callers ask once and filter [`Reference`] by their own
+    /// policy, rather than the graph growing an accessor per caller.
     ///
-    /// `cd` needs no special machinery: it is a command like any other, its
+    /// `cd` needs no special machinery — it is a command like any other, its
     /// recipe says slot 0 is a path, and [`Graph::commands`] is already in source
-    /// order. Tracking the base is a traversal of what the graph knows, not a
-    /// second walk over the words.
+    /// order.
     ///
-    /// `resolve` maps `(path, base)` to an absolute path. It is a parameter
-    /// because expanding `~` needs the environment and the graph stays free of
-    /// it — the graph says *what is referenced from where*, the caller says what
-    /// that means on this machine.
+    /// `resolve` maps `(path, base)` to an absolute path. A parameter because
+    /// expanding `~` needs the environment: the graph says what is referenced
+    /// from where, the caller says what that means on this machine.
     pub fn resolved_references(
         &self,
         base: &str,
@@ -810,10 +802,9 @@ impl Graph {
             if command.name.as_deref().map(basename) != Some("cd") {
                 continue;
             }
-            // `cd`'s own argument resolves against the base in effect BEFORE it
-            // runs, so it is recorded above first. A dynamic target or `cd -`
-            // has no knowable result: freeze rather than guess, which is never
-            // worse than the always-the-original-cwd behaviour it replaces.
+            // `cd`'s own argument resolves against the base BEFORE it runs,
+            // which is why that is recorded above first. A dynamic target or
+            // `cd -` yields no reference here, so the base simply freezes.
             if let Some(target) = references
                 .iter()
                 .find(|r| r.command == id && r.locality == Locality::Local)
@@ -1736,24 +1727,17 @@ fn apply_redirects(graph: &mut Graph) {
 /// Every command references the program it runs, when that program is named by
 /// a pathname.
 ///
-/// **This one needs no recipe either**, and for the same reason `apply_redirects`
-/// does not: the inverted default exists because "what does this word mean to
-/// *this program*" is unknowable without a map, and the program word is not a
-/// program's argument. It is what the shell resolves and executes, for every
-/// program, always.
+/// Needs no recipe, like `apply_redirects`: the program word is not a program's
+/// argument, it is what the shell resolves and executes whatever the program is.
 ///
-/// Nor is the `/` test the shape heuristic creeping back. `looks_like_path` was
-/// wrong because it used shape as a substitute for *meaning* — whether
-/// `sed -n '/needle/p'` names a file depends on sed, and guessing from a leading
-/// slash is what #4 is about. Here the shell's own rule is written down: a
-/// command name containing a slash is executed as a pathname, and one without is
-/// searched for on `PATH` (POSIX XCU 2.9.1.1). That is a quotation of the
-/// language, not a guess about intent — which is also why a bare `npm` mints
-/// nothing: it names no file.
+/// The `/` test is the shell's rule, not the shape heuristic returning — a name
+/// containing a slash is executed as a pathname, one without is searched for on
+/// `PATH` (POSIX XCU 2.9.1.1). `looks_like_path` was wrong because shape stood
+/// in for *meaning*, which only a recipe can give; nothing is being guessed
+/// here, which is also why a bare `npm` mints nothing.
 ///
-/// A payload minted by a wrapper (`sudo /tmp/x.sh`) already has an `Execs` edge
-/// from the command that spawned it, and owns no bytes; the span test is how
-/// those are told apart from a command written in the source.
+/// A wrapper's payload (`sudo /tmp/x.sh`) already has an `Execs` edge and owns
+/// no bytes — the span test is what tells it from a command written in source.
 fn apply_programs(graph: &mut Graph) {
     let named: Vec<NodeId> = graph
         .commands()

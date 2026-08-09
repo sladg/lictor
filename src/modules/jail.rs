@@ -89,57 +89,33 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     let roots = roots(config, cwd, &home);
     let source = config.jail_paths();
 
-    // Two sources, one shape: each answers "which paths does this command line
-    // touch, resolved against the directory in effect where it appears", and
-    // neither gets to do anything else. Everything after them — the trust check,
-    // the dedupe, the order — is shared, so the two cannot drift apart and
-    // `compare` is comparing like with like.
-    //
-    // Deleting the shape source outright is sub-task 8, and it waits on the
-    // graph being complete enough to replace it: see #34, #35, #39, #40 and #42
-    // for what it still catches that the graph does not.
+    // guess a path from the word's shape; `walk_words` tracks `cd` as it goes
     let by_shape = || {
         let guess = |text: &str| {
             let candidate = path_candidate(text);
             looks_like_path(candidate).then(|| candidate.to_string())
         };
-        // resolution rides along with the walk, which is what tracks `cd` here
         walk_words(extraction, cwd, &home, true, guess)
             .into_iter()
             .map(|(_, resolved)| resolved)
             .collect::<Vec<String>>()
     };
 
-    // One query, one struct. This used to be three: the word walk asking the
-    // graph "is this word a path?", a second pass for the paths the walk never
-    // visits (a redirect target is not one of the command's words, #29), and a
-    // third list for the program each command runs. Three ways of learning the
-    // same kind of fact, and the walk still deciding which of them got seen —
-    // so a path the graph knew about could be dropped because the OLD extractor
-    // had no word for it. `cd` tracking moved into the graph, where the commands
-    // already sit in source order, and the rest fell out.
-    //
-    // What is left here is policy, which is the jail's to state and not the
-    // graph's to bake in.
+    // take the paths from the recipes, keeping only what this jail is about
     let by_graph = || {
         extraction
             .graph
             .resolved_references(cwd, &|path, base| normalize(path, base, &home))
             .into_iter()
-            // somewhere else's filesystem is not this jail's business
             .filter(|r| !r.locality.is_remote())
-            // A program named without a slash is found on `PATH` and names no
-            // file — `npm run build` references nothing. With one, the shell
-            // executes it as a pathname (POSIX XCU 2.9.1.1), and it is a file
-            // like any other. Bin directories get no exemption: staying inside
-            // the project is the point, and a tool reachable by bare name or
-            // living in the project is the supported way to have one.
+            // a program with no `/` is found on PATH and names no file; with one
+            // the shell executes it as a pathname (POSIX XCU 2.9.1.1). Bin
+            // directories get no exemption — staying in the project is the point.
             .filter(|r| r.effect != crate::cmdmap::Effect::Exec || r.path.contains('/'))
             .filter_map(|r| r.resolved)
             .collect::<Vec<String>>()
     };
 
-    // the one check, applied to whichever source produced the list
     let outside = |paths: Vec<String>| {
         let mut found: Vec<String> = Vec::new();
         for resolved in paths {
@@ -150,12 +126,13 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
         found
     };
 
+    // Each source only lists paths; the trust check, the dedupe and the order
+    // are shared, so the two cannot drift and `compare` compares like with like.
     match source {
         JailPaths::Heuristic => outside(by_shape()),
         JailPaths::Graph => outside(by_graph()),
-        // decide with the heuristic, but record what the graph would have said —
-        // so the switch can be judged against real usage before it changes any
-        // decision
+        // record what the graph would have said, decide with the heuristic —
+        // measuring the switch must not be the switch
         JailPaths::Compare => {
             let old = outside(by_shape());
             report_disagreement(extraction, &old, &outside(by_graph()));
