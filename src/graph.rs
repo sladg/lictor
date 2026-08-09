@@ -335,6 +335,29 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
+/// A command's place in its chain — what `piped_into`, `with` and `position`
+/// are asking about. See [`Graph::groups`].
+#[derive(Debug, Clone)]
+pub struct Group {
+    /// every command in the chain, in source order, this one included
+    pub members: Vec<NodeId>,
+    /// index of this command among them
+    pub position: usize,
+    /// how this command is attached to its neighbour; `None` when it stands
+    /// alone
+    pub connector: Option<Connector>,
+}
+
+impl Group {
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+}
+
 /// One reference edge, flattened into the facts a caller asks about: what is
 /// touched, how, and **where it is**.
 #[derive(Debug, Clone)]
@@ -578,6 +601,117 @@ impl Graph {
             .map(|(_, id)| *id)
     }
 
+    /// Which chain each command belongs to, and where in it — the structure
+    /// `piped_into`, `with` and `position` are asking about.
+    ///
+    /// A chain is a run of commands joined by written connectors. Two things
+    /// follow from taking that from the graph rather than from the CST, and both
+    /// are fixes:
+    ///
+    /// - **`ls; git stash` is a chain.** The CST puts a top-level `;` straight
+    ///   under `program` rather than in a `list`, so a walk looking for the
+    ///   nearest `pipeline`/`list` ancestor found none and called both commands
+    ///   standalone — a `with` rule that fires on `ls && git stash` and
+    ///   `ls | git stash` was evadable by writing `;`. The #12 shape, one
+    ///   separator over.
+    /// - **`a && b || c` is one chain of three.** The grammar nests binary
+    ///   lists, so the nearest-ancestor walk saw `[list(a && b), c]` — two
+    ///   members, with `a` and `c` in different groups.
+    ///
+    /// A payload command (`rm` in `sudo rm x`) joins the chain of the command
+    /// that spawned it: it is a view of the same stage, not another one.
+    pub fn groups(&self) -> HashMap<NodeId, Group> {
+        let commands: Vec<NodeId> = self.commands().map(|(id, _)| id).collect();
+        let mut root: HashMap<NodeId, NodeId> = commands.iter().map(|id| (*id, *id)).collect();
+        let find = |root: &mut HashMap<NodeId, NodeId>, id: NodeId| {
+            let mut at = id;
+            while root.get(&at).copied().unwrap_or(at) != at {
+                at = root[&at];
+            }
+            at
+        };
+        let union = |root: &mut HashMap<NodeId, NodeId>, a: NodeId, b: NodeId| {
+            let (a, b) = (find(root, a), find(root, b));
+            if a != b {
+                root.insert(a, b);
+            }
+        };
+        for edge in &self.edges {
+            if let EdgeKind::Flow(_) = edge.kind {
+                union(&mut root, edge.from, edge.to);
+            }
+        }
+
+        // A payload command is a VIEW of the stage that spawned it, not another
+        // stage. It shares that stage's group entry outright rather than joining
+        // the chain as a member: appending it would push `head` from position 1
+        // to position 2 in `sudo pnpm build | head`, and `piped_into` reads the
+        // next position.
+        let payloads: Vec<(NodeId, NodeId)> = self
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Spawns && self.owned_spans(e.to).is_empty())
+            .map(|e| (e.to, e.from))
+            .collect();
+
+        let mut chains: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for id in &commands {
+            if payloads.iter().any(|(payload, _)| payload == id) {
+                continue;
+            }
+            chains.entry(find(&mut root, *id)).or_default().push(*id);
+        }
+        let mut out: HashMap<NodeId, Group> = HashMap::new();
+        for members in chains.values_mut() {
+            members.sort_by_key(|id| {
+                self.nodes[*id]
+                    .spans()
+                    .first()
+                    .map_or(usize::MAX, |s| s.start)
+            });
+            for (position, id) in members.iter().enumerate() {
+                out.insert(
+                    *id,
+                    Group {
+                        members: members.clone(),
+                        position,
+                        // the connector that joined this command to the one
+                        // before it; for the first, the one joining it to the
+                        // next. Uniform chains answer the same either way, and a
+                        // mixed one says how THIS stage is attached.
+                        connector: self
+                            .connector_into(*id)
+                            .or_else(|| self.connector_out_of(*id)),
+                    },
+                );
+            }
+        }
+        // resolved after the chains exist, and repeatedly: `ssh host sudo rm x`
+        // is a payload of a payload
+        for _ in 0..payloads.len() {
+            for (payload, spawner) in &payloads {
+                if let Some(group) = out.get(spawner).cloned() {
+                    out.insert(*payload, group);
+                }
+            }
+        }
+        out
+    }
+
+    fn connector_into(&self, id: NodeId) -> Option<Connector> {
+        self.edges.iter().find_map(|e| match e.kind {
+            EdgeKind::Flow(kind) if e.to == id => Some(kind),
+            _ => None,
+        })
+    }
+
+    fn connector_out_of(&self, id: NodeId) -> Option<Connector> {
+        self.edges.iter().find_map(|e| match e.kind {
+            EdgeKind::Flow(kind) if e.from == id => Some(kind),
+            _ => None,
+        })
+    }
+
     /// Every reference this command line makes, according to the recipes.
     ///
     /// The inverted default made concrete: a word is a path because a reviewed
@@ -693,19 +827,35 @@ impl Graph {
 /// around them fall through as unowned gaps. P1 holds regardless, which is what
 /// keeps the stage tractable without pretending to more coverage than it has.
 pub fn lower(source: &str) -> Graph {
-    let mut graph = Graph {
-        source: source.to_string(),
-        ..Default::default()
-    };
     let mut parser = tree_sitter::Parser::new();
     if parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
         .is_err()
     {
-        return graph;
+        return Graph {
+            source: source.to_string(),
+            ..Default::default()
+        };
     }
-    let Some(tree) = parser.parse(source, None) else {
-        return graph;
+    match parser.parse(source, None) {
+        Some(tree) => lower_from(&tree, source),
+        None => Graph {
+            source: source.to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+/// Lower a tree somebody else already parsed.
+///
+/// `bash::extract` parses the source for its own walk; without this it would
+/// parse a second time to get a graph, and the two views of one command would
+/// be two views of two parses. Sub-task 4 is about removing that gap, and this
+/// is where it starts: **one parse, one tree**.
+pub fn lower_from(tree: &tree_sitter::Tree, source: &str) -> Graph {
+    let mut graph = Graph {
+        source: source.to_string(),
+        ..Default::default()
     };
     let mut ctx = Lowering {
         graph: &mut graph,
@@ -750,6 +900,14 @@ impl Lowering<'_> {
                 self.lower_redirected(node);
                 return;
             }
+            // `[ -f x ] && cat y` — the grammar calls this a `test_command`, not
+            // a `command`, but it IS one (`/usr/bin/[`) and it is a stage of the
+            // chain. Without a node for it the chain looks one member short, and
+            // `cat` reads as standalone.
+            "test_command" => {
+                self.lower_test(node);
+                return;
+            }
             _ => {}
         }
         for i in 0..node.child_count() {
@@ -770,13 +928,24 @@ impl Lowering<'_> {
         // its left to the START of the group on its right. Linking heads alone
         // gets `a || b ; c` wrong — the command before the `;` is `b`, while the
         // member's head is `a`.
+        //
+        // A connector must have been WRITTEN to join two members. `program` is
+        // lowered as a group so a top-level `a ; c` gets its `;`, but two
+        // statements on separate lines have no operator between them and are not
+        // one chain — inventing a `Seq` edge there would put every command in a
+        // multi-line script into one group, and `position = "only"` would stop
+        // matching anything.
         let mut members: Vec<(NodeId, NodeId)> = Vec::new();
-        let mut connectors: Vec<Connector> = Vec::new();
+        let mut pending: Option<Connector> = None;
         for child in children {
             if child.is_named() {
-                if let Some(ends) = self.walk_capturing_ends(*child) {
-                    members.push(ends);
+                let Some(ends) = self.walk_capturing_ends(*child) else {
+                    continue;
+                };
+                if let (Some(kind), Some(previous)) = (pending.take(), members.last()) {
+                    self.graph.link(previous.1, ends.0, EdgeKind::Flow(kind));
                 }
+                members.push(ends);
                 continue;
             }
             let kind = match child.utf8_text(self.source.as_bytes()).unwrap_or("") {
@@ -792,11 +961,7 @@ impl Lowering<'_> {
                 kind,
             }));
             self.graph.own(span, id);
-            connectors.push(kind);
-        }
-        for (i, pair) in members.windows(2).enumerate() {
-            let kind = connectors.get(i).copied().unwrap_or(Connector::Seq);
-            self.graph.link(pair[0].1, pair[1].0, EdgeKind::Flow(kind));
+            pending = Some(kind);
         }
         members.into_iter().map(|(head, _)| head).collect()
     }
@@ -924,6 +1089,49 @@ impl Lowering<'_> {
         let connector = interior_connector(&interior, self.source);
         let nested = self.lower_group(&interior);
         (id, nested, connector)
+    }
+
+    /// `[ -f x ]` / `[[ -z $a ]]`.
+    ///
+    /// The opening bracket is the program name — that is literally what it is —
+    /// and each operand of the expression becomes one argument. Not word for
+    /// word: a test expression is an expression, not a word list, so
+    /// `unary_expression` lowers as one operand rather than as `-f` plus `x`.
+    /// Nothing reads the operands; what this node exists for is to be a *member
+    /// of its chain*.
+    fn lower_test(&mut self, node: TsNode) -> NodeId {
+        let id = self.graph.push(Node::Command(CommandNode {
+            spans: Vec::new(),
+            name: None,
+            locality: Locality::Local,
+            host: None,
+            privilege: Privilege::Normal,
+        }));
+        let mut spans = Vec::new();
+        let mut name = None;
+        let mut positional = 0usize;
+        for i in 0..node.child_count() {
+            let Some(child) = node.child(i) else { continue };
+            let span = Span::of(child);
+            if !child.is_named() {
+                // `[` opens it, `]` closes it; only the opener is the name
+                if name.is_none() {
+                    name = Some(span.text(self.source).to_string());
+                    self.graph.own(span, id);
+                    spans.push(span);
+                }
+                continue;
+            }
+            let value = self.lower_value(child);
+            spans.extend(self.graph.nodes[value].spans().iter().copied());
+            self.graph.link(id, value, EdgeKind::Arg(positional));
+            positional += 1;
+        }
+        if let Node::Command(cmd) = &mut self.graph.nodes[id] {
+            cmd.name = name;
+            cmd.spans = spans;
+        }
+        id
     }
 
     fn lower_command(&mut self, node: TsNode) -> NodeId {

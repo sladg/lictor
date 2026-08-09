@@ -1,0 +1,51 @@
+name  = "a chain is a chain whichever separator joins it"
+issue = 13
+
+# Structure used to be re-derived by climbing the CST for the nearest
+# `pipeline`/`list` ancestor. A top-level `;` is neither — tree-sitter puts it
+# straight under `program` — so both commands looked *standalone*, and this rule
+# fired on `&&` and `|` while `;` sailed past. The #12 shape, one separator over.
+#
+# `group`, `position` and `connector` now come from the graph, which models a
+# chain as a chain regardless of which operator was written.
+
+[config]
+[[config.bash]]
+match  = "ls*"
+with   = ["git stash*"]
+action = "deny"
+reason = "paired with a stash"
+
+[[case]]
+name    = "regression guard: `&&` still matches"
+command = "ls && git stash"
+expect  = { decision = "deny", reason = "paired with a stash" }
+
+[[case]]
+name    = "and a pipe"
+command = "ls | git stash"
+expect  = { decision = "deny", reason = "paired with a stash" }
+
+[[case]]
+name    = "the bypass itself"
+command = "ls; git stash"
+expect  = { decision = "deny", reason = "paired with a stash" }
+
+[[case]]
+# nested binary lists used to put the two ends in different groups
+name    = "three stages, mixed connectors"
+command = "ls && echo mid && git stash"
+expect  = { decision = "deny", reason = "paired with a stash" }
+
+[[case]]
+# a NEWLINE is not a connector: two statements are two commands, not one chain.
+# Inventing a chain there would put every command in a script into one group and
+# `position = "only"` would stop matching anything.
+name    = "separate statements are not a chain"
+command = "ls\ngit stash"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "and neither command alone is a pair"
+command = "ls -la"
+expect  = { decision = "none" }

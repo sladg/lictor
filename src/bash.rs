@@ -80,6 +80,15 @@ pub struct Extraction {
     pub redirect_targets: Vec<String>,
     // names of functions defined in the source; path_check must not flag their calls
     pub functions: Vec<String>,
+    // The typed graph for this command line, lowered from the SAME tree this
+    // walk uses (issue #13, sub-task 4). Two views of one command, not two
+    // views of two parses: before this, a consumer that wanted the graph had to
+    // re-parse the source, and anything the graph knew that `words` did not was
+    // unreachable — which is how a redirect target stayed invisible in #29.
+    //
+    // Empty for a synthetic (re-parsed) extraction: its spans index the inner
+    // string, not `source`.
+    pub graph: crate::graph::Graph,
     // monotonic counter minting fresh Command::group ids across the whole
     // extraction, including nested re-parses (bash -c, eval) so ids never collide
     next_group: usize,
@@ -160,11 +169,19 @@ struct ParseCtx<'a> {
     /// valid in the original source
     synthetic: bool,
     depth: usize,
-    /// pipeline/list node id -> minted group id, scoped to THIS parse. A fresh
-    /// map per parse means nested re-parses can't collide with the outer tree's
-    /// node ids, which tree-sitter does not guarantee to be unique across
-    /// separate Trees.
+    /// chain root (a graph node id) -> minted group id, scoped to THIS parse. A
+    /// fresh map per parse means nested re-parses cannot collide with the outer
+    /// parse's ids.
     groups: HashMap<usize, usize>,
+    /// The graph for THIS parse — the structure `group_info` reads.
+    ///
+    /// Sub-task 4: `group`, `position`, `group_len` and `connector` used to be
+    /// re-derived here by climbing the CST, which is the second implementation
+    /// of something the graph already models, bugs included. A nested re-parse
+    /// (`bash -c …`) gets its own, because its spans index its own string.
+    graph: crate::graph::Graph,
+    /// every command's place in its chain, computed once per parse
+    chains: HashMap<usize, crate::graph::Group>,
 }
 
 impl<'a> ParseCtx<'a> {
@@ -174,6 +191,8 @@ impl<'a> ParseCtx<'a> {
             synthetic,
             depth,
             groups: HashMap::new(),
+            graph: crate::graph::Graph::default(),
+            chains: HashMap::new(),
         }
     }
 }
@@ -215,7 +234,16 @@ fn extract_into(ctx: &mut ParseCtx, out: &mut Extraction) {
     if tree.root_node().has_error() {
         block(out, "command could not be parsed as valid bash");
     }
+    // one parse, one tree: the graph is lowered from the same syntax this walk
+    // reads. Every parse gets one — `group_info` reads it — and the top-level
+    // one is handed to the extraction so consumers stop re-parsing the source.
+    ctx.graph = crate::graph::lower_from(&tree, ctx.source);
+    crate::graph::apply_maps(&mut ctx.graph, crate::cmdmap::Maps::shipped());
+    ctx.chains = ctx.graph.groups();
     walk(tree.root_node(), ctx, out);
+    if ctx.depth == 0 && !ctx.synthetic {
+        out.graph = std::mem::take(&mut ctx.graph);
+    }
 }
 
 fn walk(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
@@ -368,222 +396,82 @@ struct GroupInfo {
     connector: Connector,
 }
 
-// nearest enclosing pipeline/list node, climbing transparently through
-// `redirected_statement` (`cmd > file` inside a chain still counts as chained).
-// Returns the ancestor plus the direct child of that ancestor which contains
-// `node`, so callers can find `node`'s index among the ancestor's named children.
-fn enclosing_group(node: Node) -> Option<(Node, Node)> {
-    let mut site = node;
-    loop {
-        let parent = site.parent()?;
-        match parent.kind() {
-            "pipeline" | "list" => return Some((parent, site)),
-            "redirected_statement" => site = parent,
-            _ => return None,
-        }
-    }
-}
-
-fn connector_of(ancestor: Node, source: &str) -> Connector {
-    if ancestor.kind() == "pipeline" {
-        return Connector::Pipe;
-    }
-    // `list` is always binary with exactly one operator token among its children
-    let mut cursor = ancestor.walk();
-    for child in ancestor.children(&mut cursor) {
-        match child.utf8_text(source.as_bytes()).unwrap_or("") {
-            "&&" => return Connector::And,
-            "||" => return Connector::Or,
-            ";" => return Connector::Seq,
-            _ => {}
-        }
-    }
-    Connector::Seq
-}
-
-// ── heredoc re-parenting (#12) ──
+// ── structure comes from the graph (#13, sub-task 4) ──
 //
-// tree-sitter nests the rest of the pipeline INSIDE `heredoc_redirect`:
-// `cat <<EOF | grep x` parses as
+// `group`, `position`, `group_len` and `connector` used to be re-derived here by
+// climbing the CST for the nearest `pipeline`/`list` ancestor, with a second
+// implementation on top of that for the heredoc shape the grammar hides (#12).
+// That is the same structure `graph.rs` already models, maintained twice, and
+// the duplicate carried two bugs of its own:
 //
-//   redirected_statement
-//     command "cat"
-//     heredoc_redirect
-//       << / heredoc_start / pipeline("| grep x") / heredoc_body / heredoc_end
+//   ls; git stash                 a top-level `;` is not a `list`, so both
+//                                 commands looked standalone and a `with` rule
+//                                 that fires on `&&` and `|` was evadable
+//   curl x && grep a b && git c   binary lists nest, so `git c` was position 1
+//                                 of 2 rather than 2 of 3
 //
-// so the two ends of the pipe are not siblings, `enclosing_group` put them in
-// different groups, and every `piped_into`/`with` deny rule was evadable by
-// adding a heredoc.
-//
-// Correcting it here rather than in each predicate is the point: `group`,
-// `position`, `group_len` and `connector` are all minted in `group_info`, so
-// one fix reaches every current and future consumer of the structure and none
-// of them can rediscover the bug independently.
-//
-// The logical members are the statement's body followed by the commands the
-// heredoc swallowed, in source order.
-fn heredoc_split_group(node: Node) -> Option<(Node, Vec<Node>)> {
-    let stmt = enclosing_redirected_statement(node)?;
-    // an ordinary `cmd > file` has nothing nested; leave that path untouched
-    let nested = heredoc_members(stmt);
-    if nested.is_empty() {
-        return None;
-    }
-    let mut members = body_members(stmt);
-    members.extend(nested);
-    (members.len() > 1).then_some((stmt, members))
-}
-
-fn enclosing_redirected_statement(node: Node) -> Option<Node> {
-    let mut site = node;
-    loop {
-        let parent = site.parent()?;
-        match parent.kind() {
-            "redirected_statement" => return Some(parent),
-            "pipeline" | "list" | "heredoc_redirect" => site = parent,
-            _ => return None,
-        }
-    }
-}
-
-fn body_members(stmt: Node) -> Vec<Node> {
-    let mut out = Vec::new();
-    for i in 0..stmt.named_child_count() {
-        if let Some(child) = stmt.named_child(i)
-            && !is_redirect(child)
-        {
-            flatten_commands(child, &mut out);
-        }
-    }
-    out
-}
-
-// commands living inside this statement's heredoc redirects — the ones the
-// grammar's nesting hid
-fn heredoc_members(stmt: Node) -> Vec<Node> {
-    let mut out = Vec::new();
-    for i in 0..stmt.named_child_count() {
-        let Some(redirect) = stmt
-            .named_child(i)
-            .filter(|c| c.kind() == "heredoc_redirect")
-        else {
-            continue;
-        };
-        for j in 0..redirect.named_child_count() {
-            if let Some(inner) = redirect.named_child(j)
-                && !matches!(
-                    inner.kind(),
-                    "heredoc_start" | "heredoc_body" | "heredoc_end"
-                )
-            {
-                flatten_commands(inner, &mut out);
-            }
-        }
-    }
-    out
-}
-
-fn is_redirect(node: Node) -> bool {
-    matches!(
-        node.kind(),
-        "heredoc_redirect" | "file_redirect" | "herestring_redirect"
-    )
-}
-
-fn flatten_commands<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
-    match node.kind() {
-        "command" => out.push(node),
-        // pipelines nest right-associatively: `| a | b` is
-        // pipeline(|, pipeline(a, |, b)), so this has to recurse
-        "pipeline" | "list" | "redirected_statement" => {
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i)
-                    && !is_redirect(child)
-                {
-                    flatten_commands(child, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-// the connector joining a heredoc-split group. A nested `pipeline`/`list`
-// carries it (`<<EOF | grep x`); otherwise the operator sits as a direct child
-// of the redirect (`<<EOF && rm x` has no `list` wrapper at all).
-fn heredoc_connector(stmt: Node, source: &str) -> Connector {
-    for i in 0..stmt.named_child_count() {
-        let Some(redirect) = stmt
-            .named_child(i)
-            .filter(|c| c.kind() == "heredoc_redirect")
-        else {
-            continue;
-        };
-        for j in 0..redirect.named_child_count() {
-            match redirect.named_child(j).map(|c| (c, c.kind())) {
-                Some((_, "pipeline")) => return Connector::Pipe,
-                Some((inner, "list")) => return connector_of(inner, source),
-                _ => {}
-            }
-        }
-        let mut cursor = redirect.walk();
-        for child in redirect.children(&mut cursor) {
-            match child.utf8_text(source.as_bytes()).unwrap_or("") {
-                "|" => return Connector::Pipe,
-                "&&" => return Connector::And,
-                "||" => return Connector::Or,
-                ";" => return Connector::Seq,
-                _ => {}
-            }
-        }
-    }
-    Connector::Seq
-}
-
+// Both are fixed by asking the graph, and ~125 lines of CST climbing went with
+// them — including this file's copy of the heredoc re-parenting.
 fn group_info(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) -> GroupInfo {
-    // the heredoc-split shape first: its members are not siblings in the CST,
-    // so `enclosing_group` cannot see them
-    if let Some((stmt, members)) = heredoc_split_group(node)
-        && let Some(position) = members.iter().position(|m| m.id() == node.id())
-    {
-        let group = *ctx
-            .groups
-            .entry(stmt.id())
-            .or_insert_with(|| out.next_group_id());
-        return GroupInfo {
-            group,
-            position,
-            group_len: members.len(),
-            connector: heredoc_connector(stmt, ctx.source),
-        };
-    }
-    let Some((ancestor, site)) = enclosing_group(node) else {
-        return GroupInfo {
-            group: out.next_group_id(),
-            position: 0,
-            group_len: 1,
-            connector: Connector::Standalone,
-        };
+    let standalone = |out: &mut Extraction| GroupInfo {
+        group: out.next_group_id(),
+        position: 0,
+        group_len: 1,
+        connector: Connector::Standalone,
     };
-    let group = *ctx
-        .groups
-        .entry(ancestor.id())
-        .or_insert_with(|| out.next_group_id());
-    let mut position = 0;
-    let mut group_len = 0;
-    let mut cursor = ancestor.walk();
-    for child in ancestor.named_children(&mut cursor) {
-        if child.id() == site.id() {
-            position = group_len;
-        }
-        group_len += 1;
-    }
+    let Some(id) = graph_command_at(&ctx.graph, node) else {
+        return standalone(out);
+    };
+    let Some(chain) = ctx.chains.get(&id) else {
+        return standalone(out);
+    };
+    // the first member is a stable name for the chain within this parse, so two
+    // commands in one chain mint one group id
+    let Some(&key) = chain.members.first() else {
+        return standalone(out);
+    };
+    let (position, group_len, connector) = (chain.position, chain.len(), chain.connector);
+    let group = *ctx.groups.entry(key).or_insert_with(|| out.next_group_id());
     GroupInfo {
         group,
         position,
         group_len,
-        connector: connector_of(ancestor, ctx.source),
+        connector: match connector {
+            Some(crate::graph::Connector::Pipe) => Connector::Pipe,
+            Some(crate::graph::Connector::And) => Connector::And,
+            Some(crate::graph::Connector::Or) => Connector::Or,
+            Some(crate::graph::Connector::Seq) => Connector::Seq,
+            None => Connector::Standalone,
+        },
     }
+}
+
+/// The graph command this CST command was lowered into.
+///
+/// Both come from the same tree, so the program word's byte offset identifies
+/// it. The fallback covers a command whose name is itself a substitution
+/// (`$(which git) --version`), where the name owns no bytes of its own and the
+/// node's first span is its next word instead.
+fn graph_command_at(graph: &crate::graph::Graph, node: Node) -> Option<usize> {
+    let (start, end) = (node.start_byte(), node.end_byte());
+    let mut fallback = None;
+    for (id, command) in graph.commands() {
+        // a payload command (`rm` in `sudo rm x`) is a view of another stage,
+        // not a stage of its own, and owns no bytes
+        if graph.owned_spans(id).is_empty() {
+            continue;
+        }
+        let Some(first) = command.spans.first().map(|s| s.start) else {
+            continue;
+        };
+        if first == start {
+            return Some(id);
+        }
+        if first > start && first < end && fallback.is_none() {
+            fallback = Some(id);
+        }
+    }
+    fallback
 }
 
 // 5, already down from 7. `out`, `words`, `synthetic`, `variant` and `group`

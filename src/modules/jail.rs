@@ -165,14 +165,11 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
 
 /// The paths the recipes say this command references.
 ///
-/// Re-parses the source: the graph and `bash::Extraction` are still two views of
-/// the same command, which sub-task 4 exists to fix. Cheap enough here, and
-/// keeping them separate means this change cannot disturb the existing parse.
+/// Sub-task 4: the extraction carries its own graph, lowered from the same tree
+/// this walk read. This used to re-parse the source, because the graph and
+/// `bash::Extraction` were two views of two parses.
 fn referenced_paths(extraction: &Extraction) -> Vec<String> {
-    let Ok(maps) = crate::cmdmap::Maps::builtin() else {
-        return Vec::new();
-    };
-    crate::graph::lower_with_maps(&extraction.source, &maps).referenced_paths()
+    extraction.graph.referenced_paths()
 }
 
 /// Log where the two sources disagree, without acting on it.

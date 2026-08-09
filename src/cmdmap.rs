@@ -237,6 +237,18 @@ impl Maps {
         Ok(maps)
     }
 
+    /// Every shipped recipe, merged, parsed **once** per process.
+    ///
+    /// [`Maps::builtin`] parses forty-odd TOML files. That was tolerable when
+    /// one module called it once per command; now that every extraction carries
+    /// a graph, it would run on every hook invocation. A recipe that fails to
+    /// parse is a build-time bug — a test asserts every shipped file is valid —
+    /// so the fallback here is an empty map rather than a panic on the hot path.
+    pub fn shipped() -> &'static Maps {
+        static SHIPPED: std::sync::OnceLock<Maps> = std::sync::OnceLock::new();
+        SHIPPED.get_or_init(|| Maps::builtin().unwrap_or_default())
+    }
+
     /// Every shipped recipe, merged.
     ///
     /// Each file is parsed on its own so an error names the recipe it came
