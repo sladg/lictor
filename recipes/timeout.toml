@@ -1,6 +1,11 @@
 [[cmd]]
 name = "timeout"
+[cmd.flags]
+"-k" = { takes = true }
+"--kill-after" = { takes = true }
+"-s" = { takes = true }
+"--signal" = { takes = true }
 [[cmd.args]]
-slots = "rest"
+slots = "1+"
 kind = "cmd"
 effect = ["exec"]

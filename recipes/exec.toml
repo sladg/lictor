@@ -1,0 +1,6 @@
+[[cmd]]
+name = "exec"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

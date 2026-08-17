@@ -1,0 +1,20 @@
+[[cmd]]
+name = "taskset"
+[cmd.flags]
+"-c" = { takes = true }
+"--cpu-list" = { takes = true }
+[[cmd.args]]
+slots = "1+"
+kind = "cmd"
+effect = ["exec"]
+when = { without = ["-c", "--cpu-list", "-p", "--pid"] }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+when = { with = ["-c"], without = ["-p", "--pid"] }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+when = { with = ["--cpu-list"], without = ["-p", "--pid"] }

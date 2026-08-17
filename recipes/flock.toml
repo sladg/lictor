@@ -1,0 +1,18 @@
+[[cmd]]
+name = "flock"
+[cmd.flags]
+"-w" = { takes = true }
+"--timeout" = { takes = true }
+"-E" = { takes = true }
+"--conflict-exit-code" = { takes = true }
+"-c" = { takes = true, kind = "shell", effect = ["exec"] }
+"--command" = { takes = true, kind = "shell", effect = ["exec"] }
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["create"]
+[[cmd.args]]
+slots = "1+"
+kind = "cmd"
+effect = ["exec"]
+when = { without = ["-c", "--command"] }

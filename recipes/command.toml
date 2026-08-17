@@ -1,0 +1,7 @@
+[[cmd]]
+name = "command"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+when = { without = ["-v", "-V"] }

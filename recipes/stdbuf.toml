@@ -1,0 +1,10 @@
+[[cmd]]
+name = "stdbuf"
+[cmd.flags]
+"-i" = { takes = true }
+"-o" = { takes = true }
+"-e" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

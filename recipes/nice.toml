@@ -1,0 +1,9 @@
+[[cmd]]
+name = "nice"
+[cmd.flags]
+"-n" = { takes = true }
+"--adjustment" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

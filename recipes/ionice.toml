@@ -1,0 +1,10 @@
+[[cmd]]
+name = "ionice"
+[cmd.flags]
+"-c" = { takes = true }
+"-n" = { takes = true }
+"-p" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

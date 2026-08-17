@@ -1,0 +1,156 @@
+name  = "wrappers whose payload enters the graph"
+issue = 39
+
+[[case]]
+name    = "timeout: duration out of the way, payload enters the graph"
+command = "timeout 5 rm /tmp/x"
+expect  = { commands = ["timeout", "rm"], spawns = ["timeout spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "timeout -k: kill-after value is not the payload"
+command = "timeout -k 1 5 rm /tmp/x"
+expect  = { commands = ["timeout", "rm"], spawns = ["timeout spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "env -u: the unset name is consumed, rm is the payload"
+command = "env -u FOO rm /tmp/x"
+expect  = { commands = ["env", "rm"], spawns = ["env spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "nice bare"
+command = "nice /bin/sh"
+expect  = { commands = ["nice", "/bin/sh"], spawns = ["nice spawns /bin/sh"] }
+
+[[case]]
+name    = "nice -n consumes its level"
+command = "nice -n 10 rm /tmp/x"
+expect  = { commands = ["nice", "rm"], spawns = ["nice spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "stdbuf: attached -o0 is an unknown flag, payload unharmed"
+command = "stdbuf -o0 rm /tmp/x"
+expect  = { commands = ["stdbuf", "rm"], spawns = ["stdbuf spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "ionice class form"
+command = "ionice -c 3 rm /tmp/x"
+expect  = { commands = ["ionice", "rm"], spawns = ["ionice spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "ionice pid form has no payload"
+command = "ionice -p 123"
+expect  = { commands = ["ionice"], spawns = [], local = [] }
+
+[[case]]
+name    = "flock: lock file created, payload follows"
+command = "flock /tmp/lock rm /tmp/x"
+expect  = { commands = ["flock", "rm"], spawns = ["flock spawns rm"], local = [
+  "creates /tmp/lock",
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "flock -c: payload is a script, grafted like sh -c"
+command = "flock /tmp/lock -c 'rm /tmp/x'"
+expect  = { commands = ["flock", "rm"], spawns = ["flock spawns rm"], local = [
+  "creates /tmp/lock",
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "taskset mask form: payload starts at slot 1"
+command = "taskset 0x3 rm /tmp/x"
+expect  = { commands = ["taskset", "rm"], spawns = ["taskset spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "taskset -c: list is the flag's value, payload at slot 0"
+command = "taskset -c 0-3 rm /tmp/x"
+expect  = { commands = ["taskset", "rm"], spawns = ["taskset spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "taskset --cpu-list: long form, payload at slot 0"
+command = "taskset --cpu-list 0-3 rm /tmp/x"
+expect  = { commands = ["taskset", "rm"], spawns = ["taskset spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "taskset -p: pid form mints no payload"
+command = "taskset -p 0x3 1234"
+expect  = { commands = ["taskset"], spawns = [], local = [] }
+
+[[case]]
+name    = "cpulimit with -- boundary"
+command = "cpulimit -l 50 -- rm /tmp/x"
+expect  = { commands = ["cpulimit", "rm"], spawns = ["cpulimit spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "command runs its payload"
+command = "command git status"
+expect  = { commands = ["command", "git"], spawns = ["command spawns git"] }
+
+[[case]]
+name    = "command -v executes nothing"
+command = "command -v git"
+expect  = { commands = ["command"], spawns = [], local = [] }
+
+[[case]]
+name    = "builtin -V executes nothing"
+command = "builtin -V cd"
+expect  = { commands = ["builtin"], spawns = [], local = [] }
+
+[[case]]
+name    = "source reads its file"
+command = "source /tmp/x.sh"
+expect  = { commands = ["source"], local = ["reads /tmp/x.sh"] }
+
+[[case]]
+name    = "dot reads its file"
+command = ". /tmp/x.sh"
+expect  = { commands = ["."], local = ["reads /tmp/x.sh"] }
+
+[[case]]
+name    = "time hands its payload through"
+command = "time rm /tmp/x"
+expect  = { commands = ["time", "rm"], spawns = ["time spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "exec rm /tmp/x parses as an ordinary command"
+command = "exec rm /tmp/x"
+expect  = { commands = ["exec", "rm"], spawns = ["exec spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
