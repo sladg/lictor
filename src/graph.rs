@@ -186,7 +186,10 @@ pub struct ValueFacts {
     pub relative: bool,
     /// contains an unquoted glob metacharacter
     pub glob: bool,
-    /// fully static — every byte is known at parse time
+    /// fully static — every byte is known at parse time. Exception: `$HOME/x`
+    /// is lowered to `~/x` and comes out `literal: true, dynamic: false` even
+    /// though the source is a variable reference. No current consumer reads this
+    /// field, so the inconsistency is latent; widen the model if one arises.
     pub literal: bool,
     /// contains an expansion or substitution, so the value is not knowable
     pub dynamic: bool,
@@ -1048,8 +1051,7 @@ impl Lowering<'_> {
         // `echo a | cat <<EOF | grep x` the body is one `pipeline` member whose
         // head is `echo`, while the stage feeding `grep` is `cat`.
         let tail = (before..self.graph.nodes.len())
-            .filter(|i| matches!(self.graph.nodes[*i], Node::Command(_)))
-            .next_back();
+            .rfind(|i| matches!(self.graph.nodes[*i], Node::Command(_)));
 
         for redirect in children.iter().copied().filter(|c| is_redirect(*c)) {
             if redirect.kind() != "heredoc_redirect" {
@@ -1604,8 +1606,12 @@ fn elevates(program: &str) -> bool {
     matches!(basename(program), "sudo" | "doas" | "pkexec")
 }
 
-/// Mirrors `bash::resolve_text` — quoting removed, `None` when any part of the
-/// word is an expansion whose value is not knowable at parse time.
+/// Quoting removed, `None` when any part of the word is an expansion whose
+/// value is not knowable at parse time. Deliberately diverges from
+/// `bash::resolve_text`: `$HOME` maps to `~` here so the graph can emit path
+/// references for `$HOME/…` words. `bash::resolve_text` must stay `None` for
+/// those words — `resolve_word` uses `text.is_none()` to populate `word.raw`,
+/// and `match_contains` relies on `raw` for deny-only glob matching.
 fn resolve_text(node: TsNode, source: &str) -> Option<String> {
     let text = node.utf8_text(source.as_bytes()).ok()?;
     match node.kind() {
@@ -1617,6 +1623,22 @@ fn resolve_text(node: TsNode, source: &str) -> Option<String> {
                 parts.push(resolve_text(node.named_child(i)?, source)?);
             }
             Some(parts.join(""))
+        }
+        // $HOME and ${HOME} are knowable: map to ~ so the existing normalize
+        // path handles expansion. All other variables remain dynamic (None).
+        "simple_expansion" => {
+            let name = node.named_child(0)?.utf8_text(source.as_bytes()).ok()?;
+            (name == "HOME").then_some("~".to_string())
+        }
+        "expansion" => {
+            // ponytail: HOME only; operators (${#HOME}, ${!HOME}, ${HOME:-x})
+            // are anonymous in tree-sitter-bash so named_child_count is always
+            // 1 — check the operator field instead.
+            if node.child_by_field_name("operator").is_some() {
+                return None;
+            }
+            let name = node.named_child(0)?.utf8_text(source.as_bytes()).ok()?;
+            (name == "HOME").then_some("~".to_string())
         }
         _ => None,
     }

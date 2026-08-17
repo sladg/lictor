@@ -301,17 +301,15 @@ fn run_case(file: &CaseFile, case: &Case) -> Result<(), Vec<String>> {
                 problems.push(format!("expected no decision, got `{got}`"));
             }
         }
-        Some(want) => {
-            if decision.as_deref() != Some(want) {
-                problems.push(format!(
-                    "expected decision `{want}`, got {}",
-                    decision
-                        .as_deref()
-                        .map_or_else(|| "no decision".to_string(), |d| format!("`{d}`"))
-                ));
-            }
+        Some(want) if decision.as_deref() != Some(want) => {
+            problems.push(format!(
+                "expected decision `{want}`, got {}",
+                decision
+                    .as_deref()
+                    .map_or_else(|| "no decision".to_string(), |d| format!("`{d}`"))
+            ));
         }
-        None => {}
+        _ => {}
     }
 
     if let Some(want) = &case.expect.command {
