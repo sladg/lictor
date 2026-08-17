@@ -102,6 +102,11 @@ pub struct Arg {
     /// `build/**/*.o` has to be able to see the difference.
     #[serde(default)]
     pub recursive_with: Vec<String>,
+    /// payload arity override: when the payload is exactly one word, treat it as
+    /// this kind instead — `watch 'cat /etc/passwd'` is a script, `watch ls -la`
+    /// is a command
+    #[serde(default)]
+    pub single_word: Option<Kind>,
 }
 
 /// A guard on an argument entry.
@@ -364,6 +369,21 @@ impl Maps {
                         "command map: `{label}` assignment entry carries an effect — \
                          assignment-shaped arguments produce no edges"
                     ));
+                }
+                if let Some(sw) = arg.single_word {
+                    if arg.kind != Kind::Cmd || arg.slots.payload_start().is_none() {
+                        return Err(format!(
+                            "command map: `{label}` has `single_word` on a non-`cmd` or \
+                             non-payload argument — only a `cmd` entry with `rest` or `N+` \
+                             may use it"
+                        ));
+                    }
+                    if sw != Kind::Shell {
+                        return Err(format!(
+                            "command map: `{label}` `single_word` is `{sw:?}` — only `shell` \
+                             is supported"
+                        ));
+                    }
                 }
             }
             for (name, flag) in &program.flags {

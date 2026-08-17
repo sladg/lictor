@@ -2195,6 +2195,24 @@ fn apply_program(
         && let Some(&(program_word, index)) = slotted.get(at)
         && let Some(payload_name) = value_text(graph, program_word)
     {
+        // The payload is everything after the program word, IN SOURCE ORDER and
+        // including flags. Taking only the positionals dropped them: `sudo rm -rf
+        // x` lost the `-rf`, and `sudo grep -e pat file` never bound `-e` at all,
+        // so a flag carrying a path (`grep -f list`) lost its read edge too.
+        let inner: Vec<(NodeId, bool)> = words[index + 1..].to_vec();
+        // ponytail: single_word — one bare word routes through the shell path
+        // instead of the cmd path: `watch 'cat /etc/passwd'` re-parses the word
+        if inner.is_empty() && nested.single_word == Some(crate::cmdmap::Kind::Shell) {
+            emit_effects(
+                graph,
+                command,
+                program_word,
+                crate::cmdmap::Kind::Shell,
+                &nested.effect,
+                ctx,
+            );
+            return;
+        }
         // the machine, when the recipe names one. `ssh HOST cmd` says slot 0 is
         // a host and the rest is a command, and those two statements together
         // already say the command runs there.
@@ -2225,11 +2243,6 @@ fn apply_program(
                 emit_effects(graph, command, *id, arg.kind, &arg.effect, ctx);
             }
         }
-        // The payload is everything after the program word, IN SOURCE ORDER and
-        // including flags. Taking only the positionals dropped them: `sudo rm -rf
-        // x` lost the `-rf`, and `sudo grep -e pat file` never bound `-e` at all,
-        // so a flag carrying a path (`grep -f list`) lost its read edge too.
-        let inner: Vec<(NodeId, bool)> = words[index + 1..].to_vec();
         apply_program(graph, payload, &payload_name, &inner, ctx);
         return;
     }
