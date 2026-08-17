@@ -1697,10 +1697,92 @@ fn apply_maps_at(graph: &mut Graph, ctx: &Mapping) {
         let Some(name) = cmd.name.clone() else {
             continue;
         };
+        promote_plus_flags(graph, id, &name, ctx.maps);
         let words = ordered_words(graph, id);
         apply_program(graph, id, &name, &words, ctx);
     }
     apply_redirects(graph);
+}
+
+/// Promote `+name` value nodes to flags when the recipe for this program
+/// declares them. `+` is not a universal flag sigil — this is opt-in per
+/// program, so `date +%s` is unaffected (no `+` entries in date's recipe).
+///
+/// Runs before `apply_program` so `ordered_words` already sees the promoted
+/// nodes as flags, and the existing flag-argument binding machinery handles
+/// the rest with no changes. `Arg(n)` edges are renumbered to close the gap
+/// left by the promotion so dense-index consumers (#34, #39) stay correct.
+///
+/// Note: an undeclared `+` flag (e.g. `bash +x script.sh`) stays a
+/// positional and pushes the script out of slot 0. This is the intended
+/// trade-off — programs with no `+` entries in their recipe keep today's
+/// behaviour exactly.
+// graph, the command id, its name and the maps: four unrelated inputs,
+// no natural struct to bundle them into.
+#[allow(clippy::too_many_arguments)]
+fn promote_plus_flags(graph: &mut Graph, command: NodeId, name: &str, maps: &crate::cmdmap::Maps) {
+    let Some(program) = maps.lookup(name, &[]) else {
+        return;
+    };
+    if !program.flags.keys().any(|k| k.starts_with('+')) {
+        return;
+    }
+
+    // Collect edge indices and target node ids for all promotable words.
+    let candidates: Vec<(usize, NodeId, String)> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            if e.from != command {
+                return None;
+            }
+            // usize::MAX marks a NAME=val prefix — not a positional
+            let EdgeKind::Arg(n) = e.kind else {
+                return None;
+            };
+            if n == usize::MAX {
+                return None;
+            }
+            let flag_name = match &graph.nodes[e.to] {
+                Node::Value(v) => v.text.clone()?,
+                _ => return None,
+            };
+            if !flag_name.starts_with('+') || !program.flags.contains_key(&flag_name) {
+                return None;
+            }
+            Some((i, e.to, flag_name))
+        })
+        .collect();
+
+    for (edge_idx, node_id, flag_name) in candidates {
+        // Re-read the current Arg number; a previous iteration may have
+        // renumbered it already.
+        let EdgeKind::Arg(promoted_n) = graph.edges[edge_idx].kind else {
+            continue;
+        };
+        graph.edges[edge_idx].kind = EdgeKind::Has;
+
+        let spans = graph.nodes[node_id].spans().to_vec();
+        graph.nodes[node_id] = Node::Flag(FlagNode {
+            spans,
+            name: flag_name,
+        });
+
+        // Close the gap in Arg(n) numbering so dense-index consumers
+        // see a contiguous sequence.
+        for edge in graph.edges.iter_mut() {
+            if edge.from != command {
+                continue;
+            }
+            if let EdgeKind::Arg(ref mut m) = edge.kind
+                && *m > promoted_n
+                && *m != usize::MAX
+            {
+                *m -= 1;
+            }
+        }
+    }
 }
 
 /// Turn every redirect into a reference edge on the command it attaches to.
@@ -1827,47 +1909,6 @@ fn apply_program(
     let Some(program) = maps.lookup(name, &leading) else {
         // no map, no claims — the inverted default
         return;
-    };
-
-    // step 0: promote `+name` value nodes declared in the recipe to flags.
-    // `+` is not a universal sigil — only programs with explicit `+name` entries
-    // get this, so `date +%s` is untouched (no `+` flags in date's recipe).
-    let words_owned: Vec<(NodeId, bool)>;
-    let words: &[(NodeId, bool)] = if words.iter().any(|(id, is_flag)| {
-        !is_flag
-            && matches!(&graph.nodes[*id], Node::Value(v) if v.text.as_deref().is_some_and(|t| t.starts_with('+')))
-    }) {
-        let mut v = words.to_vec();
-        for (id, is_flag) in &mut v {
-            if *is_flag {
-                continue;
-            }
-            let name = match &graph.nodes[*id] {
-                Node::Value(val) => match &val.text {
-                    Some(t) if t.starts_with('+') => t.clone(),
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            if !program.flags.contains_key(&name)
-                && global.is_none_or(|g| !g.flags.contains_key(&name))
-            {
-                continue;
-            }
-            let spans = graph.nodes[*id].spans().to_vec();
-            graph.nodes[*id] = Node::Flag(FlagNode { spans, name });
-            for edge in graph.edges.iter_mut() {
-                if edge.from == command && edge.to == *id {
-                    edge.kind = EdgeKind::Has;
-                    break;
-                }
-            }
-            *is_flag = true;
-        }
-        words_owned = v;
-        &words_owned
-    } else {
-        words
     };
 
     // 1. bind flag arguments, which is what makes the slot numbers below mean
