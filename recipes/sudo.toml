@@ -9,5 +9,9 @@ name = "sudo"
 "-C" = { takes = true }
 [[cmd.args]]
 slots = "rest"
+kind = "assignment"
+
+[[cmd.args]]
+slots = "rest"
 kind = "cmd"
 effect = ["exec"]

@@ -1,0 +1,43 @@
+name  = "assignment-shaped arguments to env/sudo are consumed, not treated as the payload"
+issue = 40
+
+[[case]]
+name    = "env with one assignment reaches rm's delete effect"
+command = "env FOO=1 rm /tmp/x"
+expect  = { commands = ["env", "rm"], local = ["execs rm", "deletes /tmp/x"] }
+
+[[case]]
+name    = "sudo with two assignments reaches rm's delete effect"
+command = "sudo FOO=1 BAR=2 rm /tmp/x"
+expect  = { commands = ["sudo !root", "rm !root"], local = ["execs rm", "deletes /tmp/x"] }
+
+[[case]]
+name    = "env with no assignments is unchanged"
+command = "env rm /tmp/x"
+expect  = { commands = ["env", "rm"], local = ["execs rm", "deletes /tmp/x"] }
+
+[[case]]
+# env FOO=1 with nothing after the assignments: no payload, no claims, no panic
+name    = "env with only assignments and no payload produces no payload"
+command = "env FOO=1"
+expect  = { commands = ["env"], local = [] }
+
+[[case]]
+# rg has no assignment entry, so FOO=1 stays a positional (slot 0 → src/ path)
+name    = "rg FOO=1 is unaffected — no assignment entry in rg's recipe"
+command = "rg FOO=1 src/"
+expect  = { local = ["reads src/"] }
+
+[[case]]
+# env FOO=1 -- rm x: assignments consumed, -- skipped, rm is the payload
+name    = "env with assignment and explicit -- separator"
+command = "env FOO=1 -- rm /tmp/x"
+expect  = { commands = ["env", "rm"], local = ["execs rm", "deletes /tmp/x"] }
+
+[[case]]
+# 1=2 is not NAME=val (starts with digit), so the leading-run scan ends, and
+# 1=2 becomes the payload name. "1=2" has no recipe, so rm's delete effect on
+# /tmp/x is never claimed — silent, not wrong.
+name    = "digit-led lhs is not assignment-shaped: payload is 1=2, path is unclaimed"
+command = "env 1=2 rm /tmp/x"
+expect  = { commands = ["env", "1=2"], local = ["execs 1=2"] }
