@@ -561,11 +561,12 @@ impl Config {
         self.settings.jail
     }
 
+    // unknown strings fall through to Graph — only "heuristic" opts back in
     pub fn jail_paths(&self) -> JailPaths {
         match self.settings.jail_paths.as_deref() {
-            Some("graph") => JailPaths::Graph,
+            Some("heuristic") => JailPaths::Heuristic,
             Some("compare") => JailPaths::Compare,
-            _ => JailPaths::Heuristic,
+            _ => JailPaths::Graph,
         }
     }
 

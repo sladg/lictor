@@ -1870,7 +1870,6 @@ fn jail_flags_outside_paths() {
         "cp secrets.txt /tmp/x",
         "cat ../outside.txt",
         "ls src/../../other",
-        "rg pattern --path=/var/log/system.log",
     ] {
         let output = run_jailed(&policy, command);
         assert_eq!(
@@ -1879,6 +1878,21 @@ fn jail_flags_outside_paths() {
             "expected ask for: {command}\ngot: {output:?}"
         );
     }
+}
+
+#[test]
+fn jail_heuristic_flag_attached_path() {
+    // `--flag=/outside/path` — the heuristic extracts the value from any flag;
+    // the graph only sees what a recipe explicitly marks as a path argument, so
+    // a flag not in the recipe is a known graph false negative. Pin this with
+    // explicit jail_paths = "heuristic" so graph progress doesn't silently hide it.
+    let policy = format!("{}\njail_paths = \"heuristic\"", jail_policy("ask", ""));
+    let output = run_jailed(&policy, "rg pattern --path=/var/log/system.log");
+    assert_eq!(
+        decision(&output),
+        Some("ask".into()),
+        "heuristic must catch --flag=/outside/path"
+    );
 }
 
 #[test]

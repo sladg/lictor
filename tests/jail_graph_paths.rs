@@ -205,14 +205,14 @@ fn compare_decides_with_the_heuristic() {
 }
 
 #[test]
-fn the_default_is_unchanged() {
-    // no `jail_paths` at all behaves exactly as `heuristic`
+fn the_default_is_graph() {
+    // no `jail_paths` at all now behaves as `graph`
     let config = lictor::config::from_toml("[settings]\njail = \"deny\"\n", None).unwrap();
     for command in ["sed -n '/needle/p' README.md", "cat /etc/passwd"] {
         assert_eq!(
             jail::violations(&bash::extract(command), &config, "/repo"),
-            violations("heuristic", command),
-            "the default drifted from the heuristic for {command:?}"
+            violations("graph", command),
+            "the default drifted from graph for {command:?}"
         );
     }
 }
