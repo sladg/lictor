@@ -1,0 +1,42 @@
+name  = "+o / +O are treated as flags iff the recipe declares them"
+issue = 43
+
+# An undeclared `+` flag (e.g. `bash +x script.sh`) stays a positional and
+# pushes the script out of slot 0. This is the intended trade-off of the
+# recipe-gated approach — programs with no matching `+` entry keep today's
+# behaviour exactly.
+
+[[case]]
+name    = "+O consumes extglob and script.sh lands in slot 0"
+command = "bash +O extglob script.sh"
+expect  = { local = ["reads script.sh"], binds = ["+O=extglob"] }
+
+[[case]]
+name    = "+o consumes histexpand and script.sh lands in slot 0"
+command = "bash +o histexpand script.sh"
+expect  = { local = ["reads script.sh"], binds = ["+o=histexpand"] }
+
+[[case]]
+name    = "/etc/passwd in slot 0 is claimed — the jail-deny half of the slot recovery"
+command = "bash +O extglob /etc/passwd"
+expect  = { local = ["reads /etc/passwd"], binds = ["+O=extglob"] }
+
+[[case]]
+name    = "-O is unchanged"
+command = "bash -O extglob script.sh"
+expect  = { local = ["reads script.sh"], binds = ["-O=extglob"] }
+
+[[case]]
+name    = "sh +o is promoted the same way"
+command = "sh +o noglob script.sh"
+expect  = { local = ["reads script.sh"], binds = ["+o=noglob"] }
+
+[[case]]
+name    = "ksh +o is promoted the same way"
+command = "ksh +o noglob script.sh"
+expect  = { local = ["reads script.sh"], binds = ["+o=noglob"] }
+
+[[case]]
+name    = "date +%s is unchanged — no + flags in date's recipe"
+command = "date +%s"
+expect  = { local = [] }
