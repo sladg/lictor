@@ -7,6 +7,7 @@
 name = "sh"
 [cmd.flags]
 "-c" = { takes = true, kind = "shell", effect = ["exec"] }
+"-e" = {}
 "-o" = { takes = true }
 "+o" = { takes = true }
 # an rcfile is executed before the script is — a path, and an exec vector

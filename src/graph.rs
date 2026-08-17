@@ -1698,6 +1698,7 @@ fn apply_maps_at(graph: &mut Graph, ctx: &Mapping) {
             continue;
         };
         promote_plus_flags(graph, id, &name, ctx.maps);
+        split_short_flag_clusters(graph, id, &name, ctx.maps);
         let words = ordered_words(graph, id);
         apply_program(graph, id, &name, &words, ctx);
     }
@@ -1781,6 +1782,120 @@ fn promote_plus_flags(graph: &mut Graph, command: NodeId, name: &str, maps: &cra
             {
                 *m -= 1;
             }
+        }
+    }
+}
+
+/// Split clustered short flags when the recipe knows every individual letter but
+/// not the cluster as a whole.
+///
+/// `sh -ec 'script'` lowers `-ec` as one flag. The recipe has `-c` (takes a
+/// shell script) but not `-ec`, so the cluster misses every `when` guard —
+/// including `sh.toml`'s `without = ["-c"]` guard that prevents the script
+/// from being treated as a path. Splitting makes the guard machinery work.
+///
+/// Gating: split only when the full cluster is absent from the recipe AND
+/// every individual letter is present. A non-final letter with `takes = true`
+/// blocks the split (consuming the next char as a value is ambiguous).
+///
+/// Span allocation: the first letter inherits the leading dash (`-e` from
+/// `-ec` owns `[start, start+2)`). Each subsequent letter owns one byte:
+/// `-c` owns `[start+2, start+3)`. This keeps the segment partition
+/// non-overlapping (P1).
+// graph, command, name, maps: four unrelated inputs, no natural home.
+#[allow(clippy::too_many_arguments)]
+fn split_short_flag_clusters(
+    graph: &mut Graph,
+    command: NodeId,
+    name: &str,
+    maps: &crate::cmdmap::Maps,
+) {
+    let Some(program) = maps.lookup(name, &[]) else {
+        return;
+    };
+
+    let candidates: Vec<(NodeId, Vec<char>, Span)> = graph
+        .edges
+        .iter()
+        .filter_map(|e| {
+            if e.from != command || e.kind != EdgeKind::Has {
+                return None;
+            }
+            let Node::Flag(f) = &graph.nodes[e.to] else {
+                return None;
+            };
+            // short cluster: single dash, 3+ chars, not `--`
+            if !f.name.starts_with('-') || f.name.starts_with("--") || f.name.len() < 3 {
+                return None;
+            }
+            // full cluster name must be absent from the recipe
+            if program.flags.contains_key(&f.name) {
+                return None;
+            }
+            let letters: Vec<char> = f.name[1..].chars().collect();
+            let span = *f.spans.first()?;
+            Some((e.to, letters, span))
+        })
+        .collect();
+
+    for (node_id, letters, span) in candidates {
+        // every individual letter must be declared in the recipe
+        if !letters
+            .iter()
+            .all(|c| program.flags.contains_key(&format!("-{c}")))
+        {
+            continue;
+        }
+        // no non-final letter may take a value (ambiguous with consuming the next char)
+        if letters[..letters.len() - 1]
+            .iter()
+            .any(|c| program.flags.get(&format!("-{c}")).is_some_and(|f| f.takes))
+        {
+            continue;
+        }
+
+        // sub-spans: first letter owns the dash + char, rest own one byte each
+        let sub: Vec<(String, Span)> = letters
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let s = if i == 0 {
+                    Span {
+                        start: span.start,
+                        end: span.start + 2,
+                    }
+                } else {
+                    Span {
+                        start: span.start + 1 + i,
+                        end: span.start + 2 + i,
+                    }
+                };
+                (format!("-{c}"), s)
+            })
+            .collect();
+
+        // find and shrink the existing segment; insert new ones right after
+        let Some(si) = graph
+            .segments
+            .iter()
+            .position(|(s, id)| *id == node_id && s.start == span.start)
+        else {
+            continue;
+        };
+        graph.segments[si].0 = sub[0].1;
+
+        graph.nodes[node_id] = Node::Flag(FlagNode {
+            spans: vec![sub[0].1],
+            name: sub[0].0.clone(),
+        });
+
+        for (j, (n, s)) in sub[1..].iter().enumerate() {
+            let new_id = graph.push(Node::Flag(FlagNode {
+                spans: vec![*s],
+                name: n.clone(),
+            }));
+            graph.segments.insert(si + 1 + j, (*s, new_id));
+            graph.link(command, new_id, EdgeKind::Has);
         }
     }
 }

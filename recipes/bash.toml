@@ -7,6 +7,7 @@
 name = "bash"
 [cmd.flags]
 "-c" = { takes = true, kind = "shell", effect = ["exec"] }
+"-e" = {}
 "-o" = { takes = true }
 # `-O shopt_option` consumes the next word too. Undeclared, it stayed a
 # positional, so `bash -O extglob script.sh` claimed `extglob` as a file to read

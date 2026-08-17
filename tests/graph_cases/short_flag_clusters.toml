@@ -1,0 +1,60 @@
+name  = "clustered short flags are split when the recipe knows every letter"
+issue = 35
+
+# `sh -ec 'script'` lowers `-ec` as one flag named `-ec`. The recipe has `-c`
+# (with takes = true, kind = "shell") but not `-ec`, so the cluster misses the
+# `without = ["-c"]` guard and the script lands in slot 0 as a path — a #4
+# false positive that gets worse as shell payload coverage improves.
+#
+# The fix: split clusters whose full name is absent from the recipe but whose
+# every individual letter is declared there. Gating means `find -exec cat …`
+# is unaffected (find has no single-letter flags).
+
+[[case]]
+# The original false positive claimed `reads "/etc/x rm"` (the script string as
+# a path). After the fix the graph correctly claims `execs /etc/x` — the script
+# genuinely executes that program. Accurate ≠ false positive.
+name    = "sh -ec with absolute path in script body produces an exec claim, not a path-read"
+command = "sh -ec '/etc/x rm'"
+expect  = { local = ["execs /etc/x"] }
+
+[[case]]
+name    = "sh -ec 'cat /etc/passwd' produces the same edges as sh -c"
+command = "sh -ec 'cat /etc/passwd'"
+expect  = { commands = [
+  "sh",
+  "cat",
+], local = [
+  "execs cat",
+  "reads /etc/passwd",
+], spawns = ["sh spawns cat"] }
+
+[[case]]
+name    = "bash -ec 'cat /etc/passwd' likewise"
+command = "bash -ec 'cat /etc/passwd'"
+expect  = { commands = [
+  "bash",
+  "cat",
+], local = [
+  "execs cat",
+  "reads /etc/passwd",
+], spawns = ["bash spawns cat"] }
+
+[[case]]
+name    = "sh -c 'cat /etc/passwd' is unchanged"
+command = "sh -c 'cat /etc/passwd'"
+expect  = { commands = [
+  "sh",
+  "cat",
+], local = [
+  "execs cat",
+  "reads /etc/passwd",
+], spawns = ["sh spawns cat"] }
+
+[[case]]
+# `-exec` is a single-dash long flag. find's recipe has no single-letter flags,
+# so the gating rule blocks any split — the cluster check requires every letter
+# to be declared, and none are here.
+name    = "find -exec is never split — single-dash long flags must not be decomposed"
+command = "find . -exec cat /etc/passwd \\;"
+expect  = { local = ["reads ./**"] }
