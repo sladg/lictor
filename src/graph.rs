@@ -186,7 +186,10 @@ pub struct ValueFacts {
     pub relative: bool,
     /// contains an unquoted glob metacharacter
     pub glob: bool,
-    /// fully static — every byte is known at parse time
+    /// fully static — every byte is known at parse time. Exception: `$HOME/x`
+    /// is lowered to `~/x` and comes out `literal: true, dynamic: false` even
+    /// though the source is a variable reference. No current consumer reads this
+    /// field, so the inconsistency is latent; widen the model if one arises.
     pub literal: bool,
     /// contains an expansion or substitution, so the value is not knowable
     pub dynamic: bool,
@@ -1603,8 +1606,12 @@ fn elevates(program: &str) -> bool {
     matches!(basename(program), "sudo" | "doas" | "pkexec")
 }
 
-/// Mirrors `bash::resolve_text` — quoting removed, `None` when any part of the
-/// word is an expansion whose value is not knowable at parse time.
+/// Quoting removed, `None` when any part of the word is an expansion whose
+/// value is not knowable at parse time. Deliberately diverges from
+/// `bash::resolve_text`: `$HOME` maps to `~` here so the graph can emit path
+/// references for `$HOME/…` words. `bash::resolve_text` must stay `None` for
+/// those words — `resolve_word` uses `text.is_none()` to populate `word.raw`,
+/// and `match_contains` relies on `raw` for deny-only glob matching.
 fn resolve_text(node: TsNode, source: &str) -> Option<String> {
     let text = node.utf8_text(source.as_bytes()).ok()?;
     match node.kind() {
@@ -1624,8 +1631,10 @@ fn resolve_text(node: TsNode, source: &str) -> Option<String> {
             (name == "HOME").then_some("~".to_string())
         }
         "expansion" => {
-            // ponytail: HOME only, no operators — ${HOME:-x} has >1 named child
-            if node.named_child_count() != 1 {
+            // ponytail: HOME only; operators (${#HOME}, ${!HOME}, ${HOME:-x})
+            // are anonymous in tree-sitter-bash so named_child_count is always
+            // 1 — check the operator field instead.
+            if node.child_by_field_name("operator").is_some() {
                 return None;
             }
             let name = node.named_child(0)?.utf8_text(source.as_bytes()).ok()?;

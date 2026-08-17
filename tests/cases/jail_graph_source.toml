@@ -127,3 +127,15 @@ name    = "bare $HOME with no path suffix produces no path claim"
 command = "echo $HOME"
 cwd     = "/a/b/repo"
 expect  = { decision = "none" }
+
+[[case]]
+name    = "${#HOME} (length operator) produces no claim — not a path"
+command = "echo ${#HOME}"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "~/path is denied (tilde form, baseline for the $HOME cases)"
+command = "cat ~/outside.txt"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
