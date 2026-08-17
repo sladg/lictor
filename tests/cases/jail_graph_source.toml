@@ -95,3 +95,35 @@ name    = "including a relative program"
 command = "cd src && ./gen.sh"
 cwd     = "/a/b/repo"
 expect  = { decision = "none" }
+
+# ── $HOME / ${HOME} expansion (issue #42) ──
+
+[[case]]
+name    = "$HOME/path is denied the same as ~/path"
+command = "cat $HOME/.ssh/id_rsa"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "${HOME}/path (brace form) is denied"
+command = "cat ${HOME}/.ssh/id_rsa"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "quoted $HOME/path is denied"
+command = 'cat "$HOME/.ssh/id_rsa"'
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "unknown variable produces no claim"
+command = "cat $UNKNOWN_VAR/x"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "bare $HOME with no path suffix produces no path claim"
+command = "echo $HOME"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }

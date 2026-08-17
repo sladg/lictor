@@ -1048,8 +1048,7 @@ impl Lowering<'_> {
         // `echo a | cat <<EOF | grep x` the body is one `pipeline` member whose
         // head is `echo`, while the stage feeding `grep` is `cat`.
         let tail = (before..self.graph.nodes.len())
-            .filter(|i| matches!(self.graph.nodes[*i], Node::Command(_)))
-            .next_back();
+            .rfind(|i| matches!(self.graph.nodes[*i], Node::Command(_)));
 
         for redirect in children.iter().copied().filter(|c| is_redirect(*c)) {
             if redirect.kind() != "heredoc_redirect" {
@@ -1617,6 +1616,20 @@ fn resolve_text(node: TsNode, source: &str) -> Option<String> {
                 parts.push(resolve_text(node.named_child(i)?, source)?);
             }
             Some(parts.join(""))
+        }
+        // $HOME and ${HOME} are knowable: map to ~ so the existing normalize
+        // path handles expansion. All other variables remain dynamic (None).
+        "simple_expansion" => {
+            let name = node.named_child(0)?.utf8_text(source.as_bytes()).ok()?;
+            (name == "HOME").then_some("~".to_string())
+        }
+        "expansion" => {
+            // ponytail: HOME only, no operators — ${HOME:-x} has >1 named child
+            if node.named_child_count() != 1 {
+                return None;
+            }
+            let name = node.named_child(0)?.utf8_text(source.as_bytes()).ok()?;
+            (name == "HOME").then_some("~".to_string())
         }
         _ => None,
     }
