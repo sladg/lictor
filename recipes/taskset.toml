@@ -13,3 +13,8 @@ slots = "rest"
 kind = "cmd"
 effect = ["exec"]
 when = { with = ["-c"], without = ["-p", "--pid"] }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+when = { with = ["--cpu-list"], without = ["-p", "--pid"] }

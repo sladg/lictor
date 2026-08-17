@@ -2150,9 +2150,8 @@ fn apply_program(
         }
         // Emit effects for pre-payload positional slots — e.g. `flock`'s
         // lockfile at slot 0 before the payload at slot 1.
-        let pre_total = slotted.len();
         for (slot, (id, _)) in slotted[..at].iter().enumerate() {
-            let Some(arg) = program.arg_for(slot, pre_total, &present) else {
+            let Some(arg) = program.arg_for(slot, at, &present) else {
                 continue;
             };
             if arg.kind != crate::cmdmap::Kind::Cmd {

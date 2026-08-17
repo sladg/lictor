@@ -94,6 +94,14 @@ expect  = { commands = ["taskset", "rm"], spawns = ["taskset spawns rm"], local 
 ] }
 
 [[case]]
+name    = "taskset --cpu-list: long form, payload at slot 0"
+command = "taskset --cpu-list 0-3 rm /tmp/x"
+expect  = { commands = ["taskset", "rm"], spawns = ["taskset spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
 name    = "taskset -p: pid form mints no payload"
 command = "taskset -p 0x3 1234"
 expect  = { commands = ["taskset"], spawns = [], local = [] }
