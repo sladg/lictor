@@ -1,0 +1,32 @@
+name  = "jail checks write-redirect targets, not only argument words"
+issue = 29
+
+# cwd has no git repo above it — jail boundary is exactly that directory.
+
+[config]
+[config.settings]
+jail = "deny"
+
+[[case]]
+name    = "write redirect to outside-project path is a violation"
+command = "echo hi >> /etc/hosts"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "truncate redirect to outside-project path is a violation"
+command = "cmd > /tmp/out"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }
+
+[[case]]
+name    = "redirect to path inside the project is allowed"
+command = "echo x > src/generated.rs"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "redirect to /dev/null is allowed"
+command = "cmd > /dev/null"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }

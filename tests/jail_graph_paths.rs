@@ -137,24 +137,23 @@ fn the_extraction_carries_the_graph_it_was_parsed_from() {
 }
 
 #[test]
-fn a_redirect_target_is_a_path_the_graph_can_see() {
+fn a_redirect_target_is_a_path_the_jail_sees() {
     // Issue #29. A redirect target is not one of the command's WORDS, so the
-    // walk the jail does never looked at it: `echo x >> /etc/hosts` writes
+    // walk the jail did never looked at it: `echo x >> /etc/hosts` writes
     // outside the project and was invisible to both sources.
     //
-    // The graph models it — a redirect is shell syntax that opens a file
-    // whatever the program is — and the graph source no longer lets the old
-    // extractor's word list bound what it may say.
+    // Write-redirect targets are now fed through the same resolve-and-check-roots
+    // path that words already use, so both sources catch them.
     for (command, expected) in [
         ("echo x >> /etc/hosts", "/etc/hosts"),
         ("echo x > /etc/passwd", "/etc/passwd"),
-        ("cat < /etc/shadow", "/etc/shadow"),
         // an unmapped program cannot hide a write behind a redirect either
         ("frobnicate --quiet > /etc/passwd", "/etc/passwd"),
     ] {
-        assert!(
-            violations("heuristic", command).is_empty(),
-            "{command:?} — if the heuristic starts catching this, the comparison is moot"
+        assert_eq!(
+            violations("heuristic", command),
+            [expected],
+            "{command:?} must be caught by the heuristic source"
         );
         assert_eq!(
             violations("graph", command),
@@ -162,9 +161,19 @@ fn a_redirect_target_is_a_path_the_graph_can_see() {
             "{command:?} must be caught by the graph source"
         );
     }
+    // read redirect (`<`): only the graph sees it — not a write-redirect target,
+    // not a word arg, so the heuristic has no path to find it
+    assert!(violations("heuristic", "cat < /etc/shadow").is_empty());
+    assert_eq!(violations("graph", "cat < /etc/shadow"), ["/etc/shadow"]);
     // ...and a redirect inside the project is still nobody's business
-    assert!(violations("graph", "echo x > ./out.txt").is_empty());
+    for mode in ["heuristic", "graph"] {
+        assert!(
+            violations(mode, "echo x > ./out.txt").is_empty(),
+            "{mode}: redirect inside project should pass"
+        );
+    }
     // a descriptor dup names no file at all
+    assert!(violations("heuristic", "cmd 2>&1").is_empty());
     assert!(violations("graph", "cmd 2>&1").is_empty());
 }
 

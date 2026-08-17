@@ -128,16 +128,35 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
         found
     };
 
+    // redirect targets (echo x >> /etc/hosts) are structural, not word args —
+    // walk_words and graph.resolved_references both miss them; check here so
+    // both sources stay honest about write-redirect escapes (issue #29)
+    let redirect_paths = || {
+        extraction
+            .redirect_targets
+            .iter()
+            .filter_map(|raw| {
+                let candidate = path_candidate(raw);
+                (looks_like_path(candidate) || candidate.contains('/'))
+                    .then(|| normalize(candidate, cwd, &home))
+            })
+            .collect::<Vec<String>>()
+    };
+
     // Each source only lists paths; the trust check, the dedupe and the order
     // are shared, so the two cannot drift and `compare` compares like with like.
     match source {
-        JailPaths::Heuristic => outside(by_shape()),
-        JailPaths::Graph => outside(by_graph()),
+        JailPaths::Heuristic => outside([by_shape(), redirect_paths()].concat()),
+        JailPaths::Graph => outside([by_graph(), redirect_paths()].concat()),
         // record what the graph would have said, decide with the heuristic —
         // measuring the switch must not be the switch
         JailPaths::Compare => {
-            let old = outside(by_shape());
-            report_disagreement(extraction, &old, &outside(by_graph()));
+            let old = outside([by_shape(), redirect_paths()].concat());
+            report_disagreement(
+                extraction,
+                &old,
+                &outside([by_graph(), redirect_paths()].concat()),
+            );
             old
         }
     }
@@ -749,6 +768,23 @@ mod tests {
     #[test]
     fn duplicate_paths_reported_once() {
         assert_eq!(check("cat /etc/hosts /etc/hosts", &[]).len(), 1);
+    }
+
+    #[test]
+    fn write_redirect_outside_jail_is_violation() {
+        assert_eq!(check("echo hi >> /etc/hosts", &[]), vec!["/etc/hosts"]);
+        assert_eq!(check("cmd > /tmp/out", &[]), vec!["/tmp/out"]);
+    }
+
+    #[test]
+    fn write_redirect_inside_project_passes() {
+        assert!(check("echo x > src/generated.rs", &[]).is_empty());
+        assert!(check(&format!("echo x > {CWD}/src/out.txt"), &[]).is_empty());
+    }
+
+    #[test]
+    fn write_redirect_tilde_outside_project_is_violation() {
+        assert!(!check("echo x > ~/.bashrc", &[]).is_empty());
     }
 
     // CWD above doesn't exist on disk, so `git rev-parse` fails there and jail
