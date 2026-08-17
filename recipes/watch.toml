@@ -1,0 +1,14 @@
+# watch joins its arguments and runs them through `sh -c`. One word is a
+# script this parser can read; a word list is already a command. `watch -x`
+# (exec directly, no shell) is not modelled — a one-word `-x` payload with
+# spaces is pathological; accepted gap.
+[[cmd]]
+name = "watch"
+[cmd.flags]
+"-n" = { takes = true }
+"--interval" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+single_word = "shell"
+effect = ["exec"]

@@ -1,0 +1,36 @@
+name  = "watch — one word is a script, many words are a command"
+issue = 41
+
+[[case]]
+name    = "one word is a script"
+command = "watch 'cat /etc/passwd'"
+expect  = { commands = ["watch", "cat"], spawns = ["watch spawns cat"], local = [
+  "execs cat",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+name    = "a word list is a command, not a program named 'ls -la'"
+command = "watch ls -la"
+expect  = { commands = ["watch", "ls"], spawns = ["watch spawns ls"] }
+
+[[case]]
+name    = "the interval flag does not shift the payload"
+command = "watch -n 5 'rm /tmp/x'"
+expect  = { commands = ["watch", "rm"], spawns = ["watch spawns rm"], local = [
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "single bare word degenerates safely"
+command = "watch date"
+expect  = { commands = ["watch", "date"], spawns = ["watch spawns date"] }
+
+[[case]]
+name    = "a pipeline inside the script grafts whole"
+command = "watch 'cat /etc/passwd | wc -l'"
+expect  = { commands = ["watch", "cat", "wc"], spawns = [
+  "watch spawns cat",
+  "watch spawns wc",
+] }
