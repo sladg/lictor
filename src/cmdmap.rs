@@ -210,6 +210,10 @@ pub enum Kind {
     /// `SHELLS` table in `src/bash.rs` — one of the hand-maintained lists issue
     /// #13 exists to delete.
     Shell,
+    /// a leading run of `NAME=val` arguments that precede a nested command,
+    /// as in `env FOO=1 rm x` or `sudo BAR=2 rm x`. Consumed words produce no
+    /// edges — symmetric with prefix assignments (`FOO=1 rm x`).
+    Assignment,
     // ── declared, not yet consumed ──
     /// a set of paths: a root taken with what is beneath it
     PathSet,
@@ -351,6 +355,12 @@ impl Maps {
                         arg.slots
                     ));
                 }
+                if arg.kind == Kind::Assignment && !arg.effect.is_empty() {
+                    return Err(format!(
+                        "command map: `{label}` assignment entry carries an effect — \
+                         assignment-shaped arguments produce no edges"
+                    ));
+                }
             }
             for (name, flag) in &program.flags {
                 if !flag.takes && flag.kind != Kind::None {
@@ -446,6 +456,12 @@ impl Program {
         self.args
             .iter()
             .find(|a| a.kind == Kind::Cmd && a.slots.payload_start().is_some())
+    }
+
+    /// Whether this program's recipe declares that leading `NAME=val` positionals
+    /// should be consumed before the payload.
+    pub fn assignment_entry(&self) -> Option<&Arg> {
+        self.args.iter().find(|a| a.kind == Kind::Assignment)
     }
 
     /// The slot naming the machine a nested command runs on, if this program has

@@ -1999,6 +1999,20 @@ fn ordered_words(graph: &Graph, command: NodeId) -> Vec<(NodeId, bool)> {
     out.into_iter().map(|(id, flag, _)| (id, flag)).collect()
 }
 
+fn is_assignment_shaped(s: &str) -> bool {
+    let Some((name, _)) = s.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(i, b)| {
+            if i == 0 {
+                b.is_ascii_alphabetic() || b == b'_'
+            } else {
+                b.is_ascii_alphanumeric() || b == b'_'
+            }
+        })
+}
+
 // graph, the command being mapped, its name, its words and the maps: five
 // unrelated inputs to one traversal, with no two travelling together
 #[allow(clippy::too_many_arguments)]
@@ -2063,6 +2077,25 @@ fn apply_program(
     //    anything — two of them for `aws s3 cp`
     let offset = program.subcommand_depth();
     let slotted: Vec<(NodeId, usize)> = positionals.iter().skip(offset).copied().collect();
+
+    // 2.5 when the recipe declares an assignment entry, skip the leading run of
+    //     NAME=val positionals — they occupy no slot (symmetric with prefix
+    //     assignments) and produce no edges. Dynamic words (`FOO=$(x)`) stop the
+    //     run: value_text is None, so the scan ends there and the payload name is
+    //     unreadable, leaving the graph silent rather than wrong.
+    let slotted = if program.assignment_entry().is_some() {
+        let skip = slotted
+            .iter()
+            .take_while(|(id, _)| {
+                value_text(graph, *id)
+                    .as_deref()
+                    .is_some_and(is_assignment_shaped)
+            })
+            .count();
+        slotted[skip..].to_vec()
+    } else {
+        slotted
+    };
 
     // 3. the payload of a wrapper is another program, running under its own map
     //    and — for `ssh` and friends — on another machine
