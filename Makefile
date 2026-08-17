@@ -9,7 +9,7 @@ TAP_REPO := git@github.com:sladg/homebrew-tap.git
 # and orders `README.md` among the lowercase names, while C puts it first. Without
 # this the file's contents depend on who ran `make llms`, and the check below
 # fails for whoever has the other locale.
-LLMS = { cat README.md; find docs -name '*.md' | LC_ALL=C sort | xargs cat; }
+LLMS = { cat README.md; git ls-files 'docs/**/*.md' | LC_ALL=C sort | xargs cat; }
 
 # one-shot gate: format check + strict clippy + build + tests + docs freshness.
 # `.github/workflows/ci.yml` runs exactly this, so a local run and CI cannot
