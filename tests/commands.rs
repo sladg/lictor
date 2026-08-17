@@ -1422,13 +1422,14 @@ fn strip_deny_mode_throws_bin_paths() {
 
 #[test]
 fn shell_write_bans_file_authoring() {
-    let policy = "[settings]\non_shell_write = \"deny\"\n";
-    // content emitters writing a file -> use the Write/Edit tool
+    let policy = "[[path]]\nmatch = [\"**\"]\non = [\"write\", \"create\"]\naction = \"deny\"\nhint = \"author files with the Write/Edit tool\"\n";
+    // any command writing to a file: path rule with on=["write","create"] catches all of them
     for case in [
         "cat >> src/x.rs <<'EOF'\nfn x() {}\nEOF",
         "echo hi > notes.txt",
         "printf '%s' x >> config.toml",
         "make build && echo done > out.txt",
+        "cargo build > build.log",
     ] {
         let out = run_with(
             policy,
@@ -1443,12 +1444,8 @@ fn shell_write_bans_file_authoring() {
             "expected deny for: {case}\ngot: {out:?}"
         );
     }
-    // output capture and reads are NOT file-authoring — left alone
-    for case in [
-        "cargo build > build.log",
-        "cat README.md",
-        "echo hi > /dev/null",
-    ] {
+    // reads and /dev/null are not file writes — left alone
+    for case in ["cat README.md", "echo hi > /dev/null"] {
         let out = run_with(
             policy,
             "PreToolUse",

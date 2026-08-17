@@ -352,8 +352,8 @@ fn default_policy_asks_on_lictor_config_touch() {
 
 #[test]
 fn default_policy_asks_on_redirect_into_settings() {
-    // no content-emitter involved (jq isn't on_shell_write's radar) — the
-    // [[path]] rule alone must catch the redirect target
+    // no content-emitter involved — the [[path]] rule must catch the redirect
+    // target regardless of what program produces the output
     let out = pre_with_cwd(
         "Bash",
         json!({"command": "jq . tmp.json > .claude/settings.json"}),

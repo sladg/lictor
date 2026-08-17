@@ -120,6 +120,8 @@ pub struct PathRule {
     #[serde(default)]
     pub hint: Option<String>,
     #[serde(default)]
+    pub on: Option<Vec<crate::cmdmap::Effect>>,
+    #[serde(default)]
     pub modes: HashMap<String, Action>,
 }
 
@@ -214,10 +216,6 @@ pub struct Settings {
     // a command prefixed by a code-injecting env var (LD_PRELOAD, LESSOPEN, ...); default deny
     #[serde(default)]
     pub on_dangerous_env: Option<Action>,
-    // content emitters (cat/echo/printf/tee) writing a file via redirection — the
-    // agent should author files with the Write/Edit tool. Default off.
-    #[serde(default)]
-    pub on_shell_write: Option<Action>,
     // program words that are bin paths (/usr/local/bin/x, ./node_modules/.bin/x):
     // rewrite|warn|ask|deny. Default off. Trims tokens; basename must resolve on PATH.
     #[serde(default)]
@@ -405,9 +403,6 @@ impl Config {
         }
         if other.settings.on_dangerous_env.is_some() {
             self.settings.on_dangerous_env = other.settings.on_dangerous_env;
-        }
-        if other.settings.on_shell_write.is_some() {
-            self.settings.on_shell_write = other.settings.on_shell_write;
         }
         if other.settings.strip_program_paths.is_some() {
             self.settings.strip_program_paths = other.settings.strip_program_paths;
@@ -602,11 +597,6 @@ impl Config {
 
     pub fn on_dangerous_env(&self) -> Action {
         self.settings.on_dangerous_env.unwrap_or(Action::Deny)
-    }
-
-    // off by default: shell file-authoring is a workflow nudge, not a security signal
-    pub fn on_shell_write(&self) -> Option<Action> {
-        self.settings.on_shell_write
     }
 
     pub fn strip_program_paths(&self) -> Option<Action> {
