@@ -1,0 +1,22 @@
+name  = "+o / +O are treated as flags iff the recipe declares them"
+issue = 43
+
+[[case]]
+name    = "+O consumes extglob and script.sh lands in slot 0"
+command = "bash +O extglob script.sh"
+expect  = { local = ["reads script.sh"], binds = ["+O=extglob"] }
+
+[[case]]
+name    = "+o consumes histexpand and script.sh lands in slot 0"
+command = "bash +o histexpand script.sh"
+expect  = { local = ["reads script.sh"], binds = ["+o=histexpand"] }
+
+[[case]]
+name    = "-O is unchanged"
+command = "bash -O extglob script.sh"
+expect  = { local = ["reads script.sh"], binds = ["-O=extglob"] }
+
+[[case]]
+name    = "date +%s is unchanged — no + flags in date's recipe"
+command = "date +%s"
+expect  = { local = [] }

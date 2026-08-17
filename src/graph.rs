@@ -1829,6 +1829,47 @@ fn apply_program(
         return;
     };
 
+    // step 0: promote `+name` value nodes declared in the recipe to flags.
+    // `+` is not a universal sigil — only programs with explicit `+name` entries
+    // get this, so `date +%s` is untouched (no `+` flags in date's recipe).
+    let words_owned: Vec<(NodeId, bool)>;
+    let words: &[(NodeId, bool)] = if words.iter().any(|(id, is_flag)| {
+        !is_flag
+            && matches!(&graph.nodes[*id], Node::Value(v) if v.text.as_deref().is_some_and(|t| t.starts_with('+')))
+    }) {
+        let mut v = words.to_vec();
+        for (id, is_flag) in &mut v {
+            if *is_flag {
+                continue;
+            }
+            let name = match &graph.nodes[*id] {
+                Node::Value(val) => match &val.text {
+                    Some(t) if t.starts_with('+') => t.clone(),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if !program.flags.contains_key(&name)
+                && global.is_none_or(|g| !g.flags.contains_key(&name))
+            {
+                continue;
+            }
+            let spans = graph.nodes[*id].spans().to_vec();
+            graph.nodes[*id] = Node::Flag(FlagNode { spans, name });
+            for edge in graph.edges.iter_mut() {
+                if edge.from == command && edge.to == *id {
+                    edge.kind = EdgeKind::Has;
+                    break;
+                }
+            }
+            *is_flag = true;
+        }
+        words_owned = v;
+        &words_owned
+    } else {
+        words
+    };
+
     // 1. bind flag arguments, which is what makes the slot numbers below mean
     //    anything
     //

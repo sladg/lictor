@@ -12,6 +12,8 @@ name = "bash"
 # positional, so `bash -O extglob script.sh` claimed `extglob` as a file to read
 # and lost `script.sh` — a false positive and a miss from the same slot shift.
 "-O" = { takes = true }
+"+O" = { takes = true }
+"+o" = { takes = true }
 # an rcfile is executed before the script is — a path, and an exec vector
 "--rcfile" = { takes = true, kind = "path", effect = ["read"] }
 "--init-file" = { takes = true, kind = "path", effect = ["read"] }
