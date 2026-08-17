@@ -1,0 +1,79 @@
+name  = "find -exec payloads"
+issue = 34
+
+[[case]]
+name    = "the payload's own argument is a real reference"
+command = 'find . -exec cat /etc/passwd \;'
+expect  = { commands = ["find", "cat"], spawns = ["find spawns cat"], local = [
+  "reads ./**",
+  "execs cat",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+name    = "quoted terminator spells the same command"
+command = "find . -exec cat /etc/passwd ';'"
+expect  = { commands = ["find", "cat"], spawns = ["find spawns cat"], local = [
+  "reads ./**",
+  "execs cat",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+# {} suppressed: it is find's per-match placeholder, not a literal path claim
+name    = "+ terminator, {} not a literal path claim"
+command = "find . -name '*.rs' -exec rm {} +"
+expect  = { commands = ["find", "rm"], spawns = ["find spawns rm"], local = [
+  "reads ./**",
+  "execs rm",
+] }
+
+[[case]]
+name    = "payload flags bind under the payload's recipe"
+command = 'find . -exec grep -e root /etc/passwd \;'
+expect  = { commands = ["find", "grep"], spawns = ["find spawns grep"], local = [
+  "reads ./**",
+  "execs grep",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+name    = "-execdir likewise"
+command = 'find . -execdir cat /etc/passwd \;'
+expect  = { commands = ["find", "cat"], spawns = ["find spawns cat"], local = [
+  "reads ./**",
+  "execs cat",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+name    = "-ok is ;-only"
+command = 'find . -ok rm /tmp/x \;'
+expect  = { commands = ["find", "rm"], spawns = ["find spawns rm"], local = [
+  "reads ./**",
+  "execs rm",
+  "deletes /tmp/x",
+] }
+
+[[case]]
+name    = "no -exec: nothing changes"
+command = "find . -name '*.rs'"
+expect  = { commands = ["find"], spawns = [], local = ["reads ./**"] }
+
+[[case]]
+name    = "missing terminator consumes to the end"
+command = "find . -exec cat /etc/passwd"
+expect  = { commands = ["find", "cat"], spawns = ["find spawns cat"], local = [
+  "reads ./**",
+  "execs cat",
+  "reads /etc/passwd",
+] }
+
+[[case]]
+# {} suppressed; root slot /tmp/x survives with its pathset
+name    = "the root slot survives the consumed run"
+command = "find /tmp/x -name '*.rs' -exec rm {} +"
+expect  = { commands = ["find", "rm"], spawns = ["find spawns rm"], local = [
+  "reads /tmp/x/**",
+  "execs rm",
+] }

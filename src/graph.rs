@@ -2047,9 +2047,76 @@ fn apply_program(
     // payload can be taken as the rest of the line rather than as the
     // positionals alone — `sudo grep -e pat file` must hand grep its `-e`, not
     // just `pat` and `file`.
+
+    // 1a. Pre-pass for `until` flags (e.g. find's -exec/-execdir/-ok/-okdir):
+    // consume the word run up to the terminator, spawn a payload command, and
+    // record consumed indices so the main loop below never sees them as
+    // positionals (which would shift find's own slot count).
+    let mut until_consumed: std::collections::BTreeSet<usize> = Default::default();
+    for (i, (id, is_flag)) in words.iter().enumerate() {
+        if !is_flag {
+            continue;
+        }
+        let Some(spec) = flag_spec(graph, program, *id)
+            .or_else(|| global.and_then(|g| flag_spec(graph, g, *id)))
+        else {
+            continue;
+        };
+        if spec.until.is_empty() {
+            continue;
+        }
+        let terminators = spec.until.clone();
+        let flag_effect = spec.effect.clone();
+        let run_start = i + 1;
+        let mut run_end = run_start;
+        let mut found_terminator = false;
+        let mut j = run_start;
+        while j < words.len() {
+            let (wid, _) = words[j];
+            if let Some(text) = value_text(graph, wid)
+                && terminators.iter().any(|t| matches_terminator(&text, t))
+            {
+                until_consumed.insert(j);
+                run_end = j;
+                found_terminator = true;
+                break;
+            }
+            j += 1;
+        }
+        if !found_terminator {
+            run_end = words.len();
+        }
+        for k in run_start..run_end {
+            until_consumed.insert(k);
+        }
+        let run: Vec<(NodeId, bool)> = words[run_start..run_end].to_vec();
+        if let Some(&(program_word, _)) = run.first()
+            && let Some(payload_name) = value_text(graph, program_word)
+        {
+            let payload = spawn_payload(
+                graph,
+                command,
+                Payload {
+                    program_word,
+                    name: payload_name.clone(),
+                    machine: None,
+                },
+            );
+            graph.link(command, payload, EdgeKind::Spawns);
+            if flag_effect.contains(&crate::cmdmap::Effect::Exec) {
+                graph.link(command, payload, EdgeKind::Execs);
+            }
+            let inner: Vec<(NodeId, bool)> = run[1..].to_vec();
+            apply_program(graph, payload, &payload_name, &inner, ctx);
+        }
+    }
+
     let mut positionals: Vec<(NodeId, usize)> = Vec::new();
     let mut pending_flag: Option<NodeId> = None;
     for (index, (id, is_flag)) in words.iter().enumerate() {
+        if until_consumed.contains(&index) {
+            continue;
+        }
         if let Some(flag) = pending_flag.take() {
             graph.link(flag, *id, EdgeKind::Takes);
             if let Some(spec) = flag_spec(graph, program, flag)
@@ -2172,6 +2239,10 @@ fn apply_program(
         let Some(arg) = program.arg_for(slot, total, &present) else {
             continue;
         };
+        // {} is find's -exec placeholder for each match, not a literal path claim
+        if matches!(&graph.nodes[*value], Node::Value(v) if v.raw == "{}") {
+            continue;
+        }
         let target = match arg.kind {
             // a set is its own node: the effects point at everything beneath the
             // root, not at the word that named it
@@ -2448,6 +2519,13 @@ fn spawn_script(graph: &mut Graph, script_arg: Script, ctx: &Mapping) {
     }
 }
 
+/// `\;` (word node) and `';'` (raw_string) both mean the POSIX terminator `;`.
+/// `resolve_text` strips quotes but leaves the backslash escape on word nodes,
+/// so strip a leading `\` before comparing.
+fn matches_terminator(text: &str, terminator: &str) -> bool {
+    text == terminator || text.strip_prefix('\\').is_some_and(|t| t == terminator)
+}
+
 fn flag_spec<'a>(
     graph: &Graph,
     program: &'a crate::cmdmap::Program,
@@ -2486,6 +2564,12 @@ fn emit_effects(
     // only kinds that name something the graph can point at produce edges; the
     // rest are recorded in the map for later stages
     if !kind.is_path() {
+        return;
+    }
+    // {} is find's -exec placeholder for each match, not a literal path claim
+    if let Node::Value(v) = &graph.nodes[value]
+        && v.raw == "{}"
+    {
         return;
     }
     // Locality is NOT checked here. An edge says what the command does to what

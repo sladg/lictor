@@ -54,7 +54,11 @@ expect  = { commands = [
 [[case]]
 # `-exec` is a single-dash long flag. find's recipe has no single-letter flags,
 # so the gating rule blocks any split — the cluster check requires every letter
-# to be declared, and none are here.
+# to be declared, and none are here. Issue #34 now makes the payload visible.
 name    = "find -exec is never split — single-dash long flags must not be decomposed"
 command = "find . -exec cat /etc/passwd \\;"
-expect  = { local = ["reads ./**"] }
+expect  = { commands = ["find", "cat"], spawns = ["find spawns cat"], local = [
+  "reads ./**",
+  "execs cat",
+  "reads /etc/passwd",
+] }
