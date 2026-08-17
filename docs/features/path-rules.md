@@ -27,6 +27,35 @@ action = "ask"
 hint   = "touching credentials — confirm intent"
 ```
 
+### Effect filter (`on`)
+
+Add `on` to scope a rule to specific effects. Omit it to match every effect (today's default behaviour).
+
+```toml
+# deny writes to /etc but leave reads alone
+[[path]]
+match  = ["/etc/**"]
+on     = ["write", "create"]
+action = "deny"
+hint   = "author files with the Write/Edit tool"
+
+# read anywhere, write only inside the project
+[[path]]
+match  = ["/Users/me/project/**"]
+action = "allow"
+
+[[path]]
+match  = ["**"]
+on     = ["write", "create", "delete"]
+action = "ask"
+```
+
+Valid spellings: `read` / `write` / `delete` / `create` / `exec`.
+
+Matching semantics: the rule's `on` set and the path's known effect set must **intersect** — first eligible rule whose globs match wins. Rule order is otherwise unchanged (an early `allow` still shadows a later `deny`).
+
+`on` requires `jail_paths = "graph"` (the default). Heuristic candidates carry no effect information and never match `on` rules. `[[delete]]` rules ignore `on` — a delete rule is effect-scoped by construction.
+
 ## What happens
 
 ```

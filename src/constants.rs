@@ -61,10 +61,6 @@ pub const DEVICE_WRITE_GLOBS: &[&str] = &[
     "/proc/sysrq-trigger",
 ];
 
-// ── content emitters: writing a file with one of these via redirection is
-//    file-authoring the agent should do with the Write/Edit tool (on_shell_write) ──
-pub const CONTENT_EMITTERS: &[&str] = &["cat", "echo", "printf", "tee"];
-
 // ── bash/zsh builtins and keywords that run without a PATH entry; the
 //    path-check module must not flag them as "not found" ──
 pub const SHELL_BUILTINS: &[&str] = &[

@@ -174,6 +174,21 @@ fn run(event: &str, tool: &str, tool_input: Value, tool_response: Option<Value>)
     run_with(POLICY, event, tool, tool_input, tool_response)
 }
 
+fn run_bash_with_cwd(policy: &str, command: &str, cwd: &str) -> Option<Value> {
+    let input: HookInput = serde_json::from_value(json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "cwd": cwd,
+    }))
+    .unwrap();
+    let output = match lictor::config::from_toml(policy, None) {
+        Ok(config) => evaluate(&input, &config),
+        Err(error) => Some(lictor::engine::error_output("PreToolUse", &error)),
+    };
+    output.map(|o| serde_json::to_value(o).unwrap()["hookSpecificOutput"].take())
+}
+
 // run with a fully-specified input value (needed for `error`/`cwd` fields); returns additionalContext
 fn run_ctx(policy: &str, input_value: Value) -> Option<String> {
     let config = lictor::config::from_toml(policy, None).expect("test policy parses");
@@ -1422,40 +1437,27 @@ fn strip_deny_mode_throws_bin_paths() {
 
 #[test]
 fn shell_write_bans_file_authoring() {
-    let policy = "[settings]\non_shell_write = \"deny\"\n";
-    // content emitters writing a file -> use the Write/Edit tool
+    let policy = "[[path]]\nmatch = [\"**\"]\non = [\"write\", \"create\"]\naction = \"deny\"\nhint = \"author files with the Write/Edit tool\"\n";
+    const CWD: &str = "/Users/nobody/project";
+    // any command writing to a file: broader than the old on_shell_write (content-emitter
+    // list) — the path rule catches every writer, including build-log redirects
     for case in [
         "cat >> src/x.rs <<'EOF'\nfn x() {}\nEOF",
         "echo hi > notes.txt",
         "printf '%s' x >> config.toml",
         "make build && echo done > out.txt",
+        "cargo build > build.log", // intentional broadening: not a content emitter, still writes
     ] {
-        let out = run_with(
-            policy,
-            "PreToolUse",
-            "Bash",
-            json!({ "command": case }),
-            None,
-        );
+        let out = run_bash_with_cwd(policy, case, CWD);
         assert_eq!(
             decision(&out),
             Some("deny".into()),
             "expected deny for: {case}\ngot: {out:?}"
         );
     }
-    // output capture and reads are NOT file-authoring — left alone
-    for case in [
-        "cargo build > build.log",
-        "cat README.md",
-        "echo hi > /dev/null",
-    ] {
-        let out = run_with(
-            policy,
-            "PreToolUse",
-            "Bash",
-            json!({ "command": case }),
-            None,
-        );
+    // reads and /dev/null are not file writes — left alone
+    for case in ["cat README.md", "echo hi > /dev/null"] {
+        let out = run_bash_with_cwd(policy, case, CWD);
         assert_ne!(
             decision(&out),
             Some("deny".into()),

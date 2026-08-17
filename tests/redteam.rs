@@ -24,7 +24,7 @@ fn decide(policy: &str, command: &str, cwd: &str) -> Option<String> {
 const DENY_COMMIT: &str =
     "[[bash]]\nmatch = \"git commit*\"\naction = \"deny\"\nreason = \"manual\"\n";
 const JAIL: &str = "[settings]\njail = \"deny\"\n";
-const SHELL_WRITE: &str = "[settings]\non_shell_write = \"deny\"\n";
+const SHELL_WRITE: &str = "[[path]]\nmatch = [\"**\"]\non = [\"write\", \"create\"]\naction = \"deny\"\nhint = \"author files with the Write/Edit tool\"\n";
 const CWD: &str = "/Users/nobody/project";
 
 // ── regression guard: nested-shell `-c` payload extraction ──
@@ -50,8 +50,8 @@ fn nested_shell_rcfile_c_is_not_a_gate_bypass() {
 
 // ── regression guard: a redirect on the tail of an && / | chain writes a file ──
 // tree-sitter binds `a && cmd > f` to the enclosing list, so a per-command
-// direct-parent check missed it — letting `on_shell_write` and the auto-allow
-// redirect block be bypassed by prepending any command.
+// direct-parent check missed it — letting path-rule write detection and the
+// auto-allow redirect block be bypassed by prepending any command.
 #[test]
 fn chained_redirect_is_treated_as_a_file_write() {
     for cmd in [

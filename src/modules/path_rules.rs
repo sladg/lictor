@@ -32,6 +32,11 @@ pub(crate) fn compile_rules<'a>(
     rules
         .iter()
         .map(|rule| {
+            if rule.on.as_deref() == Some(&[]) {
+                return Err(format!(
+                    "[[{label}]] rule: 'on = []' matches nothing — omit 'on' to match every effect"
+                ));
+            }
             let mut builder = GlobSetBuilder::new();
             for glob in &rule.globs {
                 let expanded = expand_tilde(glob, &home);
@@ -66,9 +71,26 @@ pub(crate) fn find_rule<'a>(
         .map(|r| r.rule)
 }
 
-fn match_path<'a>(rules: &[CompiledPathRule<'a>], resolved: &str) -> Option<(Action, String)> {
+// `candidate_effects`: what this path is known to undergo (`None` = unknown,
+// i.e. a heuristic candidate). Eligibility:
+//   rule.on=None       → always eligible
+//   rule.on=Some(_)    + candidate None    → not eligible (on is graph-only)
+//   rule.on=Some(set)  + candidate Some(e) → eligible iff the two sets intersect
+fn match_path<'a>(
+    rules: &[CompiledPathRule<'a>],
+    resolved: &str,
+    candidate_effects: Option<&[Effect]>,
+) -> Option<(Action, String)> {
     let real = jail::real_path(resolved);
     rules.iter().find_map(|r| {
+        let eligible = match (&r.rule.on, candidate_effects) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(rule_on), Some(candidate)) => rule_on.iter().any(|e| candidate.contains(e)),
+        };
+        if !eligible {
+            return None;
+        }
         (r.globs.is_match(resolved) || r.globs.is_match(&real)).then(|| {
             let message = r
                 .rule
@@ -91,30 +113,54 @@ pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = jail::normalize(cwd, cwd, &home);
-    let candidates: Vec<String> = match ctx.config.jail_paths() {
-        JailPaths::Graph => ctx
-            .extraction
-            .graph
-            .resolved_references(&cwd, &|path, base| {
-                let expanded = jail::expand_env_prefix(path);
-                jail::normalize(expanded.as_deref().unwrap_or(path), base, &home)
-            })
-            .into_iter()
-            .filter(|r| !r.reference.locality.is_remote())
-            .filter(|r| r.reference.effect != Effect::Exec || r.reference.path.contains('/'))
-            .filter(|r| r.absolute != "/dev/null")
-            .map(|r| r.absolute)
-            .collect(),
+
+    // (absolute_path, effects_or_none): graph arm knows effects; heuristic doesn't
+    let candidates: Vec<(String, Option<Vec<Effect>>)> = match ctx.config.jail_paths() {
+        JailPaths::Graph => {
+            // aggregate per-path effect sets; a path touched by multiple references
+            // (e.g. mv source: Read + Delete) carries all of them
+            let mut path_effects: Vec<(String, Vec<Effect>)> = Vec::new();
+            for r in ctx
+                .extraction
+                .graph
+                .resolved_references(&cwd, &|path, base| {
+                    let expanded = jail::expand_env_prefix(path);
+                    jail::normalize(expanded.as_deref().unwrap_or(path), base, &home)
+                })
+            {
+                if r.reference.locality.is_remote() {
+                    continue;
+                }
+                if r.reference.effect == Effect::Exec && !r.reference.path.contains('/') {
+                    continue;
+                }
+                if r.absolute == "/dev/null" {
+                    continue;
+                }
+                if let Some(entry) = path_effects.iter_mut().find(|(p, _)| *p == r.absolute) {
+                    if !entry.1.contains(&r.reference.effect) {
+                        entry.1.push(r.reference.effect);
+                    }
+                } else {
+                    path_effects.push((r.absolute, vec![r.reference.effect]));
+                }
+            }
+            path_effects
+                .into_iter()
+                .map(|(p, e)| (p, Some(e)))
+                .collect()
+        }
         // Heuristic or Compare: walk_words tracks cd-aware literal args, plus the
         // two token classes the parser split off: NAME=val prefixes and redirect
         // targets. Any word with a `/` is a candidate; non-paths just match no glob.
+        // Candidates carry no effects — rules with `on` never match them.
         _ => {
             let candidate_of = |text: &str| {
                 let candidate = jail::path_candidate(text);
                 (jail::looks_like_path(candidate) || candidate.contains('/'))
                     .then(|| candidate.to_string())
             };
-            let mut out: Vec<String> =
+            let mut paths: Vec<String> =
                 jail::walk_words(ctx.extraction, &cwd, &home, true, candidate_of)
                     .into_iter()
                     .map(|(_, resolved)| resolved)
@@ -126,19 +172,19 @@ pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
                 .chain(&ctx.extraction.redirect_targets)
             {
                 if jail::looks_like_path(raw) || raw.contains('/') {
-                    out.push(jail::normalize(raw, &cwd, &home));
+                    paths.push(jail::normalize(raw, &cwd, &home));
                 }
             }
-            out
+            paths.into_iter().map(|p| (p, None)).collect()
         }
     };
 
     let mut seen: Vec<String> = Vec::new();
-    for resolved in candidates {
+    for (resolved, effects) in candidates {
         if seen.contains(&resolved) {
             continue;
         }
-        let Some((action, message)) = match_path(rules, &resolved) else {
+        let Some((action, message)) = match_path(rules, &resolved, effects.as_deref()) else {
             continue;
         };
         seen.push(resolved);
@@ -153,6 +199,8 @@ pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
 }
 
 // Write/Edit/MultiEdit/NotebookEdit: a single already-known file_path.
+// Always passes Write+Create as the candidate effects — a read-only rule must
+// not gate the edit tools.
 pub fn check(rules: &[CompiledPathRule], path: &str, cwd: &str) -> Option<(Action, String)> {
     if rules.is_empty() {
         return None;
@@ -160,7 +208,7 @@ pub fn check(rules: &[CompiledPathRule], path: &str, cwd: &str) -> Option<(Actio
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = jail::normalize(cwd, cwd, &home);
     let resolved = jail::normalize(path, &cwd, &home);
-    match_path(rules, &resolved)
+    match_path(rules, &resolved, Some(&[Effect::Write, Effect::Create]))
 }
 
 #[cfg(test)]
@@ -348,5 +396,80 @@ mod tests {
         let (action, message) = hit.unwrap();
         assert_eq!(action, Action::Deny);
         assert!(message.contains(".claude/scratch/"));
+    }
+
+    // ── effect-filter tests ────────────────────────────────────────────────
+
+    const ETC_WRITE: &str = "[[path]]\nmatch = [\"/etc/**\"]\non = [\"write\", \"create\"]\naction = \"deny\"\nhint = \"no writing to /etc\"\n";
+
+    #[test]
+    fn on_write_ignores_reads() {
+        let plan = plan_bash(ETC_WRITE, "cat /etc/hosts");
+        assert!(plan.denies.is_empty(), "{:?}", plan.denies);
+    }
+
+    #[test]
+    fn on_write_catches_redirect() {
+        let plan = plan_bash(ETC_WRITE, "echo x > /etc/motd");
+        assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
+        assert!(plan.denies[0].contains("no writing to /etc"));
+    }
+
+    #[test]
+    fn read_anywhere_write_in_project() {
+        let rules = "[[path]]\nmatch = [\"/Users/nobody/project/**\"]\naction = \"allow\"\n\n[[path]]\nmatch = [\"**\"]\non = [\"write\", \"create\", \"delete\"]\naction = \"ask\"\n";
+        // read outside the project: fine
+        assert!(plan_bash(rules, "cat /data/in").asks.is_empty());
+        // write outside the project: ask
+        assert_eq!(plan_bash(rules, "echo x > /data/out").asks.len(), 1);
+        // write inside the project: the allow exception matched first
+        assert!(plan_bash(rules, "echo x > out.txt").asks.is_empty());
+    }
+
+    #[test]
+    fn on_delete_sees_mv_source() {
+        let rules = "[[path]]\nmatch = [\"/protected/**\"]\non = [\"delete\"]\naction = \"deny\"\n";
+        // mv's source is read AND deleted (recipes/mv.toml) — the delete rule sees it
+        assert_eq!(plan_bash(rules, "mv /protected/a /tmp/b").denies.len(), 1);
+        // a plain read is not a delete
+        assert!(plan_bash(rules, "cat /protected/a").denies.is_empty());
+    }
+
+    #[test]
+    fn on_exec_scopes_to_program_words() {
+        let rules = "[[path]]\nmatch = [\"/opt/**\"]\non = [\"exec\"]\naction = \"ask\"\n";
+        assert_eq!(plan_bash(rules, "/opt/tools/run --version").asks.len(), 1);
+        // reading the binary is not executing it
+        assert!(plan_bash(rules, "cat /opt/tools/run").asks.is_empty());
+    }
+
+    #[test]
+    fn edit_tools_are_writes() {
+        let cfg = config(ETC_WRITE);
+        let rules = compile(&cfg).expect("globs compile");
+        assert!(check(&rules, "/etc/hosts", CWD).is_some());
+
+        let cfg = config("[[path]]\nmatch = [\"/etc/**\"]\non = [\"read\"]\naction = \"deny\"\n");
+        let rules = compile(&cfg).expect("globs compile");
+        assert!(
+            check(&rules, "/etc/hosts", CWD).is_none(),
+            "a read-only rule must not gate Write/Edit"
+        );
+    }
+
+    #[test]
+    fn on_rules_inert_under_heuristic() {
+        // heuristic candidates carry no effects; `on` is a graph-mode feature
+        let plan = plan_bash(
+            &format!("[settings]\njail_paths = \"heuristic\"\n{ETC_WRITE}"),
+            "echo x > /etc/motd",
+        );
+        assert!(plan.denies.is_empty(), "{:?}", plan.denies);
+    }
+
+    #[test]
+    fn empty_on_rejected() {
+        let cfg = config("[[path]]\nmatch = [\"**\"]\non = []\naction = \"deny\"\n");
+        assert!(compile(&cfg).is_err());
     }
 }

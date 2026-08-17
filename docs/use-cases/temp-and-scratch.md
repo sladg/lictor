@@ -67,4 +67,4 @@ action = "deny"
 hint = "No system temp — use the session scratchpad or `kv set`."
 ```
 
-Prefer `ask` over `deny` if some temp usage is legitimate but you want to see it. And if you'd rather ban shell-redirect file authoring everywhere (not just in temp): `on_shell_write = "deny"` routes `echo x > f` / `cat > f <<EOF` to "use the Write tool".
+Prefer `ask` over `deny` if some temp usage is legitimate but you want to see it. To ban shell-redirect file authoring everywhere (not just in temp), add a `[[path]]` rule with `on = ["write", "create"]` and `action = "deny"` — only redirect-write effects trigger it, reads are left alone.

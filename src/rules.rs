@@ -725,29 +725,6 @@ pub fn gate(
             _ => return finish(outcome, "ask", message),
         }
     }
-    if let Some(action) = config.on_shell_write() {
-        let authored = extraction.commands.iter().find(|c| {
-            !c.synthetic
-                && c.redirects_output
-                && c.words.first().is_some_and(|w| {
-                    w.text
-                        .as_deref()
-                        .is_some_and(|p| crate::constants::CONTENT_EMITTERS.contains(&basename(p)))
-                })
-        });
-        if let Some(command) = authored {
-            let message = format!(
-                "lictor: `{}` authors a file via shell redirection — use the Write/Edit tool instead",
-                command.display()
-            );
-            match action {
-                Action::Allow | Action::Log | Action::Skip => {}
-                Action::Warn => push_hint(&mut outcome.hints, message),
-                Action::Ask => return finish(outcome, "ask", message),
-                _ => return finish(outcome, "deny", message),
-            }
-        }
-    }
     if let Some(reason) = &extraction.blocked_reason {
         let message = format!("lictor: {reason}");
         match config.on_unparseable() {
