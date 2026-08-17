@@ -108,13 +108,11 @@ pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
     if rules.is_empty() {
         return;
     }
+    let Some(cwd) = ctx.cwd else {
+        return;
+    };
     let home = std::env::var("HOME").unwrap_or_default();
-    // without a CWD relative paths normalize to "/<path>"; broad globs like "**"
-    // still match, so path rules fire even when the shell working dir is unknown
-    let cwd = ctx
-        .cwd
-        .map(|c| jail::normalize(c, c, &home))
-        .unwrap_or_default();
+    let cwd = jail::normalize(cwd, cwd, &home);
 
     // (absolute_path, effects_or_none): graph arm knows effects; heuristic doesn't
     let candidates: Vec<(String, Option<Vec<Effect>>)> = match ctx.config.jail_paths() {
