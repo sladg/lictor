@@ -8,6 +8,10 @@
 [[cmd]]
 name = "find"
 [cmd.flags]
+"-exec"    = { until = [";", "+"], kind = "cmd", effect = ["exec"] }
+"-execdir" = { until = [";", "+"], kind = "cmd", effect = ["exec"] }
+"-ok"      = { until = [";"],      kind = "cmd", effect = ["exec"] }
+"-okdir"   = { until = [";"],      kind = "cmd", effect = ["exec"] }
 "-name" = { takes = true, kind = "glob" }
 "-iname" = { takes = true, kind = "glob" }
 "-path" = { takes = true, kind = "glob" }

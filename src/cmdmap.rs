@@ -72,6 +72,10 @@ pub struct Flag {
     /// fact and not a guess about leading dashes.
     #[serde(default)]
     pub takes: bool,
+    /// this flag consumes every following word up to (and including) a
+    /// terminator word; the consumed run is a nested command
+    #[serde(default)]
+    pub until: Vec<String>,
     #[serde(default)]
     pub kind: Kind,
     #[serde(default)]
@@ -363,7 +367,19 @@ impl Maps {
                 }
             }
             for (name, flag) in &program.flags {
-                if !flag.takes && flag.kind != Kind::None {
+                if !flag.until.is_empty() && flag.kind != Kind::Cmd {
+                    return Err(format!(
+                        "command map: `{label}` flag `{name}` has `until` but `kind` is not \
+                         `cmd` — set `kind = \"cmd\"` or drop `until`"
+                    ));
+                }
+                if !flag.until.is_empty() && flag.takes {
+                    return Err(format!(
+                        "command map: `{label}` flag `{name}` has both `until` and `takes` — \
+                         these are contradictory; use `until` alone"
+                    ));
+                }
+                if !flag.takes && flag.until.is_empty() && flag.kind != Kind::None {
                     return Err(format!(
                         "command map: `{label}` flag `{name}` has a kind but does not take an \
                          argument — set `takes = true` or drop the kind"
