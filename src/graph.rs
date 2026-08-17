@@ -2054,7 +2054,7 @@ fn apply_program(
     // positionals (which would shift find's own slot count).
     let mut until_consumed: std::collections::BTreeSet<usize> = Default::default();
     for (i, (id, is_flag)) in words.iter().enumerate() {
-        if !is_flag {
+        if until_consumed.contains(&i) || !is_flag {
             continue;
         }
         let Some(spec) = flag_spec(graph, program, *id)
@@ -2240,7 +2240,7 @@ fn apply_program(
             continue;
         };
         // {} is find's -exec placeholder for each match, not a literal path claim
-        if matches!(&graph.nodes[*value], Node::Value(v) if v.raw == "{}") {
+        if matches!(&graph.nodes[*value], Node::Value(v) if v.text.as_deref() == Some("{}")) {
             continue;
         }
         let target = match arg.kind {
@@ -2568,7 +2568,7 @@ fn emit_effects(
     }
     // {} is find's -exec placeholder for each match, not a literal path claim
     if let Node::Value(v) = &graph.nodes[value]
-        && v.raw == "{}"
+        && v.text.as_deref() == Some("{}")
     {
         return;
     }

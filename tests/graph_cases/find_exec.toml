@@ -56,6 +56,15 @@ expect  = { commands = ["find", "rm"], spawns = ["find spawns rm"], local = [
 ] }
 
 [[case]]
+# zsh users habitually quote '{}' to prevent glob expansion; same argv value
+name    = "quoted '{}' is also not a literal path claim"
+command = "find . -name '*.rs' -exec rm '{}' +"
+expect  = { commands = ["find", "rm"], spawns = ["find spawns rm"], local = [
+  "reads ./**",
+  "execs rm",
+] }
+
+[[case]]
 name    = "no -exec: nothing changes"
 command = "find . -name '*.rs'"
 expect  = { commands = ["find"], spawns = [], local = ["reads ./**"] }
