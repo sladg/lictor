@@ -105,7 +105,10 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
     let by_graph = || {
         extraction
             .graph
-            .resolved_references(cwd, &|path, base| normalize(path, base, &home))
+            .resolved_references(cwd, &|path, base| {
+                let expanded = expand_env_prefix(path);
+                normalize(expanded.as_deref().unwrap_or(path), base, &home)
+            })
             .into_iter()
             .filter(|r| !r.reference.locality.is_remote())
             // a program with no `/` is found on PATH and names no file; with one
@@ -114,6 +117,9 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
             .filter(|r| {
                 r.reference.effect != crate::cmdmap::Effect::Exec || r.reference.path.contains('/')
             })
+            // /dev/null is a discard sink, not a real escape — the heuristic
+            // excludes it in redirect_write_target; the graph must match
+            .filter(|r| r.absolute != "/dev/null")
             .map(|r| r.absolute)
             .collect::<Vec<String>>()
     };
@@ -130,33 +136,44 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
 
     // redirect targets (echo x >> /etc/hosts) are structural, not word args —
     // walk_words and graph.resolved_references both miss them; check here so
-    // both sources stay honest about write-redirect escapes (issue #29)
+    // both sources stay honest about write-redirect escapes (issue #29).
+    // $VAR/.bashrc targets arrive as raw strings; expand_env_prefix recovers the
+    // real path (issue #52) — any $VAR leading an otherwise-known path suffix.
     let redirect_paths = || {
         extraction
             .redirect_targets
             .iter()
             .filter_map(|raw| {
                 let candidate = path_candidate(raw);
-                (looks_like_path(candidate) || candidate.contains('/'))
-                    .then(|| normalize(candidate, cwd, &home))
+                let expanded_owned;
+                let effective = match expand_env_prefix(candidate) {
+                    Some(s) => {
+                        expanded_owned = s;
+                        expanded_owned.as_str()
+                    }
+                    None => candidate,
+                };
+                (looks_like_path(effective) || effective.contains('/'))
+                    .then(|| normalize(effective, cwd, &home))
             })
             .collect::<Vec<String>>()
     };
 
     // Each source only lists paths; the trust check, the dedupe and the order
     // are shared, so the two cannot drift and `compare` compares like with like.
+    //
+    // redirect_paths() is NOT added to the graph arm: apply_redirects already
+    // turns every write-redirect into Writes/Creates edges, so by_graph() sees
+    // them through resolved_references. Adding it on both sides of compare would
+    // also blind the disagreement check to redirect-target differences.
     match source {
         JailPaths::Heuristic => outside([by_shape(), redirect_paths()].concat()),
-        JailPaths::Graph => outside([by_graph(), redirect_paths()].concat()),
+        JailPaths::Graph => outside(by_graph()),
         // record what the graph would have said, decide with the heuristic —
         // measuring the switch must not be the switch
         JailPaths::Compare => {
             let old = outside([by_shape(), redirect_paths()].concat());
-            report_disagreement(
-                extraction,
-                &old,
-                &outside([by_graph(), redirect_paths()].concat()),
-            );
+            report_disagreement(extraction, &old, &outside(by_graph()));
             old
         }
     }
@@ -319,11 +336,11 @@ pub(crate) fn walk_words(
             let expanded;
             let text = match word.text.as_deref() {
                 Some(text) => text,
-                // dynamic word: recover $HOME/${HOME} paths from the raw source.
+                // dynamic word: recover $VAR/... paths from the raw source span.
                 // synthetic spans index the inner re-parsed string, not `source`, so skip.
                 None if !command.synthetic => {
                     let raw = extraction.source.get(word.start..word.end).unwrap_or("");
-                    match expand_home(raw, home) {
+                    match expand_env_prefix(raw) {
                         Some(path) => {
                             expanded = path;
                             expanded.as_str()
@@ -449,14 +466,26 @@ pub(crate) fn path_candidate(text: &str) -> &str {
     value
 }
 
-// $HOME/... and ${HOME}/... parse as dynamic words (text = None) but their target
-// is known; recover the same absolute path `~/...` would yield. ponytail: only HOME —
-// add other well-known vars if an escape via $XDG_*/etc. shows up.
-fn expand_home(raw: &str, home: &str) -> Option<String> {
-    let rest = raw
-        .strip_prefix("$HOME")
-        .or_else(|| raw.strip_prefix("${HOME}"))?;
-    (rest.is_empty() || rest.starts_with('/')).then(|| format!("{home}{rest}"))
+// expand a leading $VAR or ${VAR} using the live environment — handles redirect
+// targets and any raw string that might begin with a variable reference. Returns
+// None when the text doesn't start with `$`, the variable is unset, or the
+// remainder is not a path suffix (not empty and not starting with `/`).
+pub(crate) fn expand_env_prefix(raw: &str) -> Option<String> {
+    let (var_name, rest) = if let Some(inner) = raw.strip_prefix("${") {
+        let end = inner.find('}')?;
+        (&inner[..end], &inner[end + 1..])
+    } else {
+        let after = raw.strip_prefix('$')?;
+        let end = after
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
+        (&after[..end], &after[end..])
+    };
+    if var_name.is_empty() || (!rest.is_empty() && !rest.starts_with('/')) {
+        return None;
+    }
+    let value = std::env::var(var_name).ok()?;
+    Some(format!("{value}{rest}"))
 }
 
 pub(crate) fn looks_like_path(text: &str) -> bool {
@@ -513,6 +542,22 @@ mod tests {
 
     fn check(command: &str, allow: &[&str]) -> Vec<String> {
         violations(&bash::extract(command), &config(allow), CWD)
+    }
+
+    fn config_heuristic(allow: &[&str]) -> Config {
+        let list = allow
+            .iter()
+            .map(|p| format!("\"{p}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        toml::from_str(&format!(
+            "[settings]\njail = \"ask\"\njail_paths = \"heuristic\"\njail_allow = [{list}]"
+        ))
+        .expect("test config parses")
+    }
+
+    fn check_heuristic(command: &str, allow: &[&str]) -> Vec<String> {
+        violations(&bash::extract(command), &config_heuristic(allow), CWD)
     }
 
     // ── relative_hints: the in-project absolute-path nudge (abs-paths module) ──
@@ -689,8 +734,9 @@ mod tests {
 
     #[test]
     fn flag_attached_value_flagged() {
+        // path_candidate extracts the value from --flag=path — heuristic-specific
         assert_eq!(
-            check("rg x --path=/var/log/sys.log", &[]),
+            check_heuristic("rg x --path=/var/log/sys.log", &[]),
             vec!["/var/log/sys.log"]
         );
     }
@@ -760,9 +806,13 @@ mod tests {
 
     #[test]
     fn glued_flag_path_flagged() {
-        assert_eq!(check("tail -o/etc/shadow", &[]), vec!["/etc/shadow"]);
+        // path_candidate strips the alphabetic flag letter off -X/path — heuristic-specific
+        assert_eq!(
+            check_heuristic("tail -o/etc/shadow", &[]),
+            vec!["/etc/shadow"]
+        );
         // alphabetic flag letter required — `-1/2`-style args stay untouched
-        assert!(check("bc -1/2", &[]).is_empty());
+        assert!(check_heuristic("bc -1/2", &[]).is_empty());
     }
 
     #[test]
@@ -858,7 +908,11 @@ mod tests {
     #[test]
     fn absolute_cd_outside_repo_flagged() {
         let subdir = repo_subdir("src/modules");
-        assert_eq!(check_at("cd /etc && cat hosts", &[], &subdir), vec!["/etc"]);
+        // graph: cd's arg /etc and cat's resolved-after-cd arg /etc/hosts are both caught
+        assert_eq!(
+            check_at("cd /etc && cat hosts", &[], &subdir),
+            vec!["/etc", "/etc/hosts"]
+        );
     }
 
     #[test]

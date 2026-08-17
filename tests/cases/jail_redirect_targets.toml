@@ -30,3 +30,12 @@ name    = "redirect to /dev/null is allowed"
 command = "cmd > /dev/null"
 cwd     = "/a/b/repo"
 expect  = { decision = "none" }
+
+[[case]]
+# issue #52: $HOME is a variable expansion — previously resolve-and-check-roots
+# got a literal "$HOME/.bashrc" that appeared to be inside the project when
+# normalize prepended cwd. Now expanded before normalization, it lands outside.
+name    = "redirect to $HOME path is a violation"
+command = "echo x > $HOME/.bashrc"
+cwd     = "/a/b/repo"
+expect  = { decision = "deny", reason = "outside the project jail" }

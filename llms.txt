@@ -817,7 +817,7 @@ echo "EXIT: $?"  (vs '*$\?*' ban)    → blocked (a banned token appearing liter
 Defense-in-depth against a sloppy or manipulated agent, not a sandbox — there is no process isolation. Lictor decides what the permission system sees; the permission prompt stays the last line.
 ---
 created_at: 2026-07-14
-updated_at: 2026-07-14
+updated_at: 2026-08-17
 ---
 
 # Jail
@@ -830,13 +830,13 @@ Inside a **linked git worktree** the main checkout is trusted as well. `--show-t
 
 ## Where "this word is a path" comes from
 
-`settings.jail_paths` chooses. Default `heuristic` — unchanged behaviour.
+`settings.jail_paths` chooses. Default `"graph"` as of this release; unknown strings also fall through to `graph`.
 
 | value | meaning |
 |---|---|
-| `heuristic` | the shape of the word: a leading `/`, `~`, or `..`. What lictor has always done |
-| `graph` | only what a reviewed recipe in `recipes/` says is a path |
-| `compare` | run both, **decide with the heuristic**, print where they differ |
+| `"graph"` | only what a reviewed recipe in `recipes/` says is a path (default) |
+| `"heuristic"` | the shape of the word: a leading `/`, `~`, or `..`. Still selectable; being phased out |
+| `"compare"` | run both, **decide with the heuristic**, print where they differ to stderr |
 
 **The graph source is not strictly better.** It trades one kind of error for the other:
 
@@ -849,9 +849,10 @@ frobnicate /etc/passwd          heuristic: flags it          graph: MISSES it
 
 - it removes the false positives issue #4 is about — a sed script and a remote path stop being treated as local files
 - it closes a false negative the shape test cannot reach: `cat passwd` after a `cd` names a real file, but the bare word is not path-*shaped*, so the guess never looks at it
-- it introduces a new false negative: **a program with no recipe references no paths**, so an escape through one is invisible
+- it introduces a new false negative: **a program with no recipe references no paths**, so an escape through one is invisible; programs with incomplete recipes (unknown flags like `--path=`) also miss flag-attached paths
+- short-flag glued paths (`tail -o/etc/shadow`) are also invisible unless the recipe marks them; use `"heuristic"` if these matter for your workflow
 
-Which trade is right depends on how much of what you actually run has a recipe. That is what `compare` is for: leave decisions on the heuristic, collect the disagreements against real usage, and switch when the evidence says to.
+Use `"heuristic"` to restore the previous default behaviour, or `"compare"` to measure disagreements before committing.
 
 ### The program counts as well
 

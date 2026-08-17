@@ -1,5 +1,6 @@
 use super::{ModuleCtx, Plan};
-use crate::config::{Action, Config, PathRule};
+use crate::cmdmap::Effect;
+use crate::config::{Action, Config, JailPaths, PathRule};
 use crate::modules::jail;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -90,32 +91,47 @@ pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = jail::normalize(cwd, cwd, &home);
-    // unlike the jail (which only cares about escapes, so absolute/~/.. forms),
-    // path rules must also see relative in-project spellings — `cat
-    // .claude/settings.json` names the same file `cat /repo/.claude/settings.json`
-    // does. Any word with a `/` is a candidate; non-paths just match no glob.
-    let candidate_of = |text: &str| {
-        let candidate = jail::path_candidate(text);
-        (jail::looks_like_path(candidate) || candidate.contains('/')).then(|| candidate.to_string())
-    };
-    // path args (cd-aware, including nested shells), plus the two path-bearing
-    // token classes the parser split off from `words`: `NAME=val` prefix values
-    // (`D=/tmp/x cmd`) and write-redirect targets (`echo x > /tmp/y`)
-    let mut candidates: Vec<String> =
-        jail::walk_words(ctx.extraction, &cwd, &home, true, candidate_of)
+    let candidates: Vec<String> = match ctx.config.jail_paths() {
+        JailPaths::Graph => ctx
+            .extraction
+            .graph
+            .resolved_references(&cwd, &|path, base| {
+                let expanded = jail::expand_env_prefix(path);
+                jail::normalize(expanded.as_deref().unwrap_or(path), base, &home)
+            })
             .into_iter()
-            .map(|(_, resolved)| resolved)
-            .collect();
-    for raw in ctx
-        .extraction
-        .assignments
-        .iter()
-        .chain(&ctx.extraction.redirect_targets)
-    {
-        if jail::looks_like_path(raw) || raw.contains('/') {
-            candidates.push(jail::normalize(raw, &cwd, &home));
+            .filter(|r| !r.reference.locality.is_remote())
+            .filter(|r| r.reference.effect != Effect::Exec || r.reference.path.contains('/'))
+            .filter(|r| r.absolute != "/dev/null")
+            .map(|r| r.absolute)
+            .collect(),
+        // Heuristic or Compare: walk_words tracks cd-aware literal args, plus the
+        // two token classes the parser split off: NAME=val prefixes and redirect
+        // targets. Any word with a `/` is a candidate; non-paths just match no glob.
+        _ => {
+            let candidate_of = |text: &str| {
+                let candidate = jail::path_candidate(text);
+                (jail::looks_like_path(candidate) || candidate.contains('/'))
+                    .then(|| candidate.to_string())
+            };
+            let mut out: Vec<String> =
+                jail::walk_words(ctx.extraction, &cwd, &home, true, candidate_of)
+                    .into_iter()
+                    .map(|(_, resolved)| resolved)
+                    .collect();
+            for raw in ctx
+                .extraction
+                .assignments
+                .iter()
+                .chain(&ctx.extraction.redirect_targets)
+            {
+                if jail::looks_like_path(raw) || raw.contains('/') {
+                    out.push(jail::normalize(raw, &cwd, &home));
+                }
+            }
+            out
         }
-    }
+    };
 
     let mut seen: Vec<String> = Vec::new();
     for resolved in candidates {
@@ -198,9 +214,10 @@ mod tests {
     #[test]
     fn scratch_var_assignment_matched() {
         // the `D=/private/tmp/...` scratchpad-exploit shape (corpus §6): the path
-        // is a NAME=val prefix the parser split off, not a plain arg
+        // is a NAME=val prefix the parser split off, not a plain arg.
+        // assignments are a heuristic-specific token class; use explicit heuristic.
         let plan = plan_bash(
-            TEMP,
+            &format!("[settings]\njail_paths = \"heuristic\"\n{TEMP}"),
             "D=/private/tmp/claude-501/scratchpad/exploit cargo build",
         );
         assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
@@ -245,8 +262,17 @@ mod tests {
 
     #[test]
     fn export_assignment_matched() {
-        // `export VAR=/tmp/x` — the path rides on an assignment word
-        assert_eq!(plan_bash(TEMP, "export OUT=/tmp/build").denies.len(), 1);
+        // `export VAR=/tmp/x` — the path rides on an assignment word.
+        // assignments are a heuristic-specific token class; use explicit heuristic.
+        assert_eq!(
+            plan_bash(
+                &format!("[settings]\njail_paths = \"heuristic\"\n{TEMP}"),
+                "export OUT=/tmp/build"
+            )
+            .denies
+            .len(),
+            1
+        );
     }
 
     #[test]

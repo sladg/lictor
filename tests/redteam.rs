@@ -74,8 +74,8 @@ fn chained_redirect_is_treated_as_a_file_write() {
 // ══════════════════════════════════════════════════════════════════════════
 
 // The jail reads resolved word text, but `$HOME/...` / `${HOME}/...` parse as
-// dynamic (text = None). jail::expand_home now recovers the path from raw source
-// so an agent can't reach a home-dir secret with `$HOME` instead of `~`.
+// dynamic (text = None). expand_env_prefix recovers the path from the raw source
+// span so an agent can't reach a home-dir secret with `$HOME` instead of `~`.
 #[test]
 fn jail_escaped_via_home_env_var() {
     for cmd in ["cat $HOME/.ssh/id_rsa", "cat ${HOME}/.aws/credentials"] {
@@ -95,10 +95,13 @@ fn jail_escaped_via_nested_shell() {
 
 // A path glued to a short flag (`-o/etc/passwd`) starts with '-', so
 // `looks_like_path` rejected it; jail::path_candidate now deglues the flag.
+// This is heuristic-specific: the graph only sees what a recipe marks as a
+// path argument, and no recipe maps an arbitrary glued short-flag value.
+const JAIL_HEURISTIC: &str = "[settings]\njail = \"deny\"\njail_paths = \"heuristic\"\n";
 #[test]
 fn jail_escaped_via_glued_flag() {
     assert_eq!(
-        decide(JAIL, "tail -o/etc/shadow", CWD).as_deref(),
+        decide(JAIL_HEURISTIC, "tail -o/etc/shadow", CWD).as_deref(),
         Some("deny")
     );
 }

@@ -139,3 +139,17 @@ name    = "~/path is denied (tilde form, baseline for the $HOME cases)"
 command = "cat ~/outside.txt"
 cwd     = "/a/b/repo"
 expect  = { decision = "deny", reason = "outside the project jail" }
+
+# ── acceptance battery: issue #4 false positives must be silent under graph ──
+
+[[case]]
+name    = "sed substitution: /pattern/ in the script is not a filesystem path"
+command = "sed 's/foo/bar/g' README.md"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "rg pattern with leading /: the regex is not a filesystem path"
+command = "rg '/api/v1/users' src/"
+cwd     = "/a/b/repo"
+expect  = { decision = "none" }
