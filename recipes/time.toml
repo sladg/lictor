@@ -1,0 +1,9 @@
+[[cmd]]
+name = "time"
+[cmd.flags]
+"-o" = { takes = true, kind = "path", effect = ["write", "create"] }
+"-f" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

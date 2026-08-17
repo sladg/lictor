@@ -1,0 +1,6 @@
+[[cmd]]
+name = "source"
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read"]

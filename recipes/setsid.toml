@@ -1,0 +1,6 @@
+[[cmd]]
+name = "setsid"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

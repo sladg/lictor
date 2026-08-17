@@ -2097,6 +2097,17 @@ fn apply_program(
         slotted
     };
 
+    // the flags actually present — needed by `when` guards on both payload
+    // resolution below and on per-slot arg lookup
+    let present: Vec<String> = words
+        .iter()
+        .filter(|(_, is_flag)| *is_flag)
+        .filter_map(|(id, _)| match &graph.nodes[*id] {
+            Node::Flag(f) => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
+
     // 3. the payload of a wrapper is another program, running under its own map
     //    and — for `ssh` and friends — on another machine
     //
@@ -2106,13 +2117,13 @@ fn apply_program(
     // from the command that follows. It still occupies a positional slot, so
     // skip it before reading the slot after it as the program word (#24).
     let payload_at = program
-        .nested_command()
+        .nested_command(&present)
         .and_then(|nested| nested.slots.payload_start())
         .map(|at| match slotted.get(at) {
             Some(&(id, _)) if value_text(graph, id).as_deref() == Some("--") => at + 1,
             _ => at,
         });
-    if let Some(nested) = program.nested_command()
+    if let Some(nested) = program.nested_command(&present)
         && let Some(at) = payload_at
         && let Some(&(program_word, index)) = slotted.get(at)
         && let Some(payload_name) = value_text(graph, program_word)
@@ -2137,6 +2148,17 @@ fn apply_program(
         if nested.effect.contains(&crate::cmdmap::Effect::Exec) {
             graph.link(command, payload, EdgeKind::Execs);
         }
+        // Emit effects for pre-payload positional slots — e.g. `flock`'s
+        // lockfile at slot 0 before the payload at slot 1.
+        let pre_total = slotted.len();
+        for (slot, (id, _)) in slotted[..at].iter().enumerate() {
+            let Some(arg) = program.arg_for(slot, pre_total, &present) else {
+                continue;
+            };
+            if arg.kind != crate::cmdmap::Kind::Cmd {
+                emit_effects(graph, command, *id, arg.kind, &arg.effect, ctx);
+            }
+        }
         // The payload is everything after the program word, IN SOURCE ORDER and
         // including flags. Taking only the positionals dropped them: `sudo rm -rf
         // x` lost the `-rf`, and `sudo grep -e pat file` never bound `-e` at all,
@@ -2146,17 +2168,6 @@ fn apply_program(
         return;
     }
     let slotted: Vec<NodeId> = slotted.into_iter().map(|(id, _)| id).collect();
-
-    // the flags actually present, which is what a `when` guard is checked
-    // against
-    let present: Vec<String> = words
-        .iter()
-        .filter(|(_, is_flag)| *is_flag)
-        .filter_map(|(id, _)| match &graph.nodes[*id] {
-            Node::Flag(f) => Some(f.name.clone()),
-            _ => None,
-        })
-        .collect();
     let total = slotted.len();
     for (slot, value) in slotted.iter().enumerate() {
         let Some(arg) = program.arg_for(slot, total, &present) else {

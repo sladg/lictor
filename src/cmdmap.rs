@@ -452,10 +452,12 @@ impl Program {
     }
 
     /// The entry that swallows the rest of the line as a nested command, if any.
-    pub fn nested_command(&self) -> Option<&Arg> {
-        self.args
-            .iter()
-            .find(|a| a.kind == Kind::Cmd && a.slots.payload_start().is_some())
+    pub fn nested_command(&self, flags: &[String]) -> Option<&Arg> {
+        self.args.iter().find(|a| {
+            a.kind == Kind::Cmd
+                && a.slots.payload_start().is_some()
+                && a.when.as_ref().is_none_or(|w| w.holds(flags))
+        })
     }
 
     /// Whether this program's recipe declares that leading `NAME=val` positionals

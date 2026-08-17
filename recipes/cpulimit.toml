@@ -1,0 +1,13 @@
+[[cmd]]
+name = "cpulimit"
+[cmd.flags]
+"-l" = { takes = true }
+"--limit" = { takes = true }
+"-p" = { takes = true }
+"--pid" = { takes = true }
+"-e" = { takes = true }
+"--exe" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
