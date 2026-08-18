@@ -1,0 +1,40 @@
+# Same local/remote mixed positional shape as scp — a `host:` prefix on the
+# word carries locality, so one pair of entries covers both directions.
+[[cmd]]
+name = "rsync"
+[cmd.flags]
+"-a" = { takes = false }
+"--archive" = { takes = false }
+"-r" = { takes = false }
+"--recursive" = { takes = false }
+"-v" = { takes = false }
+"-z" = { takes = false }
+"-n" = { takes = false }
+"--dry-run" = { takes = false }
+"--delete" = { takes = false }
+"-u" = { takes = false }
+"-P" = { takes = false }
+"-e" = { takes = true }
+"--rsh" = { takes = true }
+"--exclude" = { takes = true }
+"--include" = { takes = true }
+"--exclude-from" = { takes = true, kind = "path", effect = ["read"] }
+"--include-from" = { takes = true, kind = "path", effect = ["read"] }
+"--files-from" = { takes = true, kind = "path", effect = ["read"] }
+"--log-file" = { takes = true, kind = "path", effect = ["write"] }
+"--chmod" = { takes = true }
+"--chown" = { takes = true }
+"--bwlimit" = { takes = true }
+"--timeout" = { takes = true }
+"--max-size" = { takes = true }
+"--partial-dir" = { takes = true }
+[[cmd.args]]
+slots = "except-last"
+kind = "pathset"
+effect = ["read"]
+recursive_with = ["-r", "-a", "--recursive", "--archive"]
+[[cmd.args]]
+slots = "last"
+kind = "pathset"
+effect = ["write", "create"]
+recursive_with = ["-r", "-a", "--recursive", "--archive"]

@@ -1,0 +1,57 @@
+# Positionals are package names, not paths.
+[[cmd]]
+name = "apt"
+[cmd.flags]
+"-y" = { takes = false }
+"--yes" = { takes = false }
+"-t" = { takes = true }
+
+[[cmd]]
+name = "apt"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "apt"
+subcommand = "upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "apt"
+subcommand = "full-upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "apt"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "apt"
+subcommand = "remove"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt"
+subcommand = "purge"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt"
+subcommand = "autoremove"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "apt"
+subcommand = "search"
+effect = ["read"]
+
+[[cmd]]
+name = "apt"
+subcommand = "show"
+effect = ["read"]

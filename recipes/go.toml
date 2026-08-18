@@ -1,0 +1,84 @@
+# `go run` / `go test` positionals are packages OR ./files — ambiguous, so they
+# stay silent. Go flags are single-dash long form and per-subcommand.
+[[cmd]]
+name = "go"
+
+[[cmd]]
+name = "go"
+subcommand = "build"
+[cmd.flags]
+"-o" = { takes = true, kind = "path", effect = ["write", "create"] }
+"-C" = { takes = true }
+"-tags" = { takes = true }
+"-ldflags" = { takes = true }
+
+[[cmd]]
+name = "go"
+subcommand = "test"
+[cmd.flags]
+"-run" = { takes = true }
+"-bench" = { takes = true }
+"-count" = { takes = true }
+"-timeout" = { takes = true }
+"-tags" = { takes = true }
+"-o" = { takes = true, kind = "path", effect = ["write", "create"] }
+
+[[cmd]]
+name = "go"
+subcommand = "get"
+effect = ["write"]
+
+[[cmd]]
+name = "go"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "go"
+subcommand = "clean"
+effect = ["delete"]
+
+[[cmd]]
+name = "go"
+subcommand = "mod tidy"
+effect = ["write"]
+
+[[cmd]]
+name = "go"
+subcommand = "mod download"
+effect = ["write"]
+
+[[cmd]]
+name = "go"
+subcommand = "mod init"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "go"
+subcommand = "mod verify"
+effect = ["read"]
+
+[[cmd]]
+name = "go"
+subcommand = "work init"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "go"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "go"
+subcommand = "env"
+effect = ["read"]
+
+[[cmd]]
+name = "go"
+subcommand = "version"
+effect = ["read"]
+
+[[cmd]]
+name = "go"
+subcommand = "vet"
+effect = ["read"]

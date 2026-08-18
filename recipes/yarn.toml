@@ -1,0 +1,79 @@
+# Yarn classic and berry share a name and disagree on most flags, so only the
+# surface both agree on is mapped. `yarn <script>` shorthand (and bare `yarn`
+# = install) make the bare entry ambiguous — no effect claim there.
+[[cmd]]
+name = "yarn"
+[cmd.flags]
+"--cwd" = { takes = true }
+
+# berry: fetched-or-local binary plus its arguments, the npx shape
+[[cmd]]
+name = "yarn"
+subcommand = "dlx"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "exec"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "add"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "up"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "link"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "publish"
+effect = ["write"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "info"
+effect = ["read"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "why"
+effect = ["read"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "yarn"
+subcommand = "outdated"
+effect = ["read"]

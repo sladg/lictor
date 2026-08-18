@@ -1,0 +1,61 @@
+# `bun run <arg>` resolves a package script OR a file — ambiguous, so no path
+# claim on its positional; the exec claim is true either way. `bun <file>`
+# shorthand has the same ambiguity, so the bare entry stays silent.
+[[cmd]]
+name = "bun"
+[cmd.flags]
+"-e" = { takes = true, kind = "code" }
+"--eval" = { takes = true, kind = "code" }
+"-p" = { takes = true, kind = "code" }
+"--print" = { takes = true, kind = "code" }
+"--cwd" = { takes = true }
+"--env-file" = { takes = true, kind = "path", effect = ["read"] }
+
+# `bun x pkg args...` — the npx shape
+[[cmd]]
+name = "bun"
+subcommand = "x"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "bun"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "i"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "add"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "rm"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "link"
+effect = ["write"]
+
+[[cmd]]
+name = "bun"
+subcommand = "outdated"
+effect = ["read"]

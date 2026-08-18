@@ -1,0 +1,18 @@
+# npx resolves a binary (node_modules/.bin, then the registry) and runs the
+# rest of the line as that command — same payload shape as sudo/xargs. The
+# security surface is real: the binary may be fetched and executed in one step.
+[[cmd]]
+name = "npx"
+[cmd.flags]
+"-p" = { takes = true }
+"--package" = { takes = true }
+"-c" = { takes = true, kind = "shell", effect = ["exec"] }
+"--call" = { takes = true, kind = "shell", effect = ["exec"] }
+"-y" = { takes = false }
+"--yes" = { takes = false }
+"--no-install" = { takes = false }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+when = { without = ["-c", "--call"] }

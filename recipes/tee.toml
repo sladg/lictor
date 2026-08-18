@@ -1,0 +1,9 @@
+[[cmd]]
+name = "tee"
+[cmd.flags]
+"-a" = { takes = false }
+"--append" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["write", "create"]

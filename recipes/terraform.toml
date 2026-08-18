@@ -1,0 +1,149 @@
+# Terraform accepts single-dash long flags in both `-flag value` and
+# `-flag=value` forms; `takes = true` covers the space form, the `=` form binds
+# in the lowering. `-chdir` is `=`-only and needs no entry. Positionals are
+# resource addresses or plan files depending on subcommand — only the
+# unambiguous ones are mapped.
+[[cmd]]
+name = "terraform"
+
+[[cmd]]
+name = "terraform"
+subcommand = "init"
+effect = ["write"]
+[cmd.flags]
+"-backend-config" = { takes = true }
+
+[[cmd]]
+name = "terraform"
+subcommand = "plan"
+effect = ["read"]
+[cmd.flags]
+"-out" = { takes = true, kind = "path", effect = ["write", "create"] }
+"-var" = { takes = true }
+"-var-file" = { takes = true, kind = "path", effect = ["read"] }
+"-state" = { takes = true, kind = "path", effect = ["read"] }
+"-destroy" = { takes = false }
+"-refresh-only" = { takes = false }
+"-detailed-exitcode" = { takes = false }
+
+[[cmd]]
+name = "terraform"
+subcommand = "apply"
+effect = ["write"]
+[cmd.flags]
+"-var" = { takes = true }
+"-var-file" = { takes = true, kind = "path", effect = ["read"] }
+"-state" = { takes = true, kind = "path", effect = ["read", "write"] }
+"-auto-approve" = { takes = false }
+
+[[cmd]]
+name = "terraform"
+subcommand = "destroy"
+effect = ["delete"]
+[cmd.flags]
+"-var" = { takes = true }
+"-var-file" = { takes = true, kind = "path", effect = ["read"] }
+"-auto-approve" = { takes = false }
+
+[[cmd]]
+name = "terraform"
+subcommand = "import"
+effect = ["write"]
+[cmd.flags]
+"-var" = { takes = true }
+"-var-file" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "terraform"
+subcommand = "refresh"
+effect = ["write"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "fmt"
+effect = ["write"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "validate"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "show"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "output"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "console"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "graph"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "providers"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "version"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "workspace list"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "workspace show"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "workspace new"
+effect = ["write"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "workspace select"
+effect = ["write"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "workspace delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "state list"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "state show"
+effect = ["read"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "state mv"
+effect = ["write"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "state rm"
+effect = ["write", "delete"]
+
+[[cmd]]
+name = "terraform"
+subcommand = "force-unlock"
+effect = ["write"]

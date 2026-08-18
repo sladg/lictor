@@ -1348,6 +1348,8 @@ updated_at: 2026-07-14
 
 Oversized or slow command output goes to a local [kv](https://github.com/AmrSaber/kv) cache instead of the context window; the model gets the tail plus the exact `kv get` command to query the rest. Use it so one `cargo test` doesn't eat 3 000 lines of context — and so the agent re-queries the cache instead of re-running the suite.
 
+Both streams are guarded independently: compilers and test runners emit their volume on **stderr**, so a bare `cargo build` spills there too (key suffix `-stderr`), not just when `2>&1` merges it into stdout.
+
 `kv` is a separate CLI: `brew install AmrSaber/tap/kv` (source: [github.com/AmrSaber/kv](https://github.com/AmrSaber/kv)). The built-in `kv-cache` [catalog](catalogs.md) allows all its subcommands so the retrieval loop never prompts.
 
 ## Config

@@ -1,0 +1,9 @@
+# Alias for `bun x` — fetched-or-local binary plus its arguments, the npx shape.
+[[cmd]]
+name = "bunx"
+[cmd.flags]
+"--bun" = { takes = false }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

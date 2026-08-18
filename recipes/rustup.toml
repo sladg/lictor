@@ -1,0 +1,80 @@
+[[cmd]]
+name = "rustup"
+
+# `rustup run <toolchain> cmd args...` — slot 0 names the toolchain, the rest
+# is the payload command
+[[cmd]]
+name = "rustup"
+subcommand = "run"
+[[cmd.args]]
+slots = "first"
+kind = "none"
+[[cmd.args]]
+slots = "1+"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "default"
+effect = ["write"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "component add"
+effect = ["write"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "component remove"
+effect = ["delete"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "target add"
+effect = ["write"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "target remove"
+effect = ["delete"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "toolchain uninstall"
+effect = ["delete"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "show"
+effect = ["read"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "which"
+effect = ["read"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "component list"
+effect = ["read"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "target list"
+effect = ["read"]
+
+[[cmd]]
+name = "rustup"
+subcommand = "toolchain list"
+effect = ["read"]

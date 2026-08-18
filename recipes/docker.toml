@@ -11,3 +11,129 @@ name = "docker"
 "-e" = { takes = true }
 "--name" = { takes = true }
 "-p" = { takes = true }
+
+# `docker exec CONTAINER CMD...` — the kubectl-exec shape: slot 0 is the
+# machine, the rest is the payload, and its paths land as remote.
+[[cmd]]
+name = "docker"
+subcommand = "exec"
+[cmd.flags]
+"-i" = { takes = false }
+"--interactive" = { takes = false }
+"-t" = { takes = false }
+"--tty" = { takes = false }
+"-d" = { takes = false }
+"--detach" = { takes = false }
+"-u" = { takes = true }
+"--user" = { takes = true }
+"-w" = { takes = true }
+"--workdir" = { takes = true }
+[[cmd.args]]
+slots = "first"
+kind = "container"
+[[cmd.args]]
+slots = "1+"
+kind = "cmd"
+effect = ["exec"]
+
+# effect claims for `on = {...}` verdict rules; positionals stay silent per the
+# note above
+[[cmd]]
+name = "docker"
+subcommand = "ps"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "images"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "logs"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "inspect"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "version"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "info"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "pull"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "push"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "build"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "tag"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "start"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "stop"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "restart"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "kill"
+effect = ["write"]
+
+[[cmd]]
+name = "docker"
+subcommand = "rm"
+effect = ["delete"]
+
+[[cmd]]
+name = "docker"
+subcommand = "rmi"
+effect = ["delete"]
+
+[[cmd]]
+name = "docker"
+subcommand = "system prune"
+effect = ["delete"]
+
+[[cmd]]
+name = "docker"
+subcommand = "volume ls"
+effect = ["read"]
+
+[[cmd]]
+name = "docker"
+subcommand = "volume rm"
+effect = ["delete"]
+
+[[cmd]]
+name = "docker"
+subcommand = "network ls"
+effect = ["read"]

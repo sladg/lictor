@@ -1,0 +1,148 @@
+# Install/uninstall positionals are package specs that MAY be local dirs or
+# tarballs (`npm install ./pkg`) but are usually registry names — mapping them
+# as paths would claim a relative-path read on `npm install express`, so they
+# stay silent. Effect claims are command-level, for `on = {...}` verdict rules.
+[[cmd]]
+name = "npm"
+[cmd.flags]
+"--prefix" = { takes = true }
+"-w" = { takes = true }
+"--workspace" = { takes = true }
+"--registry" = { takes = true }
+
+[[cmd]]
+name = "npm"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "i"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "ci"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "uninstall"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "link"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "version"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "init"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "npm"
+subcommand = "publish"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "pack"
+effect = ["create", "write"]
+[cmd.flags]
+"--pack-destination" = { takes = true, kind = "path", effect = ["write"] }
+
+# `npm exec [--] bin args...` — the npx shape
+[[cmd]]
+name = "npm"
+subcommand = "exec"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "npm"
+subcommand = "ls"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "view"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "info"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "outdated"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "why"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "explain"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "search"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "ping"
+effect = ["read"]
+
+# `npm audit` reads; `npm audit fix` rewrites the lockfile — deepest match wins
+[[cmd]]
+name = "npm"
+subcommand = "audit"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "audit fix"
+effect = ["write"]
+
+[[cmd]]
+name = "npm"
+subcommand = "config get"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "config list"
+effect = ["read"]
+
+[[cmd]]
+name = "npm"
+subcommand = "config set"
+effect = ["write"]

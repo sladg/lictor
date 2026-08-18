@@ -1,0 +1,10 @@
+# Positionals are PIDs or job specs, never paths.
+[[cmd]]
+name = "kill"
+[cmd.flags]
+"-s" = { takes = true }
+"-n" = { takes = true }
+"-l" = { takes = false }
+[[cmd.args]]
+slots = "all"
+kind = "none"

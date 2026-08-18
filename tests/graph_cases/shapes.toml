@@ -32,11 +32,10 @@ command = "a && b || c ; d"
 expect  = { flow = ["a --and--> b", "b --or--> c", "c --seq--> d"] }
 
 [[case]]
-# `tee` has no recipe, so its argument is claimed by nobody — the inverted
-# default, visible in passing
+# tee's recipe claims log.txt; the dup itself contributes no reference
 name    = "a descriptor dup mid-pipeline"
 command = "cmd 2>&1 | tee log.txt"
-expect  = { flow = ["cmd --pipe--> tee"], local = [] }
+expect  = { flow = ["cmd --pipe--> tee"], local = ["creates log.txt", "writes log.txt"] }
 
 [[case]]
 name    = "quoting and expansion in one word list"

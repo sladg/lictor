@@ -700,13 +700,13 @@ fn post_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, S
         current = outcome.stdout;
     }
     // spill runs after rule-based minify, as the last-resort context guard
-    if let Some(spilled) = minify::spill(&current, command, config, input.duration_ms) {
+    if let Some(spilled) = minify::spill(&current, command, config, input.duration_ms, "stdout") {
         minified.push((
             format!("spill:{}", spilled.key),
             spilled.bytes_in,
             spilled.bytes_out,
         ));
-        current = spilled.stdout;
+        current = spilled.output;
     }
 
     // a nonzero exit that still routed here (not to PostToolUseFailure) may carry
@@ -717,14 +717,28 @@ fn post_bash(input: &HookInput, config: &Config) -> Result<Option<HookOutput>, S
         .unwrap_or("");
     let hint = activate::guidance(&extraction, &config.activate, input.cwd.as_deref(), stderr);
 
+    // compilers and test runners emit their volume on stderr; without this pass
+    // the stdout budget is a false promise for exactly the commands spill exists for
+    let mut current_err = stderr.to_string();
+    if let Some(spilled) = minify::spill(&current_err, command, config, input.duration_ms, "stderr")
+    {
+        minified.push((
+            format!("spill:{}", spilled.key),
+            spilled.bytes_in,
+            spilled.bytes_out,
+        ));
+        current_err = spilled.output;
+    }
+
     write_audit(config, input, command, None, &[], &minified);
-    if current == original && hint.is_none() {
+    if current == original && current_err == stderr && hint.is_none() {
         return Ok(None);
     }
     let mut output = HookOutput::new(&input.hook_event_name);
-    if current != original {
+    if current != original || current_err != stderr {
         let mut updated = tool_response.clone();
         updated["stdout"] = Value::String(current);
+        updated["stderr"] = Value::String(current_err);
         output.hook_specific_output.updated_tool_output = Some(updated);
     }
     output.hook_specific_output.additional_context = hint;

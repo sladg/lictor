@@ -1,0 +1,13 @@
+# Alias for `uv tool run` — fetched-or-local binary plus its arguments, the
+# npx shape.
+[[cmd]]
+name = "uvx"
+[cmd.flags]
+"--from" = { takes = true }
+"--with" = { takes = true }
+"-p" = { takes = true }
+"--python" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]

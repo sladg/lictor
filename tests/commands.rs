@@ -1205,6 +1205,73 @@ fn spill_stores_oversized_output_and_keeps_tail() {
     );
 }
 
+#[test]
+fn spill_covers_stderr_when_not_merged() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let capture = dir.join("spill-stderr-capture.txt");
+    let script = dir.join("fake-kv-stderr.sh");
+    let _ = std::fs::remove_file(&capture);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = set ] && cat > {}\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+
+    let policy = format!(
+        "{POLICY}\n[settings]\nspill_lines = 10\nspill_keep = 3\nspill_command = \"{}\"\n",
+        script.display()
+    );
+    // cargo-style: a short stdout, the diagnostics flood on stderr
+    let noisy = (1..=50)
+        .map(|i| format!("warn {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = run_with(
+        &policy,
+        "PostToolUse",
+        "Bash",
+        json!({"command": "cargo build"}),
+        Some(json!({"stdout": "ok", "stderr": noisy, "interrupted": false, "isImage": false})),
+    );
+    let stderr = output
+        .as_ref()
+        .and_then(|o| o.pointer("/updatedToolOutput/stderr"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        stderr.contains("[lictor] stderr too large: 50 lines"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("get lictor-cargo-build-stderr-"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("warn 50") && !stderr.contains("warn 30"),
+        "{stderr}"
+    );
+    // stdout was under threshold and stays untouched
+    let stdout = output
+        .as_ref()
+        .and_then(|o| o.pointer("/updatedToolOutput/stdout"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert_eq!(stdout, "ok");
+
+    let captured = std::fs::read_to_string(&capture).expect("full stderr stored");
+    assert!(
+        captured.contains("warn 1") && captured.contains("warn 50"),
+        "{captured}"
+    );
+}
+
 const BUNDLE_POLICY: &str = "[settings]\ncatalogs = [\"recommended\"]\n";
 
 fn bundle_bash(command: &str) -> Option<Value> {

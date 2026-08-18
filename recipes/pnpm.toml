@@ -1,0 +1,98 @@
+# Same reasoning as npm: install positionals may be local dirs but are usually
+# registry names, so they stay silent. `pnpm <script>` shorthand is
+# indistinguishable from a subcommand at this level, so the bare entry carries
+# no effect claim.
+[[cmd]]
+name = "pnpm"
+[cmd.flags]
+"-C" = { takes = true }
+"--dir" = { takes = true }
+"-F" = { takes = true }
+"--filter" = { takes = true }
+"-r" = { takes = false }
+"--recursive" = { takes = false }
+"-w" = { takes = false }
+"--workspace-root" = { takes = false }
+
+# `pnpm dlx pkg args...` / `pnpm exec bin args...` — fetched-or-local binary
+# plus its arguments, the npx shape
+[[cmd]]
+name = "pnpm"
+subcommand = "dlx"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "exec"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "i"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "add"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "rm"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "up"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "link"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "publish"
+effect = ["write"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "ls"
+effect = ["read"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "outdated"
+effect = ["read"]
+
+[[cmd]]
+name = "pnpm"
+subcommand = "why"
+effect = ["read"]

@@ -1,0 +1,56 @@
+# JS/Python/Rust toolchain recipes: runner payloads graft (npx / pnpm dlx /
+# npm exec / uv run / poetry run / rustup run), inline eval stays code, and a
+# node script positional is a read path.
+
+[[case]]
+name    = "node script positional is a read path"
+command = "node /etc/evil.js"
+expect  = { local = ["reads /etc/evil.js"] }
+
+[[case]]
+# -e consumes the source as code: no path claim, no payload command
+name    = "node -e is code, not a path"
+command = "node -e 'process.exit(1)'"
+expect  = { commands = ["node"] }
+
+[[case]]
+name    = "npx payload is a command"
+command = "npx rm -rf /tmp/x"
+expect  = { commands = ["npx", "rm"], local = ["execs rm", "deletes /tmp/x/**"] }
+
+[[case]]
+name    = "npm exec payload crosses the -- separator"
+command = "npm exec -- rm /tmp/x"
+expect  = { commands = ["npm", "rm"], local = ["execs rm", "deletes /tmp/x"] }
+
+[[case]]
+name    = "pnpm dlx payload is a command"
+command = "pnpm dlx cat /etc/passwd"
+expect  = { commands = ["pnpm", "cat"], local = ["execs cat", "reads /etc/passwd"] }
+
+[[case]]
+name    = "uv run payload is a command"
+command = "uv run cat /etc/passwd"
+expect  = { commands = ["uv", "cat"], local = ["execs cat", "reads /etc/passwd"] }
+
+[[case]]
+name    = "poetry run payload is a command"
+command = "poetry run cat /etc/passwd"
+expect  = { commands = ["poetry", "cat"], local = ["execs cat", "reads /etc/passwd"] }
+
+[[case]]
+# slot 0 is the toolchain, the payload starts at slot 1
+name    = "rustup run skips the toolchain and grafts the payload"
+command = "rustup run nightly cat /etc/passwd"
+expect  = { commands = ["rustup", "cat"], local = ["execs cat", "reads /etc/passwd"] }
+
+[[case]]
+# unmapped payload program: silence on its arguments, not a wrong claim
+name    = "npx with unmapped payload stays silent about its flags"
+command = "npx prettier --write /etc/hosts"
+expect  = { commands = ["npx", "prettier"], local = ["execs prettier"] }
+
+[[case]]
+name    = "pip requirements file is a read"
+command = "pip install -r requirements.txt"
+expect  = { local = ["reads requirements.txt"] }

@@ -1,0 +1,57 @@
+# Install positionals are package specs that MAY be local dirs (`pip install .`)
+# but are usually registry names — they stay silent, same reasoning as npm.
+[[cmd]]
+name = "pip"
+
+[[cmd]]
+name = "pip"
+subcommand = "install"
+effect = ["write"]
+[cmd.flags]
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+"--requirement" = { takes = true, kind = "path", effect = ["read"] }
+"-c" = { takes = true, kind = "path", effect = ["read"] }
+"--constraint" = { takes = true, kind = "path", effect = ["read"] }
+"-e" = { takes = true }
+"--editable" = { takes = true }
+"-t" = { takes = true, kind = "path", effect = ["write"] }
+"--target" = { takes = true, kind = "path", effect = ["write"] }
+"--index-url" = { takes = true }
+"--extra-index-url" = { takes = true }
+
+[[cmd]]
+name = "pip"
+subcommand = "uninstall"
+effect = ["write"]
+[cmd.flags]
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+"--requirement" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "pip"
+subcommand = "download"
+effect = ["write"]
+[cmd.flags]
+"-d" = { takes = true, kind = "path", effect = ["write"] }
+"--dest" = { takes = true, kind = "path", effect = ["write"] }
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "pip"
+subcommand = "freeze"
+effect = ["read"]
+
+[[cmd]]
+name = "pip"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "pip"
+subcommand = "show"
+effect = ["read"]
+
+[[cmd]]
+name = "pip"
+subcommand = "check"
+effect = ["read"]

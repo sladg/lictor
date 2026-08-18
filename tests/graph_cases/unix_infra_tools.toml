@@ -1,0 +1,40 @@
+# Unix/infra tool recipes: rsync's scp shape, tee/chown path claims, docker
+# exec's container payload, terraform's local file flags.
+
+[[case]]
+name    = "rsync sources read, dest written"
+command = "rsync -av src /tmp/backup"
+expect  = { local = ["reads src/**", "writes /tmp/backup/**", "creates /tmp/backup/**"] }
+
+[[case]]
+# host: prefix carries locality — the remote side produces no local edges
+name    = "rsync to remote says nothing about the remote path"
+command = "rsync a.txt host:/tmp/"
+expect  = { local = ["reads a.txt"] }
+
+[[case]]
+name    = "tee writes its arguments"
+command = "echo x | tee /etc/hosts"
+expect  = { local = ["writes /etc/hosts", "creates /etc/hosts"] }
+
+[[case]]
+# slot 0 is the owner spec, not a path
+name    = "chown owner spec is not a path"
+command = "chown root:wheel /tmp/x"
+expect  = { local = ["writes /tmp/x"] }
+
+[[case]]
+name    = "kill positionals are pids, not paths"
+command = "kill -9 1234"
+expect  = { commands = ["kill"] }
+
+[[case]]
+# the kubectl-exec shape: paths inside the container are not this machine's
+name    = "docker exec payload lands remote"
+command = "docker exec web cat /etc/passwd"
+expect  = { commands = ["docker", "cat @web"], local = [] }
+
+[[case]]
+name    = "terraform var-file is a local read"
+command = "terraform plan -var-file prod.tfvars"
+expect  = { local = ["reads prod.tfvars"] }

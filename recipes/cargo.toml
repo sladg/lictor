@@ -7,3 +7,63 @@ name = "cargo"
 "--package" = { takes = true }
 "--features" = { takes = true }
 "--target" = { takes = true }
+
+[[cmd]]
+name = "cargo"
+subcommand = "add"
+effect = ["write"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "uninstall"
+effect = ["delete"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "publish"
+effect = ["write"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "clean"
+effect = ["delete"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "init"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "new"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "metadata"
+effect = ["read"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "tree"
+effect = ["read"]
+
+[[cmd]]
+name = "cargo"
+subcommand = "search"
+effect = ["read"]

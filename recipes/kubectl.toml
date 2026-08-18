@@ -68,6 +68,7 @@ effect = ["exec"]
 [[cmd]]
 name = "kubectl"
 subcommand = "get"
+effect = ["read"]
 [cmd.flags]
 "-A" = { takes = false }
 "--all-namespaces" = { takes = false }
@@ -103,6 +104,7 @@ kind = "none"
 [[cmd]]
 name = "kubectl"
 subcommand = "logs"
+effect = ["read"]
 [cmd.flags]
 "-f" = { takes = false }
 "--follow" = { takes = false }
@@ -124,6 +126,7 @@ kind = "none"
 [[cmd]]
 name = "kubectl"
 subcommand = "apply"
+effect = ["write"]
 [cmd.flags]
 "--all" = { takes = false }
 "--allow-missing-template-keys" = { takes = false }
@@ -148,6 +151,7 @@ subcommand = "apply"
 [[cmd]]
 name = "kubectl"
 subcommand = "delete"
+effect = ["delete"]
 [cmd.flags]
 "--all" = { takes = false }
 "-A" = { takes = false }
@@ -174,6 +178,7 @@ kind = "none"
 [[cmd]]
 name = "kubectl"
 subcommand = "top"
+effect = ["read"]
 [cmd.flags]
 "-A" = { takes = false }
 "--all-namespaces" = { takes = false }
@@ -184,6 +189,21 @@ subcommand = "top"
 [[cmd.args]]
 slots = "all"
 kind = "none"
+
+# `kubectl describe TYPE [NAME]` / `kubectl create ...` — effect claims for
+# `on = {...}` verdict rules; positionals are resource identifiers, not paths.
+[[cmd]]
+name = "kubectl"
+subcommand = "describe"
+effect = ["read"]
+[[cmd.args]]
+slots = "all"
+kind = "none"
+
+[[cmd]]
+name = "kubectl"
+subcommand = "create"
+effect = ["write"]
 
 # `kubectl cp SRC DST` — the same shape as `scp a.txt host:/tmp/`: local and
 # remote paths share one positional list, told apart by a `pod:`/`ns/pod:`

@@ -40,7 +40,8 @@ expect  = { local = ["writes /tmp/both", "creates /tmp/both"] }
 # destination can — a dup's is a number, not a word.
 name    = "a descriptor dup names no file"
 command = "cmd 2>&1 | tee log.txt"
-expect  = { local = [], binds = [] }
+# tee's recipe claims log.txt; the dup itself still contributes nothing
+expect  = { local = ["creates log.txt", "writes log.txt"], binds = [] }
 
 [[case]]
 name    = "nor the other way round"

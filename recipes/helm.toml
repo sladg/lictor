@@ -8,3 +8,100 @@ name = "helm"
 "--namespace" = { takes = true }
 "--set" = { takes = true }
 "-o" = { takes = true }
+
+# effect claims for `on = {...}` verdict rules; positionals are release/chart
+# names, not paths
+[[cmd]]
+name = "helm"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "helm"
+subcommand = "upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "helm"
+subcommand = "rollback"
+effect = ["write"]
+
+[[cmd]]
+name = "helm"
+subcommand = "uninstall"
+effect = ["delete"]
+
+[[cmd]]
+name = "helm"
+subcommand = "repo add"
+effect = ["write"]
+
+[[cmd]]
+name = "helm"
+subcommand = "repo update"
+effect = ["write"]
+
+[[cmd]]
+name = "helm"
+subcommand = "repo remove"
+effect = ["delete"]
+
+[[cmd]]
+name = "helm"
+subcommand = "repo list"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "ls"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "status"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "get"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "history"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "template"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "lint"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "search"
+effect = ["read"]
+
+[[cmd]]
+name = "helm"
+subcommand = "package"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "helm"
+subcommand = "pull"
+effect = ["write"]
+
+[[cmd]]
+name = "helm"
+subcommand = "push"
+effect = ["write"]

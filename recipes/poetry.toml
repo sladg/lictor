@@ -1,0 +1,81 @@
+[[cmd]]
+name = "poetry"
+[cmd.flags]
+"-C" = { takes = true }
+"--directory" = { takes = true }
+"-P" = { takes = true }
+"--project" = { takes = true }
+
+# `poetry run cmd args...` — the payload runs inside the project venv
+[[cmd]]
+name = "poetry"
+subcommand = "run"
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "add"
+effect = ["write"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "lock"
+effect = ["write"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "build"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "publish"
+effect = ["write"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "init"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "new"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "show"
+effect = ["read"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "check"
+effect = ["read"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "env info"
+effect = ["read"]
+
+[[cmd]]
+name = "poetry"
+subcommand = "env list"
+effect = ["read"]

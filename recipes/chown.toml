@@ -1,0 +1,13 @@
+# slot 0 is the owner spec (`user:group`), not a path — same shape as chmod's
+# mode word
+[[cmd]]
+name = "chown"
+[cmd.flags]
+"--reference" = { takes = true, kind = "path", effect = ["read"] }
+[[cmd.args]]
+slots = "all"
+kind = "path"
+effect = ["write"]
+[[cmd.args]]
+slots = "first"
+kind = "none"

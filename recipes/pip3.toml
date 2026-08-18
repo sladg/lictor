@@ -1,0 +1,59 @@
+# Mirror of pip.toml — recipes key on the exact program name and there is no
+# alias mechanism; keep the two files in sync.
+# Install positionals are package specs that MAY be local dirs (`pip install .`)
+# but are usually registry names — they stay silent, same reasoning as npm.
+[[cmd]]
+name = "pip3"
+
+[[cmd]]
+name = "pip3"
+subcommand = "install"
+effect = ["write"]
+[cmd.flags]
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+"--requirement" = { takes = true, kind = "path", effect = ["read"] }
+"-c" = { takes = true, kind = "path", effect = ["read"] }
+"--constraint" = { takes = true, kind = "path", effect = ["read"] }
+"-e" = { takes = true }
+"--editable" = { takes = true }
+"-t" = { takes = true, kind = "path", effect = ["write"] }
+"--target" = { takes = true, kind = "path", effect = ["write"] }
+"--index-url" = { takes = true }
+"--extra-index-url" = { takes = true }
+
+[[cmd]]
+name = "pip3"
+subcommand = "uninstall"
+effect = ["write"]
+[cmd.flags]
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+"--requirement" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "pip3"
+subcommand = "download"
+effect = ["write"]
+[cmd.flags]
+"-d" = { takes = true, kind = "path", effect = ["write"] }
+"--dest" = { takes = true, kind = "path", effect = ["write"] }
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "pip3"
+subcommand = "freeze"
+effect = ["read"]
+
+[[cmd]]
+name = "pip3"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "pip3"
+subcommand = "show"
+effect = ["read"]
+
+[[cmd]]
+name = "pip3"
+subcommand = "check"
+effect = ["read"]

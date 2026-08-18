@@ -1,0 +1,52 @@
+# Mirror of apt.toml's verbs — recipes key on the exact program name.
+[[cmd]]
+name = "apt-get"
+[cmd.flags]
+"-y" = { takes = false }
+"--yes" = { takes = false }
+"-t" = { takes = true }
+
+[[cmd]]
+name = "apt-get"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "dist-upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "remove"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "purge"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "autoremove"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "clean"
+effect = ["delete"]
+
+[[cmd]]
+name = "apt-get"
+subcommand = "check"
+effect = ["read"]

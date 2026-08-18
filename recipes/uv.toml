@@ -1,0 +1,133 @@
+# `uv run cmd args...` resolves the payload in the project venv; a script-file
+# argument becomes an unmapped program and stays silent, which is honest.
+[[cmd]]
+name = "uv"
+[cmd.flags]
+"--directory" = { takes = true }
+"--project" = { takes = true }
+
+[[cmd]]
+name = "uv"
+subcommand = "run"
+[cmd.flags]
+"--with" = { takes = true }
+"-p" = { takes = true }
+"--python" = { takes = true }
+"--group" = { takes = true }
+"--env-file" = { takes = true, kind = "path", effect = ["read"] }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+# `uv tool run pkg args...` — the npx shape (uvx is its alias)
+[[cmd]]
+name = "uv"
+subcommand = "tool run"
+[cmd.flags]
+"--from" = { takes = true }
+"--with" = { takes = true }
+[[cmd.args]]
+slots = "rest"
+kind = "cmd"
+effect = ["exec"]
+
+[[cmd]]
+name = "uv"
+subcommand = "sync"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "add"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "remove"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "lock"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "venv"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "uv"
+subcommand = "init"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "uv"
+subcommand = "build"
+effect = ["write", "create"]
+
+[[cmd]]
+name = "uv"
+subcommand = "publish"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "tool install"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "tool uninstall"
+effect = ["delete"]
+
+[[cmd]]
+name = "uv"
+subcommand = "python install"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "pip install"
+effect = ["write"]
+[cmd.flags]
+"-r" = { takes = true, kind = "path", effect = ["read"] }
+"--requirement" = { takes = true, kind = "path", effect = ["read"] }
+"-c" = { takes = true, kind = "path", effect = ["read"] }
+"--constraint" = { takes = true, kind = "path", effect = ["read"] }
+"-e" = { takes = true }
+"--editable" = { takes = true }
+
+[[cmd]]
+name = "uv"
+subcommand = "pip uninstall"
+effect = ["write"]
+
+[[cmd]]
+name = "uv"
+subcommand = "pip freeze"
+effect = ["read"]
+
+[[cmd]]
+name = "uv"
+subcommand = "pip list"
+effect = ["read"]
+
+[[cmd]]
+name = "uv"
+subcommand = "pip show"
+effect = ["read"]
+
+[[cmd]]
+name = "uv"
+subcommand = "tree"
+effect = ["read"]
+
+[[cmd]]
+name = "uv"
+subcommand = "pip compile"
+effect = ["write"]
+[cmd.flags]
+"-o" = { takes = true, kind = "path", effect = ["write", "create"] }
+"--output-file" = { takes = true, kind = "path", effect = ["write", "create"] }

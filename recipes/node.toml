@@ -1,0 +1,19 @@
+# `-r`/`--require`/`--import` values may be bare module specifiers, not paths,
+# so they only consume the word — claiming a path read on `-r lodash` would be
+# a false relative-path claim.
+[[cmd]]
+name = "node"
+[cmd.flags]
+"-e" = { takes = true, kind = "code" }
+"--eval" = { takes = true, kind = "code" }
+"-p" = { takes = true, kind = "code" }
+"--print" = { takes = true, kind = "code" }
+"-r" = { takes = true }
+"--require" = { takes = true }
+"--import" = { takes = true }
+"--env-file" = { takes = true, kind = "path", effect = ["read"] }
+[[cmd.args]]
+slots = "first"
+kind = "path"
+effect = ["read"]
+when = { without = ["-e", "--eval", "-p", "--print"] }

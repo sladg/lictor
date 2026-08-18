@@ -1,0 +1,122 @@
+# Positionals are formula/cask names, not paths. Effect claims are
+# command-level, for `on = {...}` verdict rules.
+[[cmd]]
+name = "brew"
+[cmd.flags]
+"--cask" = { takes = false }
+"--formula" = { takes = false }
+
+[[cmd]]
+name = "brew"
+subcommand = "install"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "reinstall"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "upgrade"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "update"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "uninstall"
+effect = ["delete"]
+
+[[cmd]]
+name = "brew"
+subcommand = "remove"
+effect = ["delete"]
+
+[[cmd]]
+name = "brew"
+subcommand = "autoremove"
+effect = ["delete"]
+
+[[cmd]]
+name = "brew"
+subcommand = "cleanup"
+effect = ["delete"]
+
+[[cmd]]
+name = "brew"
+subcommand = "tap"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "untap"
+effect = ["delete"]
+
+[[cmd]]
+name = "brew"
+subcommand = "link"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "unlink"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "services start"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "services stop"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "services restart"
+effect = ["write"]
+
+[[cmd]]
+name = "brew"
+subcommand = "services list"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "list"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "info"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "search"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "deps"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "outdated"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "doctor"
+effect = ["read"]
+
+[[cmd]]
+name = "brew"
+subcommand = "config"
+effect = ["read"]
