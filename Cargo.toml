@@ -1,6 +1,6 @@
 [package]
 name = "lictor"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 # let-chains need 1.88; turns a stale toolchain into one clear cargo error
 rust-version = "1.88"
