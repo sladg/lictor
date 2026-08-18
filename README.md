@@ -74,7 +74,7 @@ lictor: output shrunk 3492 → 267 bytes
 
 ## Configuration
 
-Everything lives in `lictor.toml`. Configs chain — user file (`~/.config/lictor/config.toml`, or `$XDG_CONFIG_HOME`), then `.claude/lictor.toml` / `lictor.toml` in every directory from the filesystem root down to cwd — so a monorepo root config applies in every package. Rule lists concatenate, deeper files win per key, deny beats allow — a project file can't unban a user-level ban.
+Everything lives in `lictor.toml`. Configs chain — user file (`~/.config/lictor/config.toml`, or `$XDG_CONFIG_HOME`), then `.claude/lictor.toml` / `lictor.toml` in every directory from the filesystem root down to cwd — so a monorepo root config applies in every package. Rule lists concatenate and deeper files win per key. A deeper `[[bash]]` rule spelling the **identical** `match` replaces the earlier file's rules for that pattern — so a project can relax a user-level ban (`deny` → `ask`) as well as tighten it; patterns the project doesn't redefine keep the user verdict, and within one file same-pattern rules stack as before.
 
 ```toml
 [settings]

@@ -367,6 +367,14 @@ pub struct Config {
 
 impl Config {
     pub fn merge(mut self, other: Config) -> Config {
+        // same-pattern `[[bash]]` group: later file (project) replaces earlier
+        // (user) — the catalog convention applied to flat rules. Severity
+        // resolution across a concatenated list is escalate-only, so without
+        // replacement a project could never RELAX a user rule (#57). Within
+        // one file same-pattern rules still stack (deny-with-contains next to
+        // a general ask); replacement is strictly cross-layer.
+        self.bash
+            .retain(|r| !other.bash.iter().any(|o| o.pattern == r.pattern));
         self.bash.extend(other.bash);
         self.edit.extend(other.edit);
         self.path.extend(other.path);
@@ -922,5 +930,88 @@ max_lines = 5
         assert_eq!(config.web.len(), 1, "web block dropped by merge");
         assert_eq!(config.agent.len(), 1, "agent block dropped by merge");
         assert_eq!(config.minify.len(), 1, "minify block dropped by merge");
+    }
+
+    // ── #57: same-pattern replacement across layers ──
+
+    fn layered(user: &str, project: &str) -> Config {
+        let user: Config = toml::from_str(user).expect("user config parses");
+        let project: Config = toml::from_str(project).expect("project config parses");
+        let mut config = Config::default().merge(user).merge(project);
+        config = config.apply_mode(None);
+        config.finalize().expect("layered config finalizes");
+        config
+    }
+
+    fn actions_for<'a>(config: &'a Config, pattern: &str) -> Vec<&'a Action> {
+        config
+            .bash
+            .iter()
+            .filter(|r| r.pattern == pattern)
+            .map(|r| &r.action)
+            .collect()
+    }
+
+    #[test]
+    fn a_project_rule_relaxes_a_user_rule() {
+        // THE bug: severity across a concatenated list is escalate-only, so a
+        // user deny was final for every repo on the machine
+        let config = layered(
+            "[[bash]]\nmatch = \"git add*\"\naction = \"deny\"\n",
+            "[[bash]]\nmatch = \"git add*\"\naction = \"ask\"\n",
+        );
+        assert_eq!(actions_for(&config, "git add*"), [&Action::Ask]);
+    }
+
+    #[test]
+    fn a_project_rule_still_escalates() {
+        let config = layered(
+            "[[bash]]\nmatch = \"rm -rf*\"\naction = \"ask\"\n",
+            "[[bash]]\nmatch = \"rm -rf*\"\naction = \"deny\"\n",
+        );
+        assert_eq!(actions_for(&config, "rm -rf*"), [&Action::Deny]);
+    }
+
+    #[test]
+    fn an_unredefined_pattern_survives_the_layer() {
+        // `git stash*` stays deny globally by simply not being redefined
+        let config = layered(
+            "[[bash]]\nmatch = \"git stash*\"\naction = \"deny\"\n",
+            "[[bash]]\nmatch = \"git add*\"\naction = \"ask\"\n",
+        );
+        assert_eq!(actions_for(&config, "git stash*"), [&Action::Deny]);
+        assert_eq!(actions_for(&config, "git add*"), [&Action::Ask]);
+    }
+
+    #[test]
+    fn same_pattern_rules_in_one_file_still_stack() {
+        // a deny-with-contains next to a general ask is legitimate layering
+        // WITHIN a file — replacement is strictly cross-layer
+        let project = "[[bash]]\nmatch = \"git push*\"\naction = \"ask\"\n\
+                       [[bash]]\nmatch = \"git push*\"\ncontains = [\"--force\"]\naction = \"deny\"\n";
+        let config = layered(
+            "[[bash]]\nmatch = \"git push*\"\naction = \"deny\"\n",
+            project,
+        );
+        assert_eq!(
+            actions_for(&config, "git push*"),
+            [&Action::Ask, &Action::Deny],
+            "both project rules must survive, the user rule must not"
+        );
+    }
+
+    #[test]
+    fn replacement_does_not_cross_into_catalog_rules() {
+        // catalog blocks expand into bash rules AFTER merge (finalize), so a
+        // project [[bash]] never deletes a catalog's rules — only flat rules
+        // from earlier files
+        let config = layered(
+            "[settings]\ncatalogs = [\"recommended\"]\n",
+            "[[bash]]\nmatch = \"git push*\"\naction = \"ask\"\n",
+        );
+        assert!(
+            config.bash.len() > 1,
+            "catalog-derived rules must survive a project redefinition"
+        );
     }
 }
