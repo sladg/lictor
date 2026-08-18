@@ -33,6 +33,39 @@ pub enum ModuleSetting {
     Allow,
 }
 
+// effect-verdict map for a [[bash]] rule: the action is picked from what the
+// matched command DOES according to the graph (recipe command-level effects +
+// its reference edges), most severe applicable wins. The rule's own `action`
+// is the fallback for commands the graph knows nothing about.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectActions {
+    #[serde(default)]
+    pub read: Option<Action>,
+    #[serde(default)]
+    pub write: Option<Action>,
+    #[serde(default)]
+    pub create: Option<Action>,
+    #[serde(default)]
+    pub delete: Option<Action>,
+}
+
+impl EffectActions {
+    pub fn for_effect(&self, effect: crate::cmdmap::Effect) -> Option<Action> {
+        match effect {
+            crate::cmdmap::Effect::Read => self.read,
+            crate::cmdmap::Effect::Write => self.write,
+            crate::cmdmap::Effect::Create => self.create,
+            crate::cmdmap::Effect::Delete => self.delete,
+            _ => None,
+        }
+    }
+
+    pub fn any(&self, action: Action) -> bool {
+        [self.read, self.write, self.create, self.delete].contains(&Some(action))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BashRule {
     #[serde(rename = "match")]
@@ -44,6 +77,10 @@ pub struct BashRule {
     #[serde(default)]
     pub only: Vec<String>,
     pub action: Action,
+    // when set, `action` becomes the fallback and the real verdict comes from
+    // the command's effects: on = { read = "allow", write = "ask", delete = "deny" }
+    #[serde(default)]
+    pub on: Option<EffectActions>,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
@@ -736,6 +773,7 @@ impl Config {
                 if let Some(action) = catalog.action {
                     self.bash.push(BashRule {
                         pattern: pattern.clone(),
+                        on: None,
                         contains: member.contains.clone(),
                         only: member.only.clone(),
                         action,

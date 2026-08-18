@@ -1,6 +1,6 @@
 ---
 created_at: 2026-07-14
-updated_at: 2026-07-14
+updated_at: 2026-08-18
 ---
 
 # allow
@@ -50,7 +50,34 @@ git status 2>&1               → runs, no prompt (fd dup is harmless)
 rg TODO > /dev/null           → runs, no prompt (/dev/null target is harmless)
 ```
 
-Deny always beats allow — an `allow` in a project config can't unban a user-level `deny`.
+Deny beats allow when both match the same command — with one exception: a deeper config file spelling the **identical** `match` replaces the earlier file's rules for that pattern (#57), so a project can deliberately relax a user-level rule by redefining it.
+
+## Effect-verdict rules (`on`)
+
+One rule whose verdict comes from what the command **does** — read/write/create/delete, taken from the graph (recipe command-level effects plus reference edges) — instead of from its spelling. Most severe applicable effect wins; the rule's `action` is the fallback for commands the graph knows nothing about.
+
+The motivating case is the git-hosting CLIs: let an agent browse remote state freely, confirm anything that writes it, and never delete:
+
+```toml
+[[bash]]
+match  = "gh *"
+action = "ask"                     # fallback: subcommands with no recipe claim
+on     = { read = "allow", write = "ask", delete = "deny" }
+
+[[bash]]
+match  = "glab *"
+action = "ask"
+on     = { read = "allow", write = "ask", delete = "deny" }
+```
+
+```
+gh pr list                    → runs, no prompt (recipe says: read)
+gh pr merge 42 --squash       → prompt (write — opening/merging PRs is outward-facing)
+gh repo delete o/r --yes      → denied (delete)
+gh copilot suggest x          → prompt (no effect claim — the fallback decides)
+```
+
+The same shape works for filesystem tools, because reference-edge effects count too: `match = "*"` with `on = { read = "allow", delete = "deny" }` allows `cat README.md` and denies `rm build.log` from one rule. Note `gh pr merge --admin` is denied by the `destructive` catalog independently of any `on` map — `--admin` bypasses branch protection.
 
 ## Pipeline/chain-aware matching
 

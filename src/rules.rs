@@ -444,9 +444,61 @@ fn match_graph(query: &GraphQuery, commands: &[Command], command: &Command) -> M
     }
 }
 
+// most-restrictive-wins rank for effect-verdict maps; mirrors the resolution
+// order the gate gets for free from its collection mechanics
+fn severity(action: Action) -> u8 {
+    match action {
+        Action::Deny => 6,
+        Action::Skip => 5,
+        Action::Ask => 4,
+        Action::Warn => 3,
+        Action::Rewrite => 2,
+        Action::Log => 1,
+        Action::Allow => 0,
+    }
+}
+
+// what the command DOES, for `on = {...}` rules: its recipe's command-level
+// effects plus the effects of every reference it makes (local and remote —
+// `gh pr merge` writes a PR, `rm x` deletes a file; both count)
+fn command_effects(extraction: &Extraction, command: &Command) -> Vec<crate::cmdmap::Effect> {
+    let Some(start) = command.words.first().map(|w| w.start) else {
+        return Vec::new();
+    };
+    let graph = &extraction.graph;
+    let Some((id, node)) = graph
+        .commands()
+        .find(|(_, c)| c.spans.iter().any(|s| s.start == start))
+    else {
+        return Vec::new();
+    };
+    let mut out = node.effects.clone();
+    for reference in graph.references() {
+        if reference.command == id && !out.contains(&reference.effect) {
+            out.push(reference.effect);
+        }
+    }
+    out
+}
+
+// the action this rule contributes for THIS command: the effect-verdict map
+// when one of the command's effects is spelled there, the flat `action`
+// otherwise (also the fallback for commands the graph knows nothing about)
+fn effective_action(rule: &CompiledBashRule, effects: &[crate::cmdmap::Effect]) -> Action {
+    let Some(on) = &rule.rule.on else {
+        return rule.rule.action;
+    };
+    effects
+        .iter()
+        .filter_map(|e| on.for_effect(*e))
+        .max_by_key(|a| severity(*a))
+        .unwrap_or(rule.rule.action)
+}
+
 pub fn match_command(rule: &CompiledBashRule, commands: &[Command], ci: usize) -> Match {
     let command = &commands[ci];
-    let match_raw = matches!(rule.rule.action, Action::Deny);
+    let match_raw = matches!(rule.rule.action, Action::Deny)
+        || rule.rule.on.as_ref().is_some_and(|on| on.any(Action::Deny));
     let mut best = Match::No;
     for pattern in &rule.patterns {
         let prefix = match_prefix(pattern, command);
@@ -559,16 +611,18 @@ pub fn gate(
     // collect matches for every (command, rule) pair first; severity decides afterwards,
     // so config order can't let an ask/allow rule shadow a deny
     for (ci, command) in extraction.commands.iter().enumerate() {
+        let effects = command_effects(extraction, command);
         for rule in rules {
             let matched = match_command(rule, &extraction.commands, ci);
             if matched == Match::No || rule.rule.action == Action::Skip {
                 continue;
             }
-            if (skipped[ci] || web_verdicts[ci].vetted) && rule.rule.action != Action::Deny {
+            let action = effective_action(rule, &effects);
+            if (skipped[ci] || web_verdicts[ci].vetted) && action != Action::Deny {
                 continue;
             }
             let display = command.display();
-            match (rule.rule.action, matched) {
+            match (action, matched) {
                 (Action::Deny, Match::Yes) => {
                     deny_hit.get_or_insert(rule.rule.reason.clone().unwrap_or(format!(
                         "lictor: `{display}` is banned by rule `{}`",

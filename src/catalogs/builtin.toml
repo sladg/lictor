@@ -60,8 +60,21 @@ action = "allow"
 match = [
   "gh pr list", "gh pr view", "gh pr checks", "gh pr status", "gh pr diff",
   "gh issue list", "gh issue view", "gh run list", "gh run view", "gh run watch",
-  "gh repo view", "gh release list", "gh release view", "gh auth status",
-  "gh search", "gh label list",
+  "gh repo view", "gh repo list", "gh release list", "gh release view",
+  "gh auth status", "gh search", "gh label list", "gh status",
+  "gh gist list", "gh gist view", "gh workflow list", "gh workflow view",
+  "gh cache list", "gh variable list", "gh ruleset list", "gh ruleset view",
+]
+
+[catalog.glab-read]
+action = "allow"
+match = [
+  "glab mr list", "glab mr view", "glab mr diff", "glab mr checkout",
+  "glab issue list", "glab issue view", "glab repo view",
+  "glab release list", "glab release view", "glab auth status",
+  "glab ci list", "glab ci status", "glab ci view", "glab ci trace",
+  "glab pipeline list", "glab pipeline status", "glab label list",
+  "glab variable list", "glab snippet list",
 ]
 
 [catalog.docker-read]
@@ -127,12 +140,56 @@ match = [
   "apt install", "apt-get install", "gem install",
 ]
 
+# remote-state writes on the git-hosting CLIs: creating/merging/closing PRs,
+# publishing releases, dispatching workflows — reversible-ish but outward-facing,
+# so a human confirms. `api` can issue arbitrary REST verbs, including DELETE.
+[catalog.gh-write]
+action = "ask"
+reason = "Writes to GitHub (remote state)."
+match = [
+  "gh pr create", "gh pr edit", "gh pr merge", "gh pr close", "gh pr reopen",
+  "gh pr comment", "gh pr review", "gh pr ready",
+  "gh issue create", "gh issue edit", "gh issue close", "gh issue reopen",
+  "gh issue comment", "gh issue transfer", "gh issue pin",
+  "gh release create", "gh release edit", "gh release upload",
+  "gh repo create", "gh repo edit", "gh repo fork", "gh repo rename",
+  "gh repo archive", "gh repo unarchive", "gh repo sync",
+  "gh label create", "gh label edit", "gh label delete",
+  "gh workflow run", "gh workflow enable", "gh workflow disable",
+  "gh run rerun", "gh run cancel", "gh run delete",
+  "gh secret set", "gh secret delete", "gh variable set", "gh variable delete",
+  "gh gist create", "gh gist edit", "gh api",
+  "gh extension install", "gh extension upgrade",
+]
+
+[catalog.glab-write]
+action = "ask"
+reason = "Writes to GitLab (remote state)."
+match = [
+  "glab mr create", "glab mr update", "glab mr merge", "glab mr close",
+  "glab mr reopen", "glab mr note", "glab mr approve", "glab mr revoke",
+  "glab issue create", "glab issue update", "glab issue close",
+  "glab issue reopen", "glab issue note",
+  "glab release create", "glab release upload",
+  "glab repo create", "glab repo fork", "glab repo clone",
+  "glab label create", "glab ci run", "glab ci retry", "glab ci cancel",
+  "glab variable set", "glab variable update", "glab variable delete",
+  "glab snippet create", "glab api",
+]
+
 [catalog.secrets-read]
 action = "deny"
 reason = "Reading secret material is banned."
 [[catalog.secrets-read.rules]]
 match = ["cat", "less", "more", "head", "tail", "bat", "strings", "od", "xxd", "grep", "rg", "sed"]
 contains = ["*.env*", "*.pem", "*.key", "*id_rsa*", "*id_ed25519*", "*id_ecdsa*", "*.aws/credentials*", "*.ssh/*", "*.npmrc", "*.netrc", "*.kube/config*"]
+# `gh auth token` prints the OAuth token to stdout; `auth status` only leaks
+# it when asked to (-t / --show-token) — the bare form stays a gh-read allow
+[[catalog.secrets-read.rules]]
+match = ["gh auth token", "glab auth token"]
+[[catalog.secrets-read.rules]]
+match = ["gh auth status", "glab auth status"]
+contains = ["-t", "--show-token"]
 
 [catalog.destructive]
 action = "deny"
@@ -151,6 +208,19 @@ contains = ["/", "/\\*", "~", "~/\\*", "--no-preserve-root"]
 [[catalog.destructive.rules]]
 match = ["git push"]
 contains = ["--force", "-f"]
+# git-hosting deletions are remote and hard to reverse: a deleted repo, release
+# or gist is gone for every collaborator, not just this checkout
+[[catalog.destructive.rules]]
+match = [
+  "gh repo delete", "gh release delete", "gh gist delete", "gh workflow delete",
+  "glab repo delete", "glab project delete", "glab release delete",
+  "glab snippet delete", "glab mr delete", "glab issue delete",
+]
+# --admin bypasses branch protection — merging over a red CI or missing reviews
+# is exactly what protection exists to prevent
+[[catalog.destructive.rules]]
+match = ["gh pr merge"]
+contains = ["--admin"]
 [[catalog.destructive.rules]]
 match = ["psql", "mysql", "mariadb", "sqlite3", "mongosh", "clickhouse-client"]
 contains = ["*DROP DATABASE*", "*DROP TABLE*", "*TRUNCATE TABLE*", "*drop database*", "*drop table*"]
@@ -226,6 +296,14 @@ contains = ["*"]
 [[catalog.gtfobins.rules]]
 match = ["gem open", "pip config"]
 contains = ["-e*", "--editor*"]
+# gh/glab code-execution vectors: a --shell alias runs later as an arbitrary
+# command, and a pager/editor config value executes on the next invocation
+[[catalog.gtfobins.rules]]
+match = ["gh alias set", "glab alias set"]
+contains = ["-s", "--shell"]
+[[catalog.gtfobins.rules]]
+match = ["gh config set", "glab config set"]
+contains = ["*pager*", "*editor*", "*browser*", "*glab_pager*"]
 # tcpdump post-rotate command
 [[catalog.gtfobins.rules]]
 match = ["tcpdump"]

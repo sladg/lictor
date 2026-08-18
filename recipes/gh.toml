@@ -9,3 +9,409 @@ name = "gh"
 "--jq" = { takes = true, kind = "code" }
 "-R" = { takes = true }
 "--repo" = { takes = true }
+
+# subcommands with filesystem surface — the remote-state policy lives in the
+# gh-write/gh-read catalogs; recipes only say which words are LOCAL paths
+
+[[cmd]]
+name = "gh"
+subcommand = "release upload"
+effect = ["write"]
+# slot 0 is the release TAG; every later positional is an asset file. Entries
+# resolve last-match-wins, so the `first = none` line shadows `all` for slot 0.
+[[cmd.args]]
+slots  = "all"
+kind   = "path"
+effect = ["read"]
+[[cmd.args]]
+slots  = "first"
+kind   = "none"
+
+[[cmd]]
+name = "gh"
+subcommand = "release download"
+effect = ["read"]
+[cmd.flags]
+"-D" = { takes = true, kind = "path", effect = ["create", "write"] }
+"--dir" = { takes = true, kind = "path", effect = ["create", "write"] }
+"-O" = { takes = true, kind = "path", effect = ["create", "write"] }
+"--output" = { takes = true, kind = "path", effect = ["create", "write"] }
+
+[[cmd]]
+name = "gh"
+subcommand = "run download"
+effect = ["read"]
+[cmd.flags]
+"-D" = { takes = true, kind = "path", effect = ["create", "write"] }
+"--dir" = { takes = true, kind = "path", effect = ["create", "write"] }
+
+[[cmd]]
+name = "gh"
+subcommand = "repo clone"
+effect = ["read"]
+[[cmd.args]]
+slots  = "1"
+kind   = "path"
+effect = ["create"]
+
+[[cmd]]
+name = "gh"
+subcommand = "gist create"
+effect = ["write"]
+[[cmd.args]]
+slots  = "all"
+kind   = "path"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr create"
+effect = ["write"]
+[cmd.flags]
+"-F" = { takes = true, kind = "path", effect = ["read"] }
+"--body-file" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "gh"
+subcommand = "issue create"
+effect = ["write"]
+[cmd.flags]
+"-F" = { takes = true, kind = "path", effect = ["read"] }
+"--body-file" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "gh"
+subcommand = "release create"
+effect = ["write"]
+[cmd.flags]
+"-F" = { takes = true, kind = "path", effect = ["read"] }
+"--notes-file" = { takes = true, kind = "path", effect = ["read"] }
+
+[[cmd]]
+name = "gh"
+subcommand = "api"
+effect = ["read", "write"]
+[cmd.flags]
+"--input" = { takes = true, kind = "path", effect = ["read"] }
+
+# effect claims for the remote-noun subcommands: no local paths, but an
+# `on = {...}` effect-verdict rule needs to know read from write from delete
+[[cmd]]
+name = "gh"
+subcommand = "pr list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr checks"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr status"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr diff"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "run list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "run view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "run watch"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "release list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "release view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "auth status"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "search"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "label list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "status"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "gist list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "gist view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "workflow list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "workflow view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "cache list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "variable list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "ruleset list"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "ruleset view"
+effect = ["read"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr edit"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr merge"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr close"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr reopen"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr comment"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr review"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "pr ready"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue edit"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue close"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue reopen"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue comment"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue transfer"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "issue pin"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "release edit"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo create"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo edit"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo fork"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo rename"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo archive"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo unarchive"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo sync"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "label create"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "label edit"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "workflow run"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "workflow enable"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "workflow disable"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "run rerun"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "run cancel"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "secret set"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "variable set"
+effect = ["write"]
+
+[[cmd]]
+name = "gh"
+subcommand = "repo delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "release delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "gist delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "workflow delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "label delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "run delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "secret delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "gh"
+subcommand = "variable delete"
+effect = ["delete"]

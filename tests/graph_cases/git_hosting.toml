@@ -1,0 +1,35 @@
+name  = "git-hosting CLIs: local paths vs remote nouns"
+issue = 55
+
+# gh/glab arguments are mostly remote nouns (PR numbers, repo slugs, tags) —
+# only the flags and slots the recipes mark are LOCAL filesystem paths.
+
+[[case]]
+name    = "release upload: the tag is a noun, the assets are files"
+command = "gh release upload v1.0 dist/app.tgz dist/app.sha256"
+expect  = { local = ["reads dist/app.tgz", "reads dist/app.sha256"] }
+
+[[case]]
+name    = "repo clone's target directory is created"
+command = "gh repo clone owner/repo /tmp/checkout"
+expect  = { local = ["creates /tmp/checkout"] }
+
+[[case]]
+name    = "a body file is read"
+command = "gh pr create -F notes.md --title x"
+expect  = { local = ["reads notes.md"] }
+
+[[case]]
+name    = "release download lands in a directory"
+command = "gh release download v1.0 -D /tmp/assets"
+expect  = { local = ["creates /tmp/assets", "writes /tmp/assets"] }
+
+[[case]]
+name    = "a repo slug and flag values are not paths"
+command = "gh pr list -R owner/repo --jq '.[].title'"
+expect  = { local = [] }
+
+[[case]]
+name    = "glab release upload reads its assets"
+command = "glab release upload v1.0 dist/app.zip"
+expect  = { local = ["reads dist/app.zip"] }

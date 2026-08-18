@@ -68,6 +68,12 @@ pub struct Program {
     /// argument entry can carry it)
     #[serde(default)]
     pub stdin: Option<Kind>,
+    /// what running this entry does to state with no local path — a remote
+    /// repository, PR, release. Carried onto the command node so effect-verdict
+    /// rules (`on = { read = "allow", write = "ask", ... }`) can pick a verdict
+    /// from what a subcommand DOES rather than from its spelling.
+    #[serde(default)]
+    pub effect: Vec<Effect>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +349,16 @@ impl Maps {
             {
                 return Err(format!(
                     "command map: `{label}` `stdin` is `{kind:?}` — only `shell` is supported"
+                ));
+            }
+            if program
+                .effect
+                .iter()
+                .any(|e| matches!(e, Effect::Exec | Effect::Env))
+            {
+                return Err(format!(
+                    "command map: `{label}` has a command-level `exec`/`env` effect — \
+                     only read/write/create/delete describe what an entry does"
                 ));
             }
             // an `exec` effect on anything the graph cannot point an edge at is

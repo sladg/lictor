@@ -1275,6 +1275,126 @@ fn bundle_recommended_asks_and_denies() {
 }
 
 #[test]
+fn bundle_git_hosting_clis_are_layered() {
+    // issue #55: gh/glab get the read/write/destructive/secrets split
+    let allows = [
+        "gh pr view 42 --comments",
+        "gh workflow list",
+        "gh auth status",
+        "glab mr list",
+        "glab ci status",
+        "glab auth status",
+    ];
+    for case in allows {
+        let output = bundle_bash(case);
+        assert_eq!(
+            decision(&output),
+            Some("allow".into()),
+            "expected allow for: {case}\ngot: {output:?}"
+        );
+    }
+    let asks = [
+        "gh pr merge 42 --squash",
+        "gh api repos/o/r/issues -f title=x",
+        "gh workflow run deploy.yml",
+        "glab mr merge 42",
+        "glab api projects/1/issues",
+    ];
+    for case in asks {
+        let output = bundle_bash(case);
+        assert_eq!(
+            decision(&output),
+            Some("ask".into()),
+            "expected ask for: {case}\ngot: {output:?}"
+        );
+    }
+    let denies = [
+        "gh repo delete o/r --yes",
+        "gh release delete v1.0",
+        "glab project delete o/r",
+        // the token itself, and the flag that makes auth status print it
+        "gh auth token",
+        "gh auth status --show-token",
+        "glab auth status -t",
+        // config-value code execution
+        "gh config set pager 'sh -c evil'",
+        "gh alias set pwn --shell 'rm -rf /'",
+    ];
+    for case in denies {
+        let output = bundle_bash(case);
+        assert_eq!(
+            decision(&output),
+            Some("deny".into()),
+            "expected deny for: {case}\ngot: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn effect_verdict_rule_splits_read_write_delete() {
+    // one rule, verdict picked from what the subcommand DOES per its recipe's
+    // command-level effect; `action` is the fallback for unmapped subcommands
+    let policy = "[[bash]]\nmatch = \"gh *\"\naction = \"ask\"\n\
+                  on = { read = \"allow\", write = \"ask\", delete = \"deny\" }\n";
+    for (command, expected) in [
+        ("gh pr list", Some("allow")),
+        ("gh pr view 42 --comments", Some("allow")),
+        ("gh pr merge 42 --squash", Some("ask")),
+        ("gh workflow run deploy.yml", Some("ask")),
+        ("gh repo delete o/r --yes", Some("deny")),
+        ("gh secret delete TOKEN", Some("deny")),
+        // no recipe entry claims an effect for this — the fallback decides
+        ("gh copilot suggest x", Some("ask")),
+    ] {
+        let output = run_with(
+            policy,
+            "PreToolUse",
+            "Bash",
+            json!({"command": command}),
+            None,
+        );
+        assert_eq!(
+            decision(&output),
+            expected.map(String::from),
+            "wrong verdict for: {command}\ngot: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn effect_verdict_uses_reference_effects_too() {
+    // effects come from reference edges as well as command-level claims, so
+    // the same rule shape works for filesystem tools
+    let policy = "[[bash]]\nmatch = \"*\"\naction = \"ask\"\n\
+                  on = { read = \"allow\", delete = \"deny\" }\n";
+    let read = run_with(
+        policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "cat README.md"}),
+        None,
+    );
+    assert_eq!(decision(&read), Some("allow".into()), "got: {read:?}");
+    let delete = run_with(
+        policy,
+        "PreToolUse",
+        "Bash",
+        json!({"command": "rm build.log"}),
+        None,
+    );
+    assert_eq!(decision(&delete), Some("deny".into()), "got: {delete:?}");
+}
+
+#[test]
+fn bundle_admin_merge_is_denied() {
+    // --admin bypasses branch protection; the plain merge stays an ask
+    let output = bundle_bash("gh pr merge 42 --admin");
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+    let output = bundle_bash("gh pr merge 42 --squash");
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
 fn bundle_severity_secrets_beat_text_read_allow() {
     // `cat` is allowed by text-read, but secrets-read (deny) wins on .env
     let output = bundle_bash("cat src/config.rs && cat .env.local");

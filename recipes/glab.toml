@@ -1,0 +1,274 @@
+[[cmd]]
+name = "glab"
+[cmd.flags]
+"-R" = { takes = true }
+"--repo" = { takes = true }
+
+[[cmd]]
+name = "glab"
+subcommand = "repo clone"
+effect = ["read"]
+[[cmd.args]]
+slots  = "1"
+kind   = "path"
+effect = ["create"]
+
+[[cmd]]
+name = "glab"
+subcommand = "release upload"
+effect = ["write"]
+# slot 0 is the release TAG; every later positional is an asset file. Entries
+# resolve last-match-wins, so the `first = none` line shadows `all` for slot 0.
+[[cmd.args]]
+slots  = "all"
+kind   = "path"
+effect = ["read"]
+[[cmd.args]]
+slots  = "first"
+kind   = "none"
+
+# effect claims for the remote-noun subcommands (see gh.toml)
+[[cmd]]
+name = "glab"
+subcommand = "mr list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr view"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr diff"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue view"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "repo view"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "release list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "release view"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "auth status"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci status"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci view"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci trace"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "pipeline list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "pipeline status"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "label list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "variable list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "snippet list"
+effect = ["read"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr create"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr update"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr merge"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr close"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr reopen"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr note"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr approve"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr revoke"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue create"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue update"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue close"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue reopen"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue note"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "release create"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "repo create"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "repo fork"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "label create"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci run"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci retry"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "ci cancel"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "variable set"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "variable update"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "snippet create"
+effect = ["write"]
+
+[[cmd]]
+name = "glab"
+subcommand = "repo delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "project delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "release delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "snippet delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "mr delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "issue delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "variable delete"
+effect = ["delete"]
+
+[[cmd]]
+name = "glab"
+subcommand = "api"
+effect = ["read", "write"]

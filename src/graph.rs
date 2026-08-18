@@ -214,6 +214,10 @@ pub struct CommandNode {
     /// `ssh HOST …`, the pod from `kubectl exec POD …`
     pub host: Option<String>,
     pub privilege: Privilege,
+    /// what this command does to state with no local path (a PR, a release),
+    /// straight from its recipe entry's command-level `effect` — empty for
+    /// programs whose recipe makes no such claim
+    pub effects: Vec<crate::cmdmap::Effect>,
 }
 
 #[derive(Debug, Clone)]
@@ -1171,6 +1175,7 @@ impl Lowering<'_> {
             locality: Locality::Local,
             host: None,
             privilege: Privilege::Normal,
+            effects: Vec::new(),
         }));
         let mut spans = Vec::new();
         let mut name = None;
@@ -1206,6 +1211,7 @@ impl Lowering<'_> {
             locality: Locality::Local,
             host: None,
             privilege: Privilege::Normal,
+            effects: Vec::new(),
         }));
         let mut spans = Vec::new();
         let mut name = None;
@@ -2114,6 +2120,11 @@ fn apply_program(
         // no map, no claims — the inverted default
         return;
     };
+    if !program.effect.is_empty()
+        && let Node::Command(cmd) = &mut graph.nodes[command]
+    {
+        cmd.effects = program.effect.clone();
+    }
 
     // 1. bind flag arguments, which is what makes the slot numbers below mean
     //    anything
@@ -2493,6 +2504,7 @@ fn spawn_payload(graph: &mut Graph, outer: NodeId, payload: Payload) -> NodeId {
             true => Privilege::Elevated,
             false => privilege,
         },
+        effects: Vec::new(),
     }))
 }
 

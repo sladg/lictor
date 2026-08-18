@@ -14,6 +14,7 @@ const READ_CATALOGS: &[(&str, Option<Action>)] = &[
     ("net-query", None),
     ("git-read", None),
     ("gh-read", None),
+    ("glab-read", None),
     ("docker-read", None),
     ("kubectl-read", None),
     ("helm-read", None),
@@ -27,6 +28,8 @@ const READ_CATALOGS: &[(&str, Option<Action>)] = &[
 const RECOMMENDED_EXTRA: &[(&str, Option<Action>)] = &[
     ("net-egress", None),
     ("mutating", None),
+    ("gh-write", None),
+    ("glab-write", None),
     ("pkg-install", None),
     ("secrets-read", None),
     ("destructive", None),
@@ -37,6 +40,8 @@ const RECOMMENDED_EXTRA: &[(&str, Option<Action>)] = &[
 const PARANOID_EXTRA: &[(&str, Option<Action>)] = &[
     ("net-egress", Some(Action::Deny)),
     ("mutating", Some(Action::Deny)),
+    ("gh-write", Some(Action::Deny)),
+    ("glab-write", Some(Action::Deny)),
     ("pkg-install", None),
     ("secrets-read", None),
     ("destructive", None),

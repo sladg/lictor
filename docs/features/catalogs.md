@@ -58,7 +58,8 @@ action = "skip"
 | `proc-read` | allow | `ps pgrep pstree pmap lsof` |
 | `net-query` | allow | `dig host nslookup ss ping traceroute mtr whois getent` |
 | `git-read` | allow | `git status/log/diff/show/blame/ls-files/rev-parse/branch --list/config --get …` |
-| `gh-read` | allow | `gh pr/issue/run/repo/release list+view`, `gh auth status`, `gh search` |
+| `gh-read` | allow | `gh pr/issue/run/repo/release/gist/workflow list+view`, `gh auth status`, `gh search` |
+| `glab-read` | allow | `glab mr/issue/repo/release list+view`, `glab ci status/trace`, `glab auth status` |
 | `docker-read` | allow | `docker ps/images/inspect/logs/top/history/version/info/diff` |
 | `kubectl-read` | allow | `kubectl get/describe/logs/top/explain/version/config view/auth can-i` |
 | `helm-read` | allow | `helm list/status/get/show/history/search/template/lint` |
@@ -68,10 +69,12 @@ action = "skip"
 | `kv-cache` | allow | `kv` (all subcommands) — the cache behind spill; disposable local store, not a source of truth |
 | `net-egress` | ask | `curl wget http https nc ncat telnet` |
 | `mutating` | ask | `rm mv cp ln mkdir rmdir touch chmod chown tee truncate` |
+| `gh-write` | ask | GitHub remote-state writes: `gh pr create/merge/close`, `gh release create`, `gh workflow run`, `gh secret set`, `gh api`, … |
+| `glab-write` | ask | GitLab remote-state writes: `glab mr create/merge/close`, `glab release create`, `glab ci run`, `glab api`, … |
 | `pkg-install` | ask | `npm/pnpm/yarn/bun/pip/uv/cargo/brew/apt/gem … install/add/remove/upgrade` |
-| `secrets-read` | deny | readers (`cat less head tail bat grep rg sed …`) hitting `*.env* *.pem *.key *id_rsa* .aws/credentials .ssh/* .npmrc .netrc .kube/config` |
-| `destructive` | deny | `shred mkfs* fdisk parted wipefs`, `dd of=/dev/*`, `rm` on `/ ~ --no-preserve-root`, `git push --force`, `DROP DATABASE/TABLE` |
-| `gtfobins` | deny | shell-escape flag vectors: `tar --checkpoint-action`, `awk 'BEGIN{system()}'`, `git -c core.pager=`, `ssh -o ProxyCommand`, `sqlite3 .shell`, `vim -c`, … |
+| `secrets-read` | deny | readers (`cat less head tail bat grep rg sed …`) hitting `*.env* *.pem *.key *id_rsa* .aws/credentials .ssh/* .npmrc .netrc .kube/config`; `gh auth token`, `gh/glab auth status -t/--show-token` |
+| `destructive` | deny | `shred mkfs* fdisk parted wipefs`, `dd of=/dev/*`, `rm` on `/ ~ --no-preserve-root`, `git push --force`, `DROP DATABASE/TABLE`, `gh repo/release/gist delete`, `glab project/repo/release delete` |
+| `gtfobins` | deny | shell-escape flag vectors: `tar --checkpoint-action`, `awk 'BEGIN{system()}'`, `git -c core.pager=`, `ssh -o ProxyCommand`, `sqlite3 .shell`, `vim -c`, `gh alias set --shell`, `gh/glab config set pager/editor`, … |
 | `obfuscation` | deny | **structural** detector (invisible chars, undecodable escapes, fork bomb) — routes to `on_obfuscation`, not a pattern list |
 | `interactive` | ask | binaries that can spawn a shell via a typed escape: `less more man vi vim nano gdb ftp ed …` |
 | `noisy-build` | minify | `cargo build/test/clippy`, `npm/pnpm run build`, `go build/test`, `vitest tsc make` → output truncation (no gate action) |
@@ -83,6 +86,6 @@ action = "skip"
 
 | Bundle | Contents |
 |---|---|
-| `read-only` | the 16 `*-read`/query/nudge catalogs → **allow** (`search-nudge` is warn-only), nothing else |
-| `recommended` | `read-only` **+** `net-egress`/`mutating`/`pkg-install` → ask, `secrets-read`/`destructive`/`obfuscation`/`gtfobins` → deny |
-| `paranoid` | `recommended` but `net-egress` and `mutating` → **deny**, plus `interactive` → ask |
+| `read-only` | the 17 `*-read`/query/nudge catalogs → **allow** (`search-nudge` is warn-only), nothing else |
+| `recommended` | `read-only` **+** `net-egress`/`mutating`/`gh-write`/`glab-write`/`pkg-install` → ask, `secrets-read`/`destructive`/`obfuscation`/`gtfobins` → deny |
+| `paranoid` | `recommended` but `net-egress`, `mutating`, `gh-write` and `glab-write` → **deny**, plus `interactive` → ask |
