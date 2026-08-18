@@ -1,0 +1,67 @@
+name = "policy rules reach through runner payloads (npx / uvx / uv run / bunx)"
+
+# The runner recipes graft their payload as a real command node, so a rule
+# written against the payload program fires whether or not a runner fronts
+# it — laundering `rm` through `npx` must not bypass the policy.
+
+[config]
+[[config.bash]]
+match  = "rm*"
+action = "deny"
+reason = "no deletions in this session"
+
+[[config.bash]]
+match  = "cat *"
+action = "allow"
+
+[[config.delete]]
+match  = ["**/src/migrations/**"]
+action = "deny"
+hint   = "migration files must not be deleted"
+
+[[case]]
+name    = "npx-fronted rm is still an rm"
+command = "npx rm -rf /tmp/x"
+expect  = { decision = "deny", reason = "no deletions" }
+
+[[case]]
+name    = "uvx-fronted rm is still an rm"
+command = "uvx rm /tmp/x"
+expect  = { decision = "deny" }
+
+[[case]]
+name    = "uv run payload is matched as its program"
+command = "uv run rm /tmp/x"
+expect  = { decision = "deny" }
+
+[[case]]
+name    = "bunx payload is matched as its program"
+command = "bunx rm /tmp/x"
+expect  = { decision = "deny" }
+
+[[case]]
+# an allow on the payload alone is not enough: the runner command is its own
+# node and stays unmatched, so the whole call gets no decision
+name    = "payload allow does not allow the runner"
+command = "uv run cat README.md"
+expect  = { decision = "none" }
+
+[[case]]
+name    = "yarn dlx payload is matched as its program"
+command = "yarn dlx rm /tmp/x"
+expect  = { decision = "deny" }
+
+[[case]]
+# [[delete]] gates on the graph's delete references, which come from the
+# grafted payload, not from the runner itself
+name    = "delete rule sees through the runner"
+command = "npx rm src/migrations/001_init.sql"
+cwd     = "/repo"
+expect  = { decision = "deny" }
+
+[[case]]
+# rustup's slot 0 is the toolchain, the payload starts at slot 1 — the
+# toolchain name must not be mistaken for the payload program
+name    = "rustup run matches the payload, not the toolchain"
+command = "rustup run nightly rm /tmp/x"
+expect  = { decision = "deny" }

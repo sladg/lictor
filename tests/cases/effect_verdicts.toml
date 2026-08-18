@@ -1,0 +1,85 @@
+name = "effect-verdict maps against the package-manager recipes"
+
+# `on = {...}` picks the verdict from what the command DOES per its recipe's
+# effect claims; `action` is the fallback for unmapped subcommands. The
+# package managers exist to make this rule shape work — one rule instead of
+# a subcommand allowlist per tool.
+
+[config]
+[[config.bash]]
+match  = "brew *"
+action = "ask"
+on     = { read = "allow", write = "ask", delete = "deny" }
+reason = "brew removals need a human"
+
+[[config.bash]]
+match  = "apt *"
+action = "ask"
+on     = { read = "allow", delete = "deny" }
+
+[[config.bash]]
+match  = "go *"
+action = "ask"
+on     = { read = "allow", write = "allow" }
+
+[[config.bash]]
+match  = "yarn *"
+action = "ask"
+on     = { read = "allow", write = "ask" }
+
+[[case]]
+name    = "brew read subcommand is allowed"
+command = "brew list"
+expect  = { decision = "allow" }
+
+[[case]]
+name    = "brew write subcommand falls to ask"
+command = "brew install ripgrep"
+expect  = { decision = "ask" }
+
+[[case]]
+name    = "brew delete subcommand is denied"
+command = "brew uninstall ripgrep"
+expect  = { decision = "deny", reason = "need a human" }
+
+[[case]]
+name    = "brew cleanup is a delete too"
+command = "brew cleanup"
+expect  = { decision = "deny" }
+
+[[case]]
+# no recipe entry for this subcommand: `action` is the fallback
+name    = "unmapped brew subcommand uses the fallback action"
+command = "brew bundle"
+expect  = { decision = "ask" }
+
+[[case]]
+name    = "apt search is a read"
+command = "apt search ripgrep"
+expect  = { decision = "allow" }
+
+[[case]]
+name    = "apt purge is a delete"
+command = "apt purge ripgrep"
+expect  = { decision = "deny" }
+
+[[case]]
+name    = "go list reads, go get writes — both mapped to allow"
+command = "go list ./... && go get golang.org/x/tools"
+expect  = { decision = "allow" }
+
+[[case]]
+name    = "go clean is a delete with no mapping — fallback asks"
+command = "go clean -cache"
+expect  = { decision = "ask" }
+
+[[case]]
+name    = "yarn info reads"
+command = "yarn why lodash"
+expect  = { decision = "allow" }
+
+[[case]]
+# a chain takes the most restrictive verdict across its segments
+name    = "read chained with delete takes the deny"
+command = "brew list && brew uninstall ripgrep"
+expect  = { decision = "deny" }
