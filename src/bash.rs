@@ -206,6 +206,9 @@ struct Variant {
     share_site: bool,
     redirects_output: bool,
     rewritable: bool,
+    /// a static heredoc body was re-parsed as this shell's script, so the
+    /// inline "reads its script from stdin/heredoc" ask is covered by analysis
+    stdin_script: bool,
 }
 
 pub fn extract(source: &str) -> Extraction {
@@ -349,6 +352,18 @@ fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
         derive_nested(stripped, ctx.depth, out);
     }
 
+    // `bash <<EOF … EOF`: a shell with no positional reads the heredoc as its
+    // script — re-parse the body so rules see its commands instead of the
+    // blanket inline-script ask (issue #36); the graph-side stdin = "shell"
+    // graft carries the matching reference edges
+    let stdin_body = (shell_reads_stdin(&words)
+        || stripped.as_deref().is_some_and(shell_reads_stdin))
+    .then(|| heredoc_stdin_body(node, ctx.source))
+    .flatten();
+    if let Some(body) = &stdin_body {
+        extract_into(&mut ParseCtx::new(body, true, ctx.depth + 1), out);
+    }
+
     let redirects_output = writes_via_redirect(node, ctx.source);
     // computed once per SITE (from the real tree-sitter node), not per variant —
     // otherwise `position = "only"` would never match anything, since a wrapped
@@ -364,6 +379,7 @@ fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
         // output the model reads — a minify wrap/insert or rewrite there would
         // corrupt the substituted value, so rewriting is refused like find -exec
         rewritable: !in_substitution(node),
+        stdin_script: stdin_body.is_some(),
     };
     push_variant(out, words, ctx.synthetic, base, group_info);
     if let Some(stripped) = stripped {
@@ -381,6 +397,44 @@ fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
             group_info,
         );
     }
+}
+
+// the shell would read its script from stdin: a shell program word and no
+// positional (mirrors detect_inline's trigger — a positional means the heredoc
+// feeds the SCRIPT's stdin, not the shell's)
+fn shell_reads_stdin(words: &[Word]) -> bool {
+    words
+        .first()
+        .and_then(|w| w.text.as_deref())
+        .is_some_and(|p| interpreter_language(basename(p)) == Some("shell"))
+        && !words.iter().skip(1).any(|w| match w.text.as_deref() {
+            Some(text) => !text.starts_with('-'),
+            None => true,
+        })
+}
+
+// the body of a heredoc attached to this command (`bash <<EOF … EOF`), raw text
+fn heredoc_stdin_body(node: Node, source: &str) -> Option<String> {
+    let parent = node.parent()?;
+    if parent.kind() != "redirected_statement" {
+        return None;
+    }
+    for i in 0..parent.named_child_count() {
+        let Some(redirect) = parent.named_child(i) else {
+            continue;
+        };
+        if redirect.kind() != "heredoc_redirect" {
+            continue;
+        }
+        for j in 0..redirect.named_child_count() {
+            if let Some(body) = redirect.named_child(j)
+                && body.kind() == "heredoc_body"
+            {
+                return body.utf8_text(source.as_bytes()).ok().map(str::to_string);
+            }
+        }
+    }
+    None
 }
 
 fn in_substitution(node: Node) -> bool {
@@ -500,8 +554,13 @@ fn push_variant(
         (_, None) => 0,
     };
     // inline detection per-variant: raw `sudo python -c` -> None, stripped `python -c` -> Some,
-    // find-exec'd `sh` -> Some (this is what closes the -exec shell-spawn gap)
-    let inline = detect_inline(&words);
+    // find-exec'd `sh` -> Some (this is what closes the -exec shell-spawn gap).
+    // A re-parsed heredoc script is real coverage, not an unanalyzable stdin read.
+    let inline = if variant.stdin_script {
+        None
+    } else {
+        detect_inline(&words)
+    };
     out.commands.push(Command {
         words,
         synthetic,
@@ -790,6 +849,7 @@ fn derive_find_exec(words: &[Word], out: &mut Extraction) {
                     share_site: false,
                     redirects_output: false,
                     rewritable: false,
+                    stdin_script: false,
                 },
                 standalone,
             );

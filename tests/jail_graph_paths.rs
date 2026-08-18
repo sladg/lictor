@@ -243,6 +243,31 @@ fn a_nested_shell_payload_is_not_a_blind_spot() {
 }
 
 #[test]
+fn a_heredoc_fed_shell_is_not_a_blind_spot() {
+    // Issue #36, #13 sub-task 2's remaining half: the body IS the script, so
+    // the graph grafts it like a `-c` string instead of leaving it to the
+    // on_inline_script ask. Quoting the delimiter suppresses expansion, not
+    // execution, so both spellings graft.
+    for escape in [
+        "bash <<EOF\ncat /etc/passwd\nEOF",
+        "bash <<'EOF'\ncat /etc/passwd\nEOF",
+        "sudo bash <<EOF\ncat /etc/passwd\nEOF",
+        "sh <<EOF\nrm -rf /etc/x\nEOF",
+    ] {
+        assert!(
+            !violations(escape).is_empty(),
+            "the graph source sees nothing in {escape:?} — the heredoc body is a blind spot"
+        );
+    }
+    // a script positional flips the heredoc from script to DATA: the body is
+    // process.sh's stdin, and claiming its words would be a false positive
+    assert!(
+        violations("bash process.sh <<EOF\ncat /etc/passwd\nEOF").is_empty(),
+        "a heredoc feeding a script's stdin must not be lowered as commands"
+    );
+}
+
+#[test]
 fn an_interpreter_payload_is_still_not_re_parsed_as_shell() {
     // `shell` and `code` are separate kinds so that this stays silent: lowering
     // a python payload as bash would manufacture claims about a language this

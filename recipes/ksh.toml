@@ -5,6 +5,9 @@
 # bash would manufacture claims about a language the graph cannot parse.
 [[cmd]]
 name = "ksh"
+# a heredoc fed to the shell's stdin IS its script; the body is re-parsed
+# and grafted like a `-c` string (issue #36)
+stdin = "shell"
 [cmd.flags]
 "-c" = { takes = true, kind = "shell", effect = ["exec"] }
 "-e" = {}

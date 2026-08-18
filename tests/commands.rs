@@ -582,6 +582,24 @@ fn bash_unquoted_heredoc_substitution_is_caught() {
 }
 
 #[test]
+fn heredoc_fed_shell_body_is_analyzed_not_asked() {
+    // issue #36: the body is the script, so rules judge its commands instead
+    // of the blanket "reads its script from stdin/heredoc" ask
+    let output = bash("bash <<EOF\ngit commit -m x\nEOF");
+    assert_eq!(decision(&output), Some("deny".into()), "got: {output:?}");
+    // a benign body no longer trips the inline-script ask at all
+    let output = bash("bash <<EOF\necho hi\nEOF");
+    assert_eq!(decision(&output), None, "got: {output:?}");
+}
+
+#[test]
+fn heredoc_fed_interpreter_still_asks() {
+    // python bodies cannot be parsed as shell — the inline backstop stays
+    let output = bash("python3 <<EOF\nprint(1)\nEOF");
+    assert_eq!(decision(&output), Some("ask".into()), "got: {output:?}");
+}
+
+#[test]
 fn bash_allow_rule_auto_approves() {
     let output = bash("git status --short");
     assert_eq!(decision(&output), Some("allow".into()), "got: {output:?}");

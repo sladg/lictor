@@ -125,3 +125,45 @@ expect  = { local = ["reads rc.sh", "reads script.sh"] }
 name    = "flags with no argument do not shift anything"
 command = "sh -e -x script.sh"
 expect  = { local = ["reads script.sh"] }
+
+
+# ── a heredoc fed to the shell's stdin IS its script (issue #36) ──
+#
+# `stdin = "shell"` on the shell recipes licenses re-parsing the body and
+# grafting it exactly like a `-c` string — a stream fact, carried by the
+# recipe's `stdin` field because no argument entry can say it.
+
+[[case]]
+name    = "the heredoc body claims what it does"
+command = "bash <<EOF\ncat /etc/passwd\nEOF"
+expect  = { commands = [
+  "bash",
+  "cat",
+], local = [
+  "execs cat",
+  "reads /etc/passwd",
+], spawns = ["bash spawns cat"] }
+
+[[case]]
+# quoting the delimiter suppresses EXPANSION, not execution — the inner shell
+# runs the body either way
+name    = "a quoted delimiter still grafts"
+command = "bash <<'EOF'\ncat /etc/passwd\nEOF"
+expect  = { local = ["execs cat", "reads /etc/passwd"] }
+
+[[case]]
+# with a script positional the heredoc feeds the SCRIPT's stdin — the body is
+# process.sh's input data, not commands, and claiming otherwise would be the
+# false-positive direction
+name    = "a script positional makes the body data"
+command = "bash process.sh <<EOF\ncat /etc/passwd\nEOF"
+expect  = { commands = ["bash"], local = ["reads process.sh"] }
+
+[[case]]
+name    = "privilege passes through the wrapper into the body"
+command = "sudo bash <<EOF\nrm /etc/x\nEOF"
+expect  = { commands = [
+  "sudo !root",
+  "bash !root",
+  "rm !root",
+], local = ["execs bash", "execs rm", "deletes /etc/x"] }

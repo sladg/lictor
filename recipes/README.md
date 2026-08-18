@@ -48,6 +48,7 @@ effect = ["write", "create"]
 | `effect` | `read` · `write` · `delete` · `create` · `exec` — a set |
 | `when` | `{ with = [...], without = [...] }` — guards an entry on the flags present |
 | `[cmd.flags]` | per flag: `takes`, `kind`, `effect` |
+| `stdin` | `"shell"` only: a statically-known stream fed to the program's stdin (a heredoc body) is its script — re-parsed and grafted like a `-c` string. A stream fact, so it lives on `[[cmd]]`, not on an argument. Inert when a script positional is present (`bash file.sh <<EOF` — the body is the script's *input*) |
 
 Slots are counted **after** flag arguments are removed. `grep -e PATTERN file`
 has *one* positional, not two.

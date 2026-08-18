@@ -1727,6 +1727,59 @@ fn apply_maps_at(graph: &mut Graph, ctx: &Mapping) {
     apply_redirects(graph);
 }
 
+/// `bash <<EOF … EOF`: a recipe with `stdin = "shell"` licenses re-parsing the
+/// heredoc body and grafting it, the same way a `-c` string is (#13 sub-task
+/// 2's remaining half, issue #36). The heredoc attaches to the outermost
+/// command, so a wrapper chain (`sudo bash <<EOF`) is walked upward — bash is
+/// what reads the stream sudo was handed. Runs from `apply_program`'s tail so
+/// minted wrapper payloads are covered by their own recursive application.
+// five, same shape as apply_program itself: graph, the command, its recipe,
+// its words and the mapping context are not a cluster to extract.
+#[allow(clippy::too_many_arguments)]
+fn graft_stdin_heredoc(
+    graph: &mut Graph,
+    command: NodeId,
+    program: &crate::cmdmap::Program,
+    words: &[(NodeId, bool)],
+    ctx: &Mapping,
+) {
+    if program.stdin != Some(crate::cmdmap::Kind::Shell) {
+        return;
+    }
+    // a positional means the heredoc feeds the SCRIPT's stdin, not the shell's
+    // (`bash process.sh <<EOF` — the body is process.sh's input, not commands)
+    if words.iter().any(|(_, is_flag)| !is_flag) {
+        return;
+    }
+    let mut targets = vec![command];
+    let mut current = command;
+    while let Some(parent) = graph
+        .edges
+        .iter()
+        .find_map(|e| (e.kind == EdgeKind::Spawns && e.to == current).then_some(e.from))
+    {
+        targets.push(parent);
+        current = parent;
+    }
+    let holder = graph.edges.iter().find_map(|e| {
+        (e.kind == EdgeKind::On
+            && targets.contains(&e.to)
+            && matches!(&graph.nodes[e.from], Node::Heredoc(h) if h.body.is_some()))
+        .then_some(e.from)
+    });
+    let Some(holder) = holder else {
+        return;
+    };
+    spawn_script(
+        graph,
+        Script {
+            outer: command,
+            holder,
+        },
+        ctx,
+    );
+}
+
 /// Promote `+name` value nodes to flags when the recipe for this program
 /// declares them. `+` is not a universal flag sigil — this is opt-in per
 /// program, so `date +%s` is unaffected (no `+` entries in date's recipe).
@@ -2295,6 +2348,7 @@ fn apply_program(
         };
         emit_effects(graph, command, target, arg.kind, &arg.effect, ctx);
     }
+    graft_stdin_heredoc(graph, command, program, words, ctx);
 }
 
 /// The leading positionals that are not some flag's argument — the words a
@@ -2475,8 +2529,16 @@ fn spawn_script(graph: &mut Graph, script_arg: Script, ctx: &Mapping) {
         return;
     }
     // a dynamic script (`bash -c "$CMD"`) has no text to read, and abstaining is
-    // the documented convention for one
-    let Some(script) = value_text(graph, holder) else {
+    // the documented convention for one. A heredoc holder's text is its body,
+    // sliced from the source (`bash <<EOF … EOF` — the stdin = "shell" graft)
+    let script = match &graph.nodes[holder] {
+        Node::Heredoc(h) => h
+            .body
+            .and_then(|b| graph.source.get(b.start..b.end))
+            .map(str::to_string),
+        _ => value_text(graph, holder),
+    };
+    let Some(script) = script else {
         return;
     };
     if script.trim().is_empty() {

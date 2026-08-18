@@ -62,6 +62,12 @@ pub struct Program {
     pub flags: HashMap<String, Flag>,
     #[serde(default, rename = "args")]
     pub args: Vec<Arg>,
+    /// what the program does with its standard input when a statically-known
+    /// stream is attached: `shell` re-parses a heredoc body and grafts it
+    /// behind a `spawns` edge (`bash <<EOF … EOF` — a stream fact, so no
+    /// argument entry can carry it)
+    #[serde(default)]
+    pub stdin: Option<Kind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +336,13 @@ impl Maps {
                     "command map: `{}` has the subcommand path `{sub}` — write it as single \
                      space-separated words (`s3 cp`)",
                     program.name
+                ));
+            }
+            if let Some(kind) = program.stdin
+                && kind != Kind::Shell
+            {
+                return Err(format!(
+                    "command map: `{label}` `stdin` is `{kind:?}` — only `shell` is supported"
                 ));
             }
             // an `exec` effect on anything the graph cannot point an edge at is

@@ -1,6 +1,6 @@
 ---
 created_at: 2026-07-14
-updated_at: 2026-07-14
+updated_at: 2026-08-18
 ---
 
 # Detectors
@@ -11,7 +11,7 @@ Structural checks that don't need a rule to match — they fire on *how* a comma
 |---|---|---|
 | `on_obfuscation` | deny | invisible/zero-width/bidi chars, undecodable `$'\x..'` escapes, fork bombs |
 | `on_dangerous_env` | deny | code-injecting env prefixes: `LD_PRELOAD=…`, `BASH_ENV=…`, `GIT_SSH_COMMAND=…` |
-| `on_inline_script` | ask | opaque interpreter payloads: `python -c`, `node -e`, `curl x \| sh`, heredoc-fed shells |
+| `on_inline_script` | ask | opaque interpreter payloads: `python -c`, `node -e`, `curl x \| sh`, heredoc-fed interpreters. A heredoc fed to a *shell* (`bash <<EOF`) is re-parsed and judged for real instead — the ask remains only where the body can't be read as bash |
 | `on_unparseable` | ask | commands tree-sitter can't parse, nesting deeper than 5 |
 | `strip_program_paths` | off | `/usr/local/bin/rg` → `rg`, `./node_modules/.bin/tsc` → `tsc` (set to `rewrite`) |
 
