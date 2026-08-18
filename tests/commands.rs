@@ -697,6 +697,151 @@ fn wrap_inside_chain() {
     assert_eq!(decision(&output), None, "got: {output:?}");
 }
 
+// tokf/rtk/sqz-style filter tools spliced into real pipelines: the insert
+// point depends on where the matched command sits, and one command line can
+// need several
+const INSERT_POLICY: &str = r#"
+[[minify]]
+match = "cargo test*"
+insert = "tokf run --"
+allow = true
+
+[[minify]]
+match = "git log*"
+wrap = "rtk"
+insert = "rtk --pipe"
+allow = true
+
+[[minify]]
+match = "grep*"
+insert = "sqz"
+
+[[minify]]
+match = "pnpm run lint*"
+insert = "rtk"
+allow = true
+
+[[minify]]
+match = "pnpm run test:*"
+insert = "tokf run --"
+allow = true
+"#;
+
+fn bash_insert(command: &str) -> Option<Value> {
+    run_with(
+        INSERT_POLICY,
+        "PreToolUse",
+        "Bash",
+        json!({"command": command}),
+        None,
+    )
+}
+
+#[test]
+fn insert_after_pipeline_head() {
+    let output = bash_insert("cargo test | tail -5");
+    assert_eq!(
+        updated_command(&output),
+        Some("cargo test | tokf run -- | tail -5".into())
+    );
+}
+
+#[test]
+fn insert_in_pipeline_middle() {
+    // grep sits mid-pipeline; its stage goes between grep and wc
+    let output = bash_insert("cat log.txt | grep error | wc -l");
+    assert_eq!(
+        updated_command(&output),
+        Some("cat log.txt | grep error | sqz | wc -l".into())
+    );
+}
+
+#[test]
+fn insert_at_multiple_stages_of_one_pipeline() {
+    let output = bash_insert("git log | grep fix | wc -l");
+    assert_eq!(
+        updated_command(&output),
+        Some("git log | rtk --pipe | grep fix | sqz | wc -l".into())
+    );
+}
+
+#[test]
+fn multi_word_match_inserts_after_its_pipeline_stage() {
+    // the match spans three words; the stage still lands right after the
+    // matched command, before the rest of the pipeline
+    let output = bash_insert("pnpm run lint | head -5 | rg -n \"error\"");
+    assert_eq!(
+        updated_command(&output),
+        Some("pnpm run lint | rtk | head -5 | rg -n \"error\"".into())
+    );
+}
+
+#[test]
+fn wildcard_word_in_match_selects_the_script() {
+    // each word of `match` is its own glob: `test:*` covers any script under
+    // the prefix, and a script outside it stays untouched
+    let output = bash_insert("pnpm run test:unit | tail -20");
+    assert_eq!(
+        updated_command(&output),
+        Some("pnpm run test:unit | tokf run -- | tail -20".into())
+    );
+    let output = bash_insert("pnpm run build | tail -20");
+    assert_eq!(updated_command(&output), None, "got: {output:?}");
+}
+
+#[test]
+fn insert_reaches_through_a_wrapper() {
+    // the rule matches the stripped variant; the pipe connector is found via
+    // the outer sudo command, whose spans contain the variant's first word
+    let output = bash_insert("sudo cargo test | head -3");
+    assert_eq!(
+        updated_command(&output),
+        Some("sudo cargo test | tokf run -- | head -3".into())
+    );
+}
+
+#[test]
+fn substitution_output_is_data_not_display() {
+    // $(...) feeds the shell, not the model — splicing a filter there would
+    // corrupt the substituted value (same reason wrap must stay out)
+    for command in [
+        "N=$(cargo test | wc -l) && echo $N",
+        "echo $(cargo test | tail -1) | cat",
+        "N=$(git log --oneline) && echo $N",
+    ] {
+        let output = bash_insert(command);
+        assert_eq!(updated_command(&output), None, "{command}: {output:?}");
+    }
+}
+
+#[test]
+fn insert_final_stage_is_inert_without_consumer() {
+    // grep is pipeline-final: nothing downstream to protect, insert-only rule
+    // leaves it alone (a wrap field would be the spelling for this spot)
+    let output = bash_insert("cat log.txt | grep error");
+    assert_eq!(updated_command(&output), None, "got: {output:?}");
+}
+
+#[test]
+fn wrap_and_insert_split_by_pipeline_shape_end_to_end() {
+    let bare = bash_insert("git log -3");
+    assert_eq!(updated_command(&bare), Some("rtk git log -3".into()));
+    let piped = bash_insert("git log | wc -l");
+    assert_eq!(
+        updated_command(&piped),
+        Some("git log | rtk --pipe | wc -l".into())
+    );
+}
+
+#[test]
+fn insert_across_chained_pipelines() {
+    let output = bash_insert("cargo test | tail -2 && git log | head -3");
+    assert_eq!(
+        updated_command(&output),
+        Some("cargo test | tokf run -- | tail -2 && git log | rtk --pipe | head -3".into())
+    );
+}
+
 #[test]
 fn edit_deny_on_pattern() {
     let output = run(

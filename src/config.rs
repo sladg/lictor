@@ -178,6 +178,11 @@ pub struct MinifyRule {
     pub pattern: String,
     #[serde(default)]
     pub wrap: Option<String>,
+    // splice this stage right after the matched command when a pipe consumer
+    // follows (`cargo test | less` → `cargo test | <insert> | less`); inert
+    // otherwise — `wrap` is the no-pipeline spelling (issue #13, sub-task 10)
+    #[serde(default)]
+    pub insert: Option<String>,
     #[serde(default)]
     pub pipe: Option<String>,
     #[serde(default)]
@@ -293,6 +298,8 @@ pub struct Catalog {
     pub hint: Option<String>,
     #[serde(default)]
     pub wrap: Option<String>,
+    #[serde(default)]
+    pub insert: Option<String>,
     #[serde(default)]
     pub pipe: Option<String>,
     #[serde(default)]
@@ -694,11 +701,13 @@ impl Config {
         let mut patterns: Vec<String> = catalog.patterns.clone();
         patterns.extend(catalog.add.iter().cloned());
         patterns.retain(|p| !catalog.remove.contains(p));
-        let has_minify =
-            catalog.wrap.is_some() || catalog.pipe.is_some() || catalog.max_lines.is_some();
+        let has_minify = catalog.wrap.is_some()
+            || catalog.insert.is_some()
+            || catalog.pipe.is_some()
+            || catalog.max_lines.is_some();
         if catalog.action.is_none() && !has_minify {
             return Err(format!(
-                "catalog '{name}' needs an action or minify fields (wrap/pipe/max_lines)"
+                "catalog '{name}' needs an action or minify fields (wrap/insert/pipe/max_lines)"
             ));
         }
         if patterns.is_empty() && catalog.rules.is_empty() {
@@ -740,6 +749,7 @@ impl Config {
                     self.minify.push(MinifyRule {
                         pattern: pattern.clone(),
                         wrap: catalog.wrap.clone(),
+                        insert: catalog.insert.clone(),
                         pipe: catalog.pipe.clone(),
                         max_lines: catalog.max_lines,
                         min_lines: catalog.min_lines.unwrap_or(0),

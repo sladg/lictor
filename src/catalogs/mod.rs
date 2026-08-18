@@ -87,6 +87,7 @@ pub fn merge_catalog(base: Option<Catalog>, user: Catalog) -> Catalog {
         rewrite: user.rewrite.or(base.rewrite),
         hint: user.hint.or(base.hint),
         wrap: user.wrap.or(base.wrap),
+        insert: user.insert.or(base.insert),
         pipe: user.pipe.or(base.pipe),
         max_lines: user.max_lines.or(base.max_lines),
         min_lines: user.min_lines.or(base.min_lines),

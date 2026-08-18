@@ -53,14 +53,18 @@ pub fn compile_minify_rules(config: &Config) -> Result<Vec<CompiledMinifyRule<'_
         .collect()
 }
 
-// distinct first-word binaries named by wrap/pipe, so `lictor check` can flag
-// ones missing from PATH before a matching command fails at run time
+// distinct first-word binaries named by wrap/insert/pipe, so `lictor check` can
+// flag ones missing from PATH before a matching command fails at run time
 pub fn minify_tools(config: &Config) -> Vec<&str> {
     let mut tools: Vec<&str> = Vec::new();
     for rule in &config.minify {
-        for cmd in [rule.wrap.as_deref(), rule.pipe.as_deref()]
-            .into_iter()
-            .flatten()
+        for cmd in [
+            rule.wrap.as_deref(),
+            rule.insert.as_deref(),
+            rule.pipe.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if let Some(program) = cmd.split_whitespace().next()
                 && !tools.contains(&program)

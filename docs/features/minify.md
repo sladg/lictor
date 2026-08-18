@@ -1,19 +1,22 @@
 ---
 created_at: 2026-07-14
-updated_at: 2026-07-14
+updated_at: 2026-08-18
 ---
 
 # Minify
 
-Shapes what the model sees after a command runs — wrap it in a token-efficient proxy, pipe the output through a filter, or truncate it. Use it on noisy CLIs (builds, tests, `git log`, `kubectl`): the model needs the signal, not 400 lines of progress bars.
+Shapes what the model sees after a command runs — wrap it in a token-efficient proxy, splice a filter stage into a pipeline, pipe the output through a filter, or truncate it. Use it on noisy CLIs (builds, tests, `git log`, `kubectl`): the model needs the signal, not 400 lines of progress bars.
 
-Three mechanisms, one `[[minify]]` block each:
+Four mechanisms, one `[[minify]]` block each:
 
 | Field | Does |
 |---|---|
 | `wrap` | rewrite the command to run under a proxy: `git log` → `rtk git log` |
+| `insert` | splice a stage after the matched command when a pipe consumer follows: `cargo test \| less` → `cargo test \| tokf run -- \| less` |
 | `pipe` | filter captured stdout through any stdin→stdout program |
 | `max_lines` / `min_lines` / `preserve` | built-in head+tail truncation; `preserve` regexes keep matching lines |
+
+`wrap` and `insert` are two spellings of the same intent, split by pipeline shape: a rule may carry both, and the one that fits applies. `insert` alone is inert on a command nothing is piped into; `wrap` on a piped command compresses the producer's output *before* the consumer sees it, which is usually the wrong end — the wrapper's summary is what gets grepped, not the real output.
 
 ## Config
 
@@ -24,9 +27,10 @@ wrap  = "rtk"            # git log → rtk git log
 allow = true             # …and auto-approve the wrapped command
 
 [[minify]]
-match = "cargo test*"
-wrap  = "tokf run --"    # cargo test → tokf run -- cargo test
-allow = true
+match  = "cargo test*"
+wrap   = "tokf run --"   # cargo test → tokf run -- cargo test
+insert = "tokf run --"   # cargo test | tail -5 → cargo test | tokf run -- | tail -5
+allow  = true
 
 [[minify]]
 match = "npm install*"
@@ -43,6 +47,7 @@ preserve  = ["(?i)error", "(?i)fail"]   # error lines survive truncation
 ```
 git log --oneline -20         → runs as `rtk git log --oneline -20`, no prompt (allow = true)
 cargo test                    → runs as `tokf run -- cargo test`; model sees the filtered result
+cargo test | tail -50         → runs as `cargo test | tokf run -- | tail -50`; the filter sits between producer and consumer
 npm install                   → runs normally; model sees only the last 20 lines
 vitest run  (500 lines)       → model sees head+tail within 80 lines, every error line kept
 git log > log.txt             → wrap skipped (redirect disqualifies wrap and auto-allow)

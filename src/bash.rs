@@ -360,7 +360,10 @@ fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
     let base = Variant {
         share_site: false,
         redirects_output,
-        rewritable: true,
+        // a command inside $(...)/<(...) produces DATA the shell consumes, not
+        // output the model reads — a minify wrap/insert or rewrite there would
+        // corrupt the substituted value, so rewriting is refused like find -exec
+        rewritable: !in_substitution(node),
     };
     push_variant(out, words, ctx.synthetic, base, group_info);
     if let Some(stripped) = stripped {
@@ -378,6 +381,20 @@ fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
             group_info,
         );
     }
+}
+
+fn in_substitution(node: Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if matches!(
+            parent.kind(),
+            "command_substitution" | "process_substitution"
+        ) {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
 }
 
 #[derive(Clone, Copy)]

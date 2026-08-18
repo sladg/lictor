@@ -41,6 +41,7 @@ deny  >  skip  >  ask  >  warn  >  rewrite  >  allow
 
 | Doc | One-liner |
 |---|---|
+| [recipes](recipes.md) | per-program argument maps — where "this word is a path" comes from, and the accepted gaps |
 | [jail](jail.md) | paths outside the project → warn/ask/deny |
 | [strikes](strikes.md) | N consecutive denies → autonomy paused until a command runs |
 | [detectors](detectors.md) | obfuscation, injected env vars, inline scripts, shell-written files |
