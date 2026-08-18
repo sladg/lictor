@@ -327,6 +327,7 @@ fn references(graph: &Graph) -> (Vec<String>, Vec<String>) {
             lictor::cmdmap::Effect::Delete => "deletes",
             lictor::cmdmap::Effect::Create => "creates",
             lictor::cmdmap::Effect::Exec => "execs",
+            lictor::cmdmap::Effect::Env => "names",
         };
         // a set renders with `/**` when it reaches beneath its root, so a case
         // shows whether recursion was picked up

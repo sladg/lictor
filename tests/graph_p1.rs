@@ -87,10 +87,10 @@ fn every_command_name_in_the_cst_survives_lowering() {
     //
     // The oracle is the CST, deliberately NOT `bash::extract`. The existing
     // extractor also emits wrapper-stripped variants (`xargs git commit` yields
-    // a synthetic `git commit`) driven by the `WRAPPERS` table in
-    // `src/bash.rs:531`. The graph does not replicate that and should not: "this
-    // program execs its argument" is a per-program map fact, and it becomes an
-    // `Execs` edge in sub-task 5 rather than a second phantom command.
+    // a synthetic `git commit`) driven by the recipes' `Spawns` chain. The bare
+    // graph does not replicate that and should not: "this program execs its
+    // argument" is a per-program map fact, and it becomes an `Execs` edge in
+    // sub-task 5 rather than a second phantom command.
     for (file, source) in CORPUS {
         for literal in string_literals(source) {
             let expected = cst_command_names(&literal);

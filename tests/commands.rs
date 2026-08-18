@@ -1883,21 +1883,6 @@ fn jail_flags_outside_paths() {
 }
 
 #[test]
-fn jail_heuristic_flag_attached_path() {
-    // `--flag=/outside/path` — the heuristic extracts the value from any flag;
-    // the graph only sees what a recipe explicitly marks as a path argument, so
-    // a flag not in the recipe is a known graph false negative. Pin this with
-    // explicit jail_paths = "heuristic" so graph progress doesn't silently hide it.
-    let policy = format!("{}\njail_paths = \"heuristic\"", jail_policy("ask", ""));
-    let output = run_jailed(&policy, "rg pattern --path=/var/log/system.log");
-    assert_eq!(
-        decision(&output),
-        Some("ask".into()),
-        "heuristic must catch --flag=/outside/path"
-    );
-}
-
-#[test]
 fn jail_leaves_project_paths_alone() {
     let policy = jail_policy("ask", "");
     for command in [

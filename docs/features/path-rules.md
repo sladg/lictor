@@ -54,7 +54,7 @@ Valid spellings: `read` / `write` / `delete` / `create` / `exec`.
 
 Matching semantics: the rule's `on` set and the path's known effect set must **intersect** — first eligible rule whose globs match wins. Rule order is otherwise unchanged (an early `allow` still shadows a later `deny`).
 
-`on` requires `jail_paths = "graph"` (the default). Heuristic candidates carry no effect information and never match `on` rules. `[[delete]]` rules ignore `on` — a delete rule is effect-scoped by construction.
+An assignment value (`OUT=/tmp/x cargo build`) names a path without touching it, so it never matches an `on` rule — only rules without `on`. `[[delete]]` rules ignore `on` — a delete rule is effect-scoped by construction.
 
 ## What happens
 

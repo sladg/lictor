@@ -13,29 +13,20 @@ Inside a **linked git worktree** the main checkout is trusted as well. `--show-t
 
 ## Where "this word is a path" comes from
 
-`settings.jail_paths` chooses. Default `"graph"` as of this release; unknown strings also fall through to `graph`.
-
-| value | meaning |
-|---|---|
-| `"graph"` | only what a reviewed recipe in `recipes/` says is a path (default) |
-| `"heuristic"` | the shape of the word: a leading `/`, `~`, or `..`. Still selectable; being phased out |
-| `"compare"` | run both, **decide with the heuristic**, print where they differ to stderr |
+Only from the graph: what a reviewed recipe in `recipes/` says is a path. The old shape heuristic (a leading `/`, `~`, or `..`) and the `"compare"` mode died in #59. The `jail_paths` setting key survives as a validated no-op — absent or `"graph"` is fine, **any other value is a config error** so a config still asking for the heuristic fails loudly instead of silently switching sources.
 
 **The graph source is not strictly better.** It trades one kind of error for the other:
 
 ```
-sed -n '/needle/p' README.md    heuristic: flags /needle/p   graph: silent
-ssh host cat /etc/hosts         heuristic: flags /etc/hosts  graph: silent
-cd /tmp && cat passwd           heuristic: misses it         graph: flags /tmp/passwd
-frobnicate /etc/passwd          heuristic: flags it          graph: MISSES it
+sed -n '/needle/p' README.md    old heuristic: flags /needle/p   graph: silent
+ssh host cat /etc/hosts         old heuristic: flags /etc/hosts  graph: silent
+cd /tmp && cat passwd           old heuristic: misses it         graph: flags /tmp/passwd
+frobnicate /etc/passwd          old heuristic: flags it          graph: MISSES it (no recipe maps frobnicate)
 ```
 
 - it removes the false positives issue #4 is about — a sed script and a remote path stop being treated as local files
 - it closes a false negative the shape test cannot reach: `cat passwd` after a `cd` names a real file, but the bare word is not path-*shaped*, so the guess never looks at it
-- it introduces a new false negative: **a program with no recipe references no paths**, so an escape through one is invisible; programs with incomplete recipes (unknown flags like `--path=`) also miss flag-attached paths
-- short-flag glued paths (`tail -o/etc/shadow`) are also invisible unless the recipe marks them; use `"heuristic"` if these matter for your workflow
-
-Use `"heuristic"` to restore the previous default behaviour, or `"compare"` to measure disagreements before committing.
+- it accepts a false negative: **a program with no recipe references no paths**, so an escape through one is invisible. The same holds for flag-attached values a recipe doesn't know (`rg --path=/var/log/x`, glued short flags like `tail -o/etc/shadow`) — the value rides a flag no recipe marks as a path. The remedy is a recipe addition, not shape-guessing: add the program (or the missing flag) to `recipes/`.
 
 ### The program counts as well
 

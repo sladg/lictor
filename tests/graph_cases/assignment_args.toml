@@ -41,3 +41,8 @@ expect  = { commands = ["env", "rm"], local = ["execs rm", "deletes /tmp/x"] }
 name    = "digit-led lhs is not assignment-shaped: payload is 1=2, path is unclaimed"
 command = "env 1=2 rm /tmp/x"
 expect  = { commands = ["env", "1=2"], local = ["execs 1=2"] }
+
+[[case]]
+name    = "bare prefix assignment value is a visible reference"
+command = "OUT=/tmp/leak cargo build"
+expect  = { local = ["names /tmp/leak"] }

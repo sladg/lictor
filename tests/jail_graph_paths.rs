@@ -1,32 +1,26 @@
 //! `settings.jail_paths` — where the jail's idea of "this word is a path" comes
-//! from. Issue #13, sub-task 8, first piece.
+//! from. Issue #13, sub-task 8, first piece; the graph became the only source
+//! in #59.
 //!
-//! Only that one decision moves to the graph. Resolution stays where it is:
+//! Only that one decision moved to the graph. Resolution stays where it is:
 //! `walk_words` tracks `cd` across a chain, expands `~`, collapses `..` and
 //! descends into nested shells, and none of that is a heuristic worth replacing.
 //!
 //! # The graph source is NOT strictly better
 //!
-//! It trades one error for the other, and this file pins both directions:
+//! It traded one error for the other, and this file pins both directions:
 //!
-//! - it **removes false positives** — every case issue #4 reported goes silent,
+//! - it **removes false positives** — every case issue #4 reported is silent,
 //!   because a reviewed recipe says the word is a regex or a script
 //! - it **introduces false negatives** — a program with no recipe references no
 //!   paths at all, so a real escape through one is invisible
-//!
-//! Which is right depends entirely on recipe coverage, which is why the default
-//! is unchanged and `compare` exists: run both, decide with the old one, and
-//! record where they differ against real usage before touching anything.
 
 use lictor::bash;
 use lictor::modules::jail;
 
-fn violations(mode: &str, command: &str) -> Vec<String> {
-    let config = lictor::config::from_toml(
-        &format!("[settings]\njail = \"deny\"\njail_paths = \"{mode}\"\n"),
-        None,
-    )
-    .expect("policy parses");
+fn violations(command: &str) -> Vec<String> {
+    let config =
+        lictor::config::from_toml("[settings]\njail = \"deny\"\n", None).expect("policy parses");
     jail::violations(&bash::extract(command), &config, "/repo")
 }
 
@@ -42,14 +36,9 @@ fn the_graph_source_silences_every_case_issue_4_reported() {
         "ssh host cat /etc/hosts",
     ] {
         assert!(
-            !violations("heuristic", command).is_empty(),
-            "{command:?} should still be a false positive under the heuristic — \
-             otherwise this test proves nothing"
-        );
-        assert!(
-            violations("graph", command).is_empty(),
+            violations(command).is_empty(),
             "{command:?} still flagged under the graph source: {:?}",
-            violations("graph", command)
+            violations(command)
         );
     }
 }
@@ -57,10 +46,10 @@ fn the_graph_source_silences_every_case_issue_4_reported() {
 #[test]
 fn real_escapes_through_mapped_programs_are_still_caught() {
     // silence about a regex must not become silence about everything
-    assert_eq!(violations("graph", "cat /etc/passwd"), ["/etc/passwd"]);
-    assert_eq!(violations("graph", "rm -rf /etc/x"), ["/etc/x"]);
+    assert_eq!(violations("cat /etc/passwd"), ["/etc/passwd"]);
+    assert_eq!(violations("rm -rf /etc/x"), ["/etc/x"]);
     assert_eq!(
-        violations("graph", "cp /etc/shadow /tmp/x"),
+        violations("cp /etc/shadow /tmp/x"),
         ["/etc/shadow", "/tmp/x"]
     );
 }
@@ -69,16 +58,10 @@ fn real_escapes_through_mapped_programs_are_still_caught() {
 fn an_unmapped_program_is_invisible_to_the_graph_source() {
     // THE trade-off, stated rather than buried. A program with no recipe
     // references no paths, so the jail cannot see an escape through it. The
-    // heuristic catches these precisely because it guesses.
-    //
-    // This is why the default is unchanged and why `compare` exists.
+    // accepted remedy is a recipe addition, not shape-guessing.
     for command in ["frobnicate /etc/passwd", "unmapped-tool --out /etc/shadow"] {
         assert!(
-            !violations("heuristic", command).is_empty(),
-            "{command:?} must be caught by the heuristic"
-        );
-        assert!(
-            violations("graph", command).is_empty(),
+            violations(command).is_empty(),
             "{command:?} — if this ever starts being caught, the trade-off has \
              changed and the docs need updating"
         );
@@ -98,14 +81,14 @@ fn a_transfer_is_judged_on_its_local_side_only() {
         ("aws s3 sync s3://bucket /etc/cron.d", "/etc/cron.d"),
     ] {
         assert_eq!(
-            violations("graph", command),
+            violations(command),
             [expected],
             "{command:?} must be judged on its local side alone"
         );
     }
     // and a transfer with no local side at all is silent, rather than claiming
     // a bucket key is a file here
-    assert!(violations("graph", "aws s3 rm s3://bucket/key").is_empty());
+    assert!(violations("aws s3 rm s3://bucket/key").is_empty());
 }
 
 #[test]
@@ -140,10 +123,10 @@ fn the_extraction_carries_the_graph_it_was_parsed_from() {
 fn a_redirect_target_is_a_path_the_jail_sees() {
     // Issue #29. A redirect target is not one of the command's WORDS, so the
     // walk the jail did never looked at it: `echo x >> /etc/hosts` writes
-    // outside the project and was invisible to both sources.
+    // outside the project and was invisible.
     //
-    // Write-redirect targets are now fed through the same resolve-and-check-roots
-    // path that words already use, so both sources catch them.
+    // apply_redirects turns every write-redirect into Writes/Creates edges, so
+    // the graph sees them through resolved_references.
     for (command, expected) in [
         ("echo x >> /etc/hosts", "/etc/hosts"),
         ("echo x > /etc/passwd", "/etc/passwd"),
@@ -151,91 +134,70 @@ fn a_redirect_target_is_a_path_the_jail_sees() {
         ("frobnicate --quiet > /etc/passwd", "/etc/passwd"),
     ] {
         assert_eq!(
-            violations("heuristic", command),
-            [expected],
-            "{command:?} must be caught by the heuristic source"
-        );
-        assert_eq!(
-            violations("graph", command),
+            violations(command),
             [expected],
             "{command:?} must be caught by the graph source"
         );
     }
-    // read redirect (`<`): only the graph sees it — not a write-redirect target,
-    // not a word arg, so the heuristic has no path to find it
-    assert!(violations("heuristic", "cat < /etc/shadow").is_empty());
-    assert_eq!(violations("graph", "cat < /etc/shadow"), ["/etc/shadow"]);
+    // read redirect (`<`): a word-shape guess never saw these, the graph does
+    assert_eq!(violations("cat < /etc/shadow"), ["/etc/shadow"]);
     // ...and a redirect inside the project is still nobody's business
-    for mode in ["heuristic", "graph"] {
-        assert!(
-            violations(mode, "echo x > ./out.txt").is_empty(),
-            "{mode}: redirect inside project should pass"
-        );
-    }
+    assert!(
+        violations("echo x > ./out.txt").is_empty(),
+        "redirect inside project should pass"
+    );
     // a descriptor dup names no file at all
-    assert!(violations("heuristic", "cmd 2>&1").is_empty());
-    assert!(violations("graph", "cmd 2>&1").is_empty());
+    assert!(violations("cmd 2>&1").is_empty());
 }
 
 #[test]
 fn an_in_project_path_is_flagged_by_neither() {
-    for mode in ["heuristic", "graph", "compare"] {
-        assert!(violations(mode, "cat README.md").is_empty());
-        assert!(violations(mode, "cat src/main.rs").is_empty());
-    }
-}
-
-#[test]
-fn compare_decides_with_the_heuristic() {
-    // `compare` must change no decision at all — it only records. If it ever
-    // returns the graph's answer, enabling it to measure the switch would BE
-    // the switch.
-    for command in [
-        "sed -n '/needle/p' README.md",
-        "cat /etc/passwd",
-        "frobnicate /etc/passwd",
-        "cat README.md",
-    ] {
-        assert_eq!(
-            violations("compare", command),
-            violations("heuristic", command),
-            "compare changed the decision for {command:?}"
-        );
-    }
+    assert!(violations("cat README.md").is_empty());
+    assert!(violations("cat src/main.rs").is_empty());
 }
 
 #[test]
 fn the_default_is_graph() {
-    // no `jail_paths` at all now behaves as `graph`
-    let config = lictor::config::from_toml("[settings]\njail = \"deny\"\n", None).unwrap();
+    // no `jail_paths` at all behaves as `graph`, an explicit `"graph"` is a
+    // validated no-op, and every other value is a config ERROR — the heuristic
+    // died in #59, and a config asking for it must say so out loud rather than
+    // silently switch sources
+    let explicit = lictor::config::from_toml(
+        "[settings]\njail = \"deny\"\njail_paths = \"graph\"\n",
+        None,
+    )
+    .expect("explicit graph stays valid");
     for command in ["sed -n '/needle/p' README.md", "cat /etc/passwd"] {
         assert_eq!(
-            jail::violations(&bash::extract(command), &config, "/repo"),
-            violations("graph", command),
-            "the default drifted from graph for {command:?}"
+            jail::violations(&bash::extract(command), &explicit, "/repo"),
+            violations(command),
+            "explicit \"graph\" drifted from the default for {command:?}"
+        );
+    }
+    for value in ["heuristic", "compare", "junk"] {
+        let result = lictor::config::from_toml(
+            &format!("[settings]\njail = \"deny\"\njail_paths = \"{value}\"\n"),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "jail_paths = {value:?} must be a config error"
         );
     }
 }
 
 #[test]
-fn the_graph_source_catches_an_escape_the_heuristic_misses() {
+fn the_graph_source_catches_an_escape_the_heuristic_missed() {
     // Not only fewer false positives — a real false NEGATIVE closed.
     //
-    // `cd /tmp && cat passwd` reads a file outside the project, but the
-    // heuristic never even looks at `passwd`: the word has no `/`, no `~` and no
-    // `..`, so it is not path-SHAPED and the guess declines. The graph does not
-    // guess — cat's recipe says its argument is a path, so it resolves against
-    // the cd-tracked base and lands outside the repo.
-    // neither the bare name nor the `./` form is path-SHAPED, so the guess
-    // declines to look at either
+    // `cd /tmp && cat passwd` reads a file outside the project, but the old
+    // heuristic never even looked at `passwd`: the word had no `/`, no `~` and
+    // no `..`, so it was not path-SHAPED and the guess declined. The graph does
+    // not guess — cat's recipe says its argument is a path, so it resolves
+    // against the cd-tracked base and lands outside the repo.
     for escape in ["cd /tmp && cat passwd", "cd /tmp && cat ./passwd"] {
         assert_eq!(
-            violations("heuristic", escape),
-            ["/tmp"],
-            "if the heuristic starts catching {escape:?}, this comparison is moot"
-        );
-        assert_eq!(
-            violations("graph", escape),
+            violations(escape),
             ["/tmp", "/tmp/passwd"],
             "the graph source must see the file cat actually reads"
         );
@@ -246,13 +208,11 @@ fn the_graph_source_catches_an_escape_the_heuristic_misses() {
 fn cd_tracking_survives_the_switch() {
     // the resolution machinery is deliberately untouched: only the "is this a
     // path?" predicate moved, so a path-shaped word resolves identically
-    // `../` IS path-shaped, so both sources look at it and must agree
     let escape = "cd /tmp && cat ../etc/passwd";
-    assert_eq!(violations("graph", escape), violations("heuristic", escape));
     assert!(
-        violations("graph", escape).contains(&"/etc/passwd".to_string()),
+        violations(escape).contains(&"/etc/passwd".to_string()),
         "the cd-tracked base must still apply: {:?}",
-        violations("graph", escape)
+        violations(escape)
     );
 }
 
@@ -265,27 +225,19 @@ fn a_nested_shell_payload_is_not_a_blind_spot() {
     // It was also the one interpreter form with no backstop. `on_inline_script`
     // covers a shell reading its script from stdin or a heredoc, and it stays
     // quiet here precisely BECAUSE the payload parses.
-    //
-    // Asserting both sources, not just the graph, is the point: this is a
-    // regression test against the graph falling behind, and comparing it to the
-    // heuristic is what keeps it honest.
     for escape in [
         "bash -c 'cat /etc/passwd'",
         "sh -c 'rm -rf /etc/x'",
         "eval 'cat /etc/shadow'",
         "sudo bash -c 'cat /etc/passwd'",
-        // the shells the heuristic covered via bash.rs's SHELLS table and the
-        // graph did not, until they got recipes of their own
+        // the shells the old heuristic covered via bash.rs's SHELLS table and
+        // the graph did not, until they got recipes of their own
         "zsh -c 'cat /etc/passwd'",
         "dash -c 'cat /etc/passwd'",
     ] {
         assert!(
-            !violations("graph", escape).is_empty(),
+            !violations(escape).is_empty(),
             "the graph source sees nothing in {escape:?} — the payload is a blind spot again"
-        );
-        assert!(
-            !violations("heuristic", escape).is_empty(),
-            "the heuristic stopped catching {escape:?}, so this comparison is moot"
         );
     }
 }
@@ -296,28 +248,22 @@ fn an_interpreter_payload_is_still_not_re_parsed_as_shell() {
     // a python payload as bash would manufacture claims about a language this
     // parser cannot read.
     //
-    // NEITHER source flags it, and that is the right answer rather than a gap —
-    // this is the case `on_inline_script` exists for, and it does speak ("inline
-    // python script cannot be analyzed"). Asserting both are empty pins that the
-    // `shell` kind did not quietly widen to every `-c` flag in every recipe.
+    // Silence is the right answer rather than a gap — this is the case
+    // `on_inline_script` exists for, and it does speak ("inline python script
+    // cannot be analyzed"). Asserting empty pins that the `shell` kind did not
+    // quietly widen to every `-c` flag in every recipe.
     let payload = "python3 -c 'open(\"/etc/passwd\")'";
-    assert_eq!(violations("graph", payload), Vec::<String>::new());
-    assert_eq!(violations("heuristic", payload), Vec::<String>::new());
+    assert_eq!(violations(payload), Vec::<String>::new());
 }
 
 #[test]
 fn a_program_run_from_outside_the_jail_is_an_escape() {
     // A hole that predates the graph entirely: `walk_words` skips word 0, so
-    // the jail has never looked at the program under EITHER source. Asserting
-    // the heuristic finds nothing is the point — this is the graph getting
-    // ahead of it, not the graph catching up.
+    // the jail never looked at the program word until the graph's Execs
+    // references got ahead of it.
     for escape in ["/tmp/exploit.sh", "../../etc/evil.sh", "/tmp/x/../evil.sh"] {
         assert!(
-            violations("heuristic", escape).is_empty(),
-            "the heuristic started catching {escape:?} — this test is measuring the wrong thing now"
-        );
-        assert!(
-            !violations("graph", escape).is_empty(),
+            !violations(escape).is_empty(),
             "the graph source sees no program in {escape:?}"
         );
     }

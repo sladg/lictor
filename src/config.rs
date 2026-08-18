@@ -192,18 +192,6 @@ pub struct MinifyRule {
     pub allow: bool,
 }
 
-/// Where the jail's notion of "this word is a path" comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JailPaths {
-    /// the shape of the word — what lictor has always done, and what #4 keeps
-    /// being filed against
-    Heuristic,
-    /// only what a reviewed recipe says is a path
-    Graph,
-    /// both, deciding with the heuristic and recording the difference
-    Compare,
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -222,13 +210,8 @@ pub struct Settings {
     pub strip_program_paths: Option<Action>,
     #[serde(default)]
     pub bin_dirs: Option<Vec<String>>,
-    // where the jail gets its idea of "this word is a path":
-    //   heuristic (default) — the shape of the word, as always
-    //   graph               — only what a reviewed recipe says is a path
-    //   compare             — run both, decide with the heuristic, record the
-    //                         disagreements in the audit log
-    // `compare` exists so the switch can be judged against real usage before it
-    // changes anything. See docs/features/jail.md.
+    // validated no-op since #59: the graph is the only path source. Absent or
+    // "graph" is fine; anything else is a config error (see finalize).
     #[serde(default)]
     pub jail_paths: Option<String>,
     // catalog bundles to activate at built-in defaults: recommended | read-only | paranoid
@@ -556,15 +539,6 @@ impl Config {
         self.settings.jail
     }
 
-    // unknown strings fall through to Graph — only "heuristic" opts back in
-    pub fn jail_paths(&self) -> JailPaths {
-        match self.settings.jail_paths.as_deref() {
-            Some("heuristic") => JailPaths::Heuristic,
-            Some("compare") => JailPaths::Compare,
-            _ => JailPaths::Graph,
-        }
-    }
-
     pub fn jail_allow(&self) -> &[String] {
         self.settings.jail_allow.as_deref().unwrap_or(&[])
     }
@@ -617,6 +591,15 @@ impl Config {
     // expands bundles + [catalog.*] blocks into plain bash/minify rules;
     // must run once after all files merged, before compiling rules
     pub fn finalize(&mut self) -> Result<(), String> {
+        // the shape heuristic died with #59; the key survives as a validated
+        // no-op so a stale `"graph"` line doesn't break configs
+        if let Some(value) = self.settings.jail_paths.as_deref()
+            && value != "graph"
+        {
+            return Err(format!(
+                "settings.jail_paths: \"{value}\" is not supported — the graph is the only path source now; remove the key (or set \"graph\")"
+            ));
+        }
         for (name, setting) in &self.modules {
             crate::modules::validate(name, *setting)?;
         }

@@ -75,9 +75,6 @@ pub struct Extraction {
     // literal values of `NAME=val` command prefixes (D=/tmp/x cmd) — dropped from
     // `words`, kept here so path-hygiene modules can see the scratch/abs path
     pub assignments: Vec<String>,
-    // write-redirect target paths (echo x > /tmp/y, cmd >> log) — neither words
-    // nor assignments, kept so path rules can flag where output is spilled
-    pub redirect_targets: Vec<String>,
     // names of functions defined in the source; path_check must not flag their calls
     pub functions: Vec<String>,
     // The typed graph for this command line, lowered from the SAME tree this
@@ -287,11 +284,6 @@ fn walk(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
             out.device_write = Some(format!("write to raw device `{dest}`"));
         }
     }
-    if node.kind() == "file_redirect"
-        && let Some(target) = redirect_write_target(node, ctx.source)
-    {
-        out.redirect_targets.push(target);
-    }
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
             walk(child, ctx, out);
@@ -348,9 +340,9 @@ fn collect_command(node: Node, ctx: &mut ParseCtx, out: &mut Extraction) {
     }
     // variants: raw, wrapper-stripped, global-flag-normalized (git -C x commit -> git commit);
     // deny/ask rules check every variant, allow coverage is computed per site
-    let stripped = strip_wrappers(&words);
+    let stripped = graph_stripped(&ctx.graph, &words);
     let effective = stripped.as_ref().unwrap_or(&words);
-    let flag_normalized = strip_global_flags(effective);
+    let flag_normalized = graph_flag_normalized(effective);
 
     derive_nested(&words, ctx.depth, out);
     if let Some(stripped) = &stripped {
@@ -530,23 +522,6 @@ fn writes_via_redirect(node: Node, source: &str) -> bool {
     false
 }
 
-// destination path of a *write* redirect (>, >>, &>, N>), skipping fd dups
-// (2>&1), numeric fds, and /dev/null; None for read redirects (< file). Text is
-// raw — dynamic `$VAR/x` targets are left for the path module to filter out.
-fn redirect_write_target(node: Node, source: &str) -> Option<String> {
-    let text = node.utf8_text(source.as_bytes()).ok()?;
-    let operator = text.trim_start_matches(|c: char| c.is_ascii_digit());
-    if !operator.starts_with('>') && !operator.starts_with("&>") {
-        return None;
-    }
-    let dest = node.named_child(node.named_child_count().saturating_sub(1))?;
-    if dest.kind() == "number" {
-        return None;
-    }
-    let path = dest.utf8_text(source.as_bytes()).ok()?;
-    (path != "/dev/null" && !path.starts_with('&')).then(|| path.to_string())
-}
-
 fn redirect_writes_file(stmt: Node, source: &str) -> bool {
     for i in 0..stmt.named_child_count() {
         let Some(child) = stmt.named_child(i) else {
@@ -588,199 +563,78 @@ fn is_last_command(node: Node, list: Node) -> bool {
     last.is_some_and(|c| c.id() == node.id())
 }
 
-struct Wrapper {
-    name: &'static str,
-    flags_with_arg: &'static [&'static str],
-    skip_positional: usize,
-    skip_env_assigns: bool,
-}
-
-const WRAPPERS: &[Wrapper] = &[
-    Wrapper {
-        name: "env",
-        flags_with_arg: &["-u", "-C", "-S"],
-        skip_positional: 0,
-        skip_env_assigns: true,
-    },
-    Wrapper {
-        name: "sudo",
-        flags_with_arg: &["-u", "-g", "-p", "-h", "-C", "-D", "-R", "-T", "-U"],
-        skip_positional: 0,
-        skip_env_assigns: true,
-    },
-    Wrapper {
-        name: "doas",
-        flags_with_arg: &["-u"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "command",
-        flags_with_arg: &[],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "builtin",
-        flags_with_arg: &[],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "exec",
-        flags_with_arg: &["-a"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "nohup",
-        flags_with_arg: &[],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "setsid",
-        flags_with_arg: &[],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "nice",
-        flags_with_arg: &["-n"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "ionice",
-        flags_with_arg: &["-c", "-n", "-p"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "stdbuf",
-        flags_with_arg: &["-i", "-o", "-e"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "timeout",
-        flags_with_arg: &["-k", "-s", "--signal", "--kill-after"],
-        skip_positional: 1,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "flock",
-        flags_with_arg: &["-w", "--timeout", "-E", "--conflict-exit-code"],
-        skip_positional: 1,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "taskset",
-        flags_with_arg: &["-c"],
-        skip_positional: 1,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "cpulimit",
-        flags_with_arg: &["-l", "-p", "-e"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "time",
-        flags_with_arg: &[],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "xargs",
-        flags_with_arg: &[
-            "-a", "-d", "-E", "-e", "-I", "-i", "-L", "-l", "-n", "-P", "-s", "-S",
-        ],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-    Wrapper {
-        name: "watch",
-        flags_with_arg: &["-n", "--interval"],
-        skip_positional: 0,
-        skip_env_assigns: false,
-    },
-];
-
-// peels wrapper programs (sudo env xargs ...) so rules see the real command;
-// returns None when nothing was stripped
-fn strip_wrappers(words: &[Word]) -> Option<Vec<Word>> {
-    let mut current = words.to_vec();
-    let mut stripped_any = false;
-    while let Some(program) = current.first().and_then(|w| w.text.clone()) {
-        let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == basename(&program)) else {
-            break;
-        };
-        let mut idx = 1;
-        while idx < current.len() {
-            let Some(text) = current[idx].text.as_deref() else {
-                break;
-            };
-            if wrapper.skip_env_assigns && is_env_assign(text) {
-                idx += 1;
-            } else if text.starts_with('-') && text != "-" && text != "--" {
-                let takes_arg = wrapper.flags_with_arg.contains(&text);
-                idx += if takes_arg { 2 } else { 1 };
-            } else if text == "--" {
-                idx += 1;
-                break;
-            } else {
-                break;
+// wrapper-stripped variant from the graph's `Spawns` chain: the innermost local
+// payload whose words are a suffix of this command's words. The recipes'
+// `kind = "cmd"` args are the source of truth for what peels — no hand-list.
+// The suffix check is what keeps embedded payloads (`find . -exec rm {} ;` —
+// the `;` belongs to find, not rm) from producing a junk variant, and the
+// locality check keeps remote payloads (`ssh host rm x`) out of local rules.
+fn graph_stripped(graph: &crate::graph::Graph, words: &[Word]) -> Option<Vec<Word>> {
+    let first = words.first()?;
+    let (outer, _) = graph
+        .commands()
+        .find(|(_, c)| c.spans.iter().any(|s| s.start == first.start))?;
+    let mut candidates: Vec<crate::graph::NodeId> = Vec::new();
+    let mut frontier = vec![outer];
+    while let Some(id) = frontier.pop() {
+        for edge in &graph.edges {
+            if edge.kind != crate::graph::EdgeKind::Spawns || edge.from != id {
+                continue;
             }
+            let crate::graph::Node::Command(payload) = &graph.nodes[edge.to] else {
+                continue;
+            };
+            // remote payloads run on another machine and must not feed local variants
+            if payload.locality.is_remote() || payload.host.is_some() {
+                continue;
+            }
+            candidates.push(edge.to);
+            frontier.push(edge.to);
         }
-        idx += wrapper.skip_positional;
-        if idx >= current.len() {
-            return None;
-        }
-        current = current[idx..].to_vec();
-        stripped_any = true;
     }
-    stripped_any.then_some(current)
+    // innermost valid payload wins — same result as the old iterative peel
+    let mut best: Option<usize> = None;
+    for id in candidates {
+        let Some(start) = graph.nodes[id].spans().first().map(|s| s.start) else {
+            continue;
+        };
+        let Some(idx) = words.iter().position(|w| w.start == start) else {
+            continue;
+        };
+        if idx == 0 {
+            continue;
+        }
+        // a wrapper payload's program IS an outer word; a grafted re-parse
+        // (`bash -c 'rm x'`) borrows the holder string's span, so the word
+        // there is the whole script, not the program — name mismatch drops it
+        let crate::graph::Node::Command(payload) = &graph.nodes[id] else {
+            continue;
+        };
+        if words[idx].text.as_deref() != payload.name.as_deref() {
+            continue;
+        }
+        // the payload's spans are its consumed run (claim_payload_words) — a
+        // valid slice point means every later word belongs to the payload
+        let owned: Vec<usize> = graph.nodes[id].spans().iter().map(|s| s.start).collect();
+        if words[idx + 1..].iter().all(|w| owned.contains(&w.start)) && best.is_none_or(|b| idx > b)
+        {
+            best = Some(idx);
+        }
+    }
+    best.map(|idx| words[idx..].to_vec())
 }
 
-const GLOBAL_FLAGS: &[(&str, &[&str])] = &[
-    // `-c <cfg>` IS normalized so `git -c user.email=x commit` still matches the
-    // `git commit` ban. Config-injection (`git -c core.pager=!sh log`) is caught by
-    // the gtfobins catalog on the un-normalized variant, where deny beats the
-    // normalized variant's git-read allow.
-    (
-        "git",
-        &[
-            "-C",
-            "-c",
-            "--git-dir",
-            "--work-tree",
-            "--namespace",
-            "--exec-path",
-        ],
-    ),
-    (
-        "kubectl",
-        &[
-            "-n",
-            "--namespace",
-            "--context",
-            "--kubeconfig",
-            "--cluster",
-            "--user",
-            "-s",
-            "--server",
-        ],
-    ),
-];
-
-// git -C /x commit -> git commit, so subcommand rules can't be evaded via global flags
-fn strip_global_flags(words: &[Word]) -> Option<Vec<Word>> {
+// flag-normalized variant from the recipes: a program whose map declares
+// subcommand entries gets its leading flags (+ `takes = true` values) dropped,
+// so `git -C x commit` still matches a `git commit` rule. The bare entry's
+// flag table is the single source of truth for which flags take values.
+// `-c <cfg>` IS normalized so `git -c user.email=x commit` still matches the
+// `git commit` ban. Config-injection (`git -c core.pager=!sh log`) is caught by
+// the gtfobins catalog on the un-normalized variant, where deny beats the
+// normalized variant's git-read allow.
+fn graph_flag_normalized(words: &[Word]) -> Option<Vec<Word>> {
     let program = words.first()?.text.as_deref()?;
-    let (_, flags_with_arg) = GLOBAL_FLAGS
-        .iter()
-        .find(|(name, _)| *name == basename(program))?;
+    let flags = crate::cmdmap::Maps::shipped().prefix_flags(basename(program))?;
     let mut idx = 1;
     while idx < words.len() {
         let Some(text) = words[idx].text.as_deref() else {
@@ -789,8 +643,8 @@ fn strip_global_flags(words: &[Word]) -> Option<Vec<Word>> {
         if !text.starts_with('-') {
             break;
         }
-        let takes_arg = !text.contains('=') && flags_with_arg.contains(&text);
-        idx += if takes_arg { 2 } else { 1 };
+        let takes = !text.contains('=') && flags.get(text).is_some_and(|f| f.takes);
+        idx += if takes { 2 } else { 1 };
     }
     if idx == 1 || idx >= words.len() {
         return None;
@@ -798,15 +652,6 @@ fn strip_global_flags(words: &[Word]) -> Option<Vec<Word>> {
     let mut normalized = vec![words[0].clone()];
     normalized.extend_from_slice(&words[idx..]);
     Some(normalized)
-}
-
-fn is_env_assign(text: &str) -> bool {
-    match text.split_once('=') {
-        Some((name, _)) => {
-            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        }
-        None => false,
-    }
 }
 
 pub fn basename(program: &str) -> &str {

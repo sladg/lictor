@@ -35,6 +35,10 @@ name = "kubectl"
 "--context" = { takes = true }
 "-l" = { takes = true }
 "--selector" = { takes = true }
+"--cluster" = { takes = true }
+"--user" = { takes = true }
+"-s" = { takes = true }
+"--server" = { takes = true }
 
 # `kubectl exec POD -- COMMAND...` — 425 invocations. The container is the
 # machine, the rest of the line is the payload, and `--` (when present) is the

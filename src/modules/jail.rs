@@ -1,6 +1,6 @@
 use super::{ModuleCtx, Plan};
 use crate::bash::{Command, Extraction};
-use crate::config::{Config, JailPaths, ModuleSetting};
+use crate::config::{Config, ModuleSetting};
 
 // literal argument words that look like filesystem paths and resolve outside
 // the project and every allowed root. Lexical only: `~` expanded, `.`/`..`
@@ -87,19 +87,6 @@ pub fn violation_for_path(path: &str, config: &Config, cwd: &str) -> Option<Stri
 pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = roots(config, cwd, &home);
-    let source = config.jail_paths();
-
-    // guess a path from the word's shape; `walk_words` tracks `cd` as it goes
-    let by_shape = || {
-        let guess = |text: &str| {
-            let candidate = path_candidate(text);
-            looks_like_path(candidate).then(|| candidate.to_string())
-        };
-        walk_words(extraction, cwd, &home, true, guess)
-            .into_iter()
-            .map(|(_, resolved)| resolved)
-            .collect::<Vec<String>>()
-    };
 
     // take the paths from the recipes, keeping only what this jail is about
     let by_graph = || {
@@ -117,8 +104,10 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
             .filter(|r| {
                 r.reference.effect != crate::cmdmap::Effect::Exec || r.reference.path.contains('/')
             })
-            // /dev/null is a discard sink, not a real escape — the heuristic
-            // excludes it in redirect_write_target; the graph must match
+            // an assignment names a path without touching it — jail escapes are
+            // about touching; `PATH=/usr/bin:…` must not become an FP surface
+            .filter(|r| r.reference.effect != crate::cmdmap::Effect::Env)
+            // /dev/null is a discard sink, not a real escape
             .filter(|r| r.absolute != "/dev/null")
             .map(|r| r.absolute)
             .collect::<Vec<String>>()
@@ -134,66 +123,10 @@ pub fn violations(extraction: &Extraction, config: &Config, cwd: &str) -> Vec<St
         found
     };
 
-    // redirect targets (echo x >> /etc/hosts) are structural, not word args —
-    // walk_words and graph.resolved_references both miss them; check here so
-    // both sources stay honest about write-redirect escapes (issue #29).
-    // $VAR/.bashrc targets arrive as raw strings; expand_env_prefix recovers the
-    // real path (issue #52) — any $VAR leading an otherwise-known path suffix.
-    let redirect_paths = || {
-        extraction
-            .redirect_targets
-            .iter()
-            .filter_map(|raw| {
-                let candidate = path_candidate(raw);
-                let expanded_owned;
-                let effective = match expand_env_prefix(candidate) {
-                    Some(s) => {
-                        expanded_owned = s;
-                        expanded_owned.as_str()
-                    }
-                    None => candidate,
-                };
-                (looks_like_path(effective) || effective.contains('/'))
-                    .then(|| normalize(effective, cwd, &home))
-            })
-            .collect::<Vec<String>>()
-    };
-
-    // Each source only lists paths; the trust check, the dedupe and the order
-    // are shared, so the two cannot drift and `compare` compares like with like.
-    //
-    // redirect_paths() is NOT added to the graph arm: apply_redirects already
-    // turns every write-redirect into Writes/Creates edges, so by_graph() sees
-    // them through resolved_references. Adding it on both sides of compare would
-    // also blind the disagreement check to redirect-target differences.
-    match source {
-        JailPaths::Heuristic => outside([by_shape(), redirect_paths()].concat()),
-        JailPaths::Graph => outside(by_graph()),
-        // record what the graph would have said, decide with the heuristic —
-        // measuring the switch must not be the switch
-        JailPaths::Compare => {
-            let old = outside([by_shape(), redirect_paths()].concat());
-            report_disagreement(extraction, &old, &outside(by_graph()));
-            old
-        }
-    }
-}
-
-/// Log where the two sources disagree, without acting on it.
-///
-/// A path the graph misses that the heuristic caught is the dangerous direction
-/// — that is a jail escape the new source would wave through — so it is recorded
-/// separately from the false positives the graph is expected to remove.
-fn report_disagreement(extraction: &Extraction, heuristic: &[String], graph: &[String]) {
-    let only_heuristic: Vec<&String> = heuristic.iter().filter(|p| !graph.contains(p)).collect();
-    let only_graph: Vec<&String> = graph.iter().filter(|p| !heuristic.contains(p)).collect();
-    if only_heuristic.is_empty() && only_graph.is_empty() {
-        return;
-    }
-    eprintln!(
-        "lictor: jail_paths=compare — command {:?}\n           only the heuristic flags (the graph would MISS these): {only_heuristic:?}\n           only the graph flags (new): {only_graph:?}",
-        extraction.source
-    );
+    // redirect targets need no side channel: apply_redirects already turns
+    // every write-redirect into Writes/Creates edges, so by_graph() sees them
+    // through resolved_references (issue #29, #52).
+    outside(by_graph())
 }
 
 // the inside-the-project mirror of `violations`: an absolute path pointing at a
@@ -239,7 +172,7 @@ fn relative_hints_at(
         };
         is_absolute(candidate).then(|| candidate.to_string())
     };
-    let mut candidates: Vec<String> = walk_words(extraction, cwd, home, false, candidate_of)
+    let mut candidates: Vec<String> = walk_words(extraction, cwd, home, candidate_of)
         .into_iter()
         .map(|(_, resolved)| resolved)
         .collect();
@@ -292,44 +225,33 @@ fn classify_in_project(resolved: &str, root: &str) -> Option<String> {
     None
 }
 
-// cd-aware walk over every literal argument word whose raw text passes
-// `interesting`, yielding (raw, resolved) pairs; shared by the outside-project
-// check, relative_hints, and path_rules so all agree on what a chain's `cd`
-// sequence resolves relative paths against.
+// cd-aware walk over every literal argument word, yielding (raw, resolved)
+// pairs — relative_hints' traversal now that the security checks read the
+// graph. Synthetic commands (bash -c/eval/find -exec payloads) are skipped:
+// a style nudge about the outer command's own literal arguments has no
+// opinion on what a sub-shell string happens to contain.
 //
 // `cd` earlier in the same chain changes the base every later relative path
 // resolves against (`cd .. && cat ../secret` escapes further than `cat`'s
 // own literal ".." suggests). Track it sequentially. A subshell's `cd`
-// (synthetic: bash -c/eval/find -exec) never leaks back to the parent
-// shell, so only a non-synthetic `cd` updates the tracked cwd.
-//
-// `include_synthetic` controls whether words *inside* a nested shell
-// (`bash -c '...'`, `eval`, `find -exec`) are walked at all: the security
-// checks (jail, path_rules) want them (an escape hiding in a nested shell is
-// still an escape), relative_hints doesn't (a style nudge about the outer
-// command's own literal arguments has no opinion on what a sub-shell string
-// happens to contain).
+// (synthetic) never leaks back to the parent shell, so only a non-synthetic
+// `cd` updates the tracked cwd.
 //
 // `candidate_of` turns a word's raw text into a path candidate, or None to
-// skip it — deliberately a caller-supplied strategy, not a shared one: the
-// security checks' `path_candidate` splits any `X=Y` word on its first `=` (a
-// security check would rather over-catch), which would misread an unrelated
-// word like a `bash -c 'D=/tmp/x cmd'` string as a flag=value pair.
-// relative_hints wants a much more conservative split (only genuine
+// skip it — relative_hints wants a very conservative split (only genuine
 // `--flag=value` words).
-// five. A visitor: the callback is the point, the rest configure one traversal.
+// four. A visitor: the callback is the point, the rest configure one traversal.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_words(
     extraction: &Extraction,
     cwd: &str,
     home: &str,
-    include_synthetic: bool,
     candidate_of: impl Fn(&str) -> Option<String>,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut effective_cwd = cwd.to_string();
     for command in &extraction.commands {
-        if command.synthetic && !include_synthetic {
+        if command.synthetic {
             continue;
         }
         for word in command.words.iter().skip(1) {
@@ -449,23 +371,6 @@ fn git_probe(cwd: &str, arg: &str) -> Option<String> {
     (!root.is_empty()).then(|| root.to_string())
 }
 
-// value after `flag=`, plus the path glued onto a short flag (-o/etc/x -> /etc/x);
-// the glued case requires an alphabetic flag letter so `-1/2`-style args don't false-trip
-pub(crate) fn path_candidate(text: &str) -> &str {
-    let value = text.split_once('=').map_or(text, |(_, v)| v);
-    if value.starts_with('-')
-        && !value.starts_with("--")
-        && value
-            .chars()
-            .nth(1)
-            .is_some_and(|c| c.is_ascii_alphabetic())
-        && let Some(idx) = value.find('/')
-    {
-        return &value[idx..];
-    }
-    value
-}
-
 // expand a leading $VAR or ${VAR} using the live environment — handles redirect
 // targets and any raw string that might begin with a variable reference. Returns
 // None when the text doesn't start with `$`, the variable is unset, or the
@@ -486,15 +391,6 @@ pub(crate) fn expand_env_prefix(raw: &str) -> Option<String> {
     }
     let value = std::env::var(var_name).ok()?;
     Some(format!("{value}{rest}"))
-}
-
-pub(crate) fn looks_like_path(text: &str) -> bool {
-    text.starts_with('/')
-        || text == "~"
-        || text.starts_with("~/")
-        || text == ".."
-        || text.starts_with("../")
-        || text.contains("/../")
 }
 
 pub(crate) fn normalize(path: &str, cwd: &str, home: &str) -> String {
@@ -542,22 +438,6 @@ mod tests {
 
     fn check(command: &str, allow: &[&str]) -> Vec<String> {
         violations(&bash::extract(command), &config(allow), CWD)
-    }
-
-    fn config_heuristic(allow: &[&str]) -> Config {
-        let list = allow
-            .iter()
-            .map(|p| format!("\"{p}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        toml::from_str(&format!(
-            "[settings]\njail = \"ask\"\njail_paths = \"heuristic\"\njail_allow = [{list}]"
-        ))
-        .expect("test config parses")
-    }
-
-    fn check_heuristic(command: &str, allow: &[&str]) -> Vec<String> {
-        violations(&bash::extract(command), &config_heuristic(allow), CWD)
     }
 
     // ── relative_hints: the in-project absolute-path nudge (abs-paths module) ──
@@ -710,7 +590,7 @@ mod tests {
     #[test]
     fn nested_shell_arg_skipped() {
         // relative_hints only nags the outer command's own literal args, never a
-        // sub-shell string's contents (include_synthetic = false)
+        // sub-shell string's contents (walk_words skips synthetic commands)
         assert!(
             hints_for("bash -c 'cat /Users/nobody/project/src/main.rs'", "deny")
                 .denies
@@ -730,15 +610,6 @@ mod tests {
             vec!["/Users/nobody/other"]
         );
         assert!(!check("cat ~/.zshrc", &[]).is_empty());
-    }
-
-    #[test]
-    fn flag_attached_value_flagged() {
-        // path_candidate extracts the value from --flag=path — heuristic-specific
-        assert_eq!(
-            check_heuristic("rg x --path=/var/log/sys.log", &[]),
-            vec!["/var/log/sys.log"]
-        );
     }
 
     #[test]
@@ -802,17 +673,6 @@ mod tests {
             check("cat ${HOME}/.aws/creds", &[]),
             vec![format!("{home}/.aws/creds")]
         );
-    }
-
-    #[test]
-    fn glued_flag_path_flagged() {
-        // path_candidate strips the alphabetic flag letter off -X/path — heuristic-specific
-        assert_eq!(
-            check_heuristic("tail -o/etc/shadow", &[]),
-            vec!["/etc/shadow"]
-        );
-        // alphabetic flag letter required — `-1/2`-style args stay untouched
-        assert!(check_heuristic("bc -1/2", &[]).is_empty());
     }
 
     #[test]

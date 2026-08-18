@@ -330,6 +330,8 @@ pub enum EdgeKind {
     Deletes,
     Creates,
     Execs,
+    /// command → assignment value it names without touching (`OUT=/tmp/x cmd`)
+    Names,
     Filters(FilterKind),
 }
 
@@ -386,6 +388,7 @@ fn effect_of(kind: EdgeKind) -> Option<crate::cmdmap::Effect> {
         EdgeKind::Deletes => Some(Effect::Delete),
         EdgeKind::Creates => Some(Effect::Create),
         EdgeKind::Execs => Some(Effect::Exec),
+        EdgeKind::Names => Some(Effect::Env),
         _ => None,
     }
 }
@@ -773,6 +776,14 @@ impl Graph {
                 _ => (None, Locality::Local, None),
             };
             let Some(path) = path else { continue };
+            // a `Names` target is the whole `NAME=val` word; the claim is about
+            // the value
+            let path = if edge.kind == EdgeKind::Names {
+                path.split_once('=')
+                    .map_or(path.clone(), |(_, v)| v.to_string())
+            } else {
+                path
+            };
             out.push(Reference {
                 command: edge.from,
                 target: edge.to,
@@ -927,7 +938,9 @@ struct Lowering<'a> {
 impl Lowering<'_> {
     fn walk(&mut self, node: TsNode, enclosing: Option<NodeId>) {
         match node.kind() {
-            "command" => {
+            // `export OUT=/tmp/x` is a command whose assignment argument the
+            // grammar keeps as a `variable_assignment` — same lowering
+            "command" | "declaration_command" => {
                 let id = self.lower_command(node);
                 if let Some(prev) = enclosing {
                     // a command nested inside another's argument list (`find
@@ -1216,6 +1229,7 @@ impl Lowering<'_> {
                     let value = self.lower_value(child);
                     spans.extend(self.graph.nodes[value].spans().iter().copied());
                     self.graph.link(id, value, EdgeKind::Arg(usize::MAX));
+                    self.graph.link(id, value, EdgeKind::Names);
                 }
                 "file_redirect" | "herestring_redirect" => {
                     let stream = self.lower_stream(child);
@@ -1626,6 +1640,14 @@ fn resolve_text(node: TsNode, source: &str) -> Option<String> {
         }
         // $HOME and ${HOME} are knowable: map to ~ so the existing normalize
         // path handles expansion. All other variables remain dynamic (None).
+        "variable_assignment" => {
+            let name = node
+                .child_by_field_name("name")?
+                .utf8_text(source.as_bytes())
+                .ok()?;
+            let value = resolve_text(node.child_by_field_name("value")?, source)?;
+            Some(format!("{name}={value}"))
+        }
         "simple_expansion" => {
             let name = node.named_child(0)?.utf8_text(source.as_bytes()).ok()?;
             (name == "HOME").then_some("~".to_string())
@@ -1960,9 +1982,9 @@ fn apply_redirects(graph: &mut Graph) {
 ///
 /// The `/` test is the shell's rule, not the shape heuristic returning — a name
 /// containing a slash is executed as a pathname, one without is searched for on
-/// `PATH` (POSIX XCU 2.9.1.1). `looks_like_path` was wrong because shape stood
-/// in for *meaning*, which only a recipe can give; nothing is being guessed
-/// here, which is also why a bare `npm` mints nothing.
+/// `PATH` (POSIX XCU 2.9.1.1). The old shape heuristic was wrong because shape
+/// stood in for *meaning*, which only a recipe can give; nothing is being
+/// guessed here, which is also why a bare `npm` mints nothing.
 ///
 /// A wrapper's payload (`sudo /tmp/x.sh`) already has an `Execs` edge and owns
 /// no bytes — the span test is what tells it from a command written in source.
@@ -2107,6 +2129,7 @@ fn apply_program(
                 graph.link(command, payload, EdgeKind::Execs);
             }
             let inner: Vec<(NodeId, bool)> = run[1..].to_vec();
+            claim_payload_words(graph, payload, &inner);
             apply_program(graph, payload, &payload_name, &inner, ctx);
         }
     }
@@ -2243,6 +2266,7 @@ fn apply_program(
                 emit_effects(graph, command, *id, arg.kind, &arg.effect, ctx);
             }
         }
+        claim_payload_words(graph, payload, &inner);
         apply_program(graph, payload, &payload_name, &inner, ctx);
         return;
     }
@@ -2373,6 +2397,19 @@ struct Payload {
     name: String,
     /// the machine the recipe named, if it named one
     machine: Option<String>,
+}
+
+/// A payload command owns the words of its consumed run — the spans say "this
+/// text is the inner command", which is what lets the rule-variant bridge slice
+/// the outer word list at the payload without a wrapper hand-list.
+fn claim_payload_words(graph: &mut Graph, payload: NodeId, inner: &[(NodeId, bool)]) {
+    let extra: Vec<Span> = inner
+        .iter()
+        .flat_map(|(id, _)| graph.nodes[*id].spans().to_vec())
+        .collect();
+    if let Node::Command(command) = &mut graph.nodes[payload] {
+        command.spans.extend(extra);
+    }
 }
 
 fn spawn_payload(graph: &mut Graph, outer: NodeId, payload: Payload) -> NodeId {
@@ -2598,6 +2635,7 @@ fn emit_effects(
             Effect::Create => EdgeKind::Creates,
             // exec is checked against `cmd`, never a path
             Effect::Exec => continue,
+            Effect::Env => EdgeKind::Names,
         };
         graph.link(command, value, edge);
     }

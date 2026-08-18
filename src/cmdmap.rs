@@ -252,6 +252,9 @@ pub enum Effect {
     Delete,
     Create,
     Exec,
+    /// named by a prefix assignment (`OUT=/tmp/x cmd`) — none of the above
+    /// touch the path, so `on = [...]` rules never match it
+    Env,
 }
 
 impl Maps {
@@ -429,6 +432,23 @@ impl Maps {
                 .iter()
                 .find(|p| p.name == name && p.subcommand.is_none())
         })
+    }
+
+    /// The bare entry's flag table for a program that also has subcommand
+    /// entries — the prefix flags a subcommand can hide behind. `None` for
+    /// programs without subcommands: only subcommand-bearing programs get a
+    /// flag-normalized rule variant, everything else has no "global flags".
+    pub fn prefix_flags(&self, name: &str) -> Option<&HashMap<String, Flag>> {
+        self.programs
+            .iter()
+            .any(|p| p.name == name && p.subcommand.is_some())
+            .then(|| {
+                self.programs
+                    .iter()
+                    .find(|p| p.name == name && p.subcommand.is_none())
+                    .map(|p| &p.flags)
+            })
+            .flatten()
     }
 
     pub fn len(&self) -> usize {

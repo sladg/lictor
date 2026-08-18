@@ -1,6 +1,6 @@
 use super::{ModuleCtx, Plan};
 use crate::cmdmap::Effect;
-use crate::config::{Action, Config, JailPaths, PathRule};
+use crate::config::{Action, Config, PathRule};
 use crate::modules::jail;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -71,22 +71,21 @@ pub(crate) fn find_rule<'a>(
         .map(|r| r.rule)
 }
 
-// `candidate_effects`: what this path is known to undergo (`None` = unknown,
-// i.e. a heuristic candidate). Eligibility:
-//   rule.on=None       → always eligible
-//   rule.on=Some(_)    + candidate None    → not eligible (on is graph-only)
-//   rule.on=Some(set)  + candidate Some(e) → eligible iff the two sets intersect
+// `candidate_effects`: what this path is known to undergo. Eligibility:
+//   rule.on=None      → always eligible
+//   rule.on=Some(set) → eligible iff the two sets intersect (an assignment
+//                       reference carries Effect::Env, which no `on` spelling
+//                       names — so `on` rules never match assignments)
 fn match_path<'a>(
     rules: &[CompiledPathRule<'a>],
     resolved: &str,
-    candidate_effects: Option<&[Effect]>,
+    candidate_effects: &[Effect],
 ) -> Option<(Action, String)> {
     let real = jail::real_path(resolved);
     rules.iter().find_map(|r| {
-        let eligible = match (&r.rule.on, candidate_effects) {
-            (None, _) => true,
-            (Some(_), None) => false,
-            (Some(rule_on), Some(candidate)) => rule_on.iter().any(|e| candidate.contains(e)),
+        let eligible = match &r.rule.on {
+            None => true,
+            Some(rule_on) => rule_on.iter().any(|e| candidate_effects.contains(e)),
         };
         if !eligible {
             return None;
@@ -114,77 +113,43 @@ pub fn plan(rules: &[CompiledPathRule], ctx: &ModuleCtx, out: &mut Plan) {
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = jail::normalize(cwd, cwd, &home);
 
-    // (absolute_path, effects_or_none): graph arm knows effects; heuristic doesn't
-    let candidates: Vec<(String, Option<Vec<Effect>>)> = match ctx.config.jail_paths() {
-        JailPaths::Graph => {
-            // aggregate per-path effect sets; a path touched by multiple references
-            // (e.g. mv source: Read + Delete) carries all of them
-            let mut path_effects: Vec<(String, Vec<Effect>)> = Vec::new();
-            for r in ctx
-                .extraction
-                .graph
-                .resolved_references(&cwd, &|path, base| {
-                    let expanded = jail::expand_env_prefix(path);
-                    jail::normalize(expanded.as_deref().unwrap_or(path), base, &home)
-                })
-            {
-                if r.reference.locality.is_remote() {
-                    continue;
-                }
-                if r.reference.effect == Effect::Exec && !r.reference.path.contains('/') {
-                    continue;
-                }
-                if r.absolute == "/dev/null" {
-                    continue;
-                }
-                if let Some(entry) = path_effects.iter_mut().find(|(p, _)| *p == r.absolute) {
-                    if !entry.1.contains(&r.reference.effect) {
-                        entry.1.push(r.reference.effect);
-                    }
-                } else {
-                    path_effects.push((r.absolute, vec![r.reference.effect]));
-                }
-            }
-            path_effects
-                .into_iter()
-                .map(|(p, e)| (p, Some(e)))
-                .collect()
+    // aggregate per-path effect sets; a path touched by multiple references
+    // (e.g. mv source: Read + Delete) carries all of them
+    let mut candidates: Vec<(String, Vec<Effect>)> = Vec::new();
+    for r in ctx
+        .extraction
+        .graph
+        .resolved_references(&cwd, &|path, base| {
+            let expanded = jail::expand_env_prefix(path);
+            jail::normalize(expanded.as_deref().unwrap_or(path), base, &home)
+        })
+    {
+        if r.reference.locality.is_remote() {
+            continue;
         }
-        // Heuristic or Compare: walk_words tracks cd-aware literal args, plus the
-        // two token classes the parser split off: NAME=val prefixes and redirect
-        // targets. Any word with a `/` is a candidate; non-paths just match no glob.
-        // Candidates carry no effects — rules with `on` never match them.
-        _ => {
-            let candidate_of = |text: &str| {
-                let candidate = jail::path_candidate(text);
-                (jail::looks_like_path(candidate) || candidate.contains('/'))
-                    .then(|| candidate.to_string())
-            };
-            let mut paths: Vec<String> =
-                jail::walk_words(ctx.extraction, &cwd, &home, true, candidate_of)
-                    .into_iter()
-                    .map(|(_, resolved)| resolved)
-                    .collect();
-            for raw in ctx
-                .extraction
-                .assignments
-                .iter()
-                .chain(&ctx.extraction.redirect_targets)
-            {
-                if jail::looks_like_path(raw) || raw.contains('/') {
-                    paths.push(jail::normalize(raw, &cwd, &home));
-                }
-            }
-            paths.into_iter().map(|p| (p, None)).collect()
+        if matches!(r.reference.effect, Effect::Exec | Effect::Env)
+            && !r.reference.path.contains('/')
+        {
+            continue;
         }
-    };
+        if r.absolute == "/dev/null" {
+            continue;
+        }
+        if let Some(entry) = candidates.iter_mut().find(|(p, _)| *p == r.absolute) {
+            if !entry.1.contains(&r.reference.effect) {
+                entry.1.push(r.reference.effect);
+            }
+        } else {
+            candidates.push((r.absolute, vec![r.reference.effect]));
+        }
+    }
 
     let mut seen: Vec<String> = Vec::new();
     for (resolved, effects) in candidates {
         if seen.contains(&resolved) {
             continue;
         }
-        let Some((action, message)) = match_path(rules, &resolved, effects.as_deref()) else {
+        let Some((action, message)) = match_path(rules, &resolved, &effects) else {
             continue;
         };
         seen.push(resolved);
@@ -208,7 +173,7 @@ pub fn check(rules: &[CompiledPathRule], path: &str, cwd: &str) -> Option<(Actio
     let home = std::env::var("HOME").unwrap_or_default();
     let cwd = jail::normalize(cwd, cwd, &home);
     let resolved = jail::normalize(path, &cwd, &home);
-    match_path(rules, &resolved, Some(&[Effect::Write, Effect::Create]))
+    match_path(rules, &resolved, &[Effect::Write, Effect::Create])
 }
 
 #[cfg(test)]
@@ -262,10 +227,9 @@ mod tests {
     #[test]
     fn scratch_var_assignment_matched() {
         // the `D=/private/tmp/...` scratchpad-exploit shape (corpus §6): the path
-        // is a NAME=val prefix the parser split off, not a plain arg.
-        // assignments are a heuristic-specific token class; use explicit heuristic.
+        // is a NAME=val prefix — a `names` reference in the graph.
         let plan = plan_bash(
-            &format!("[settings]\njail_paths = \"heuristic\"\n{TEMP}"),
+            TEMP,
             "D=/private/tmp/claude-501/scratchpad/exploit cargo build",
         );
         assert_eq!(plan.denies.len(), 1, "{:?}", plan.denies);
@@ -311,16 +275,7 @@ mod tests {
     #[test]
     fn export_assignment_matched() {
         // `export VAR=/tmp/x` — the path rides on an assignment word.
-        // assignments are a heuristic-specific token class; use explicit heuristic.
-        assert_eq!(
-            plan_bash(
-                &format!("[settings]\njail_paths = \"heuristic\"\n{TEMP}"),
-                "export OUT=/tmp/build"
-            )
-            .denies
-            .len(),
-            1
-        );
+        assert_eq!(plan_bash(TEMP, "export OUT=/tmp/build").denies.len(), 1);
     }
 
     #[test]
@@ -458,12 +413,11 @@ mod tests {
     }
 
     #[test]
-    fn on_rules_inert_under_heuristic() {
-        // heuristic candidates carry no effects; `on` is a graph-mode feature
-        let plan = plan_bash(
-            &format!("[settings]\njail_paths = \"heuristic\"\n{ETC_WRITE}"),
-            "echo x > /etc/motd",
-        );
+    fn on_rules_ignore_assignment_references() {
+        // an assignment names a path without touching it (Effect::Env), and no
+        // `on` spelling names Env — so an `on`-rule never fires on one, while
+        // the same rule without `on` would (export_assignment_matched)
+        let plan = plan_bash(ETC_WRITE, "CONF=/etc/motd cargo build");
         assert!(plan.denies.is_empty(), "{:?}", plan.denies);
     }
 
